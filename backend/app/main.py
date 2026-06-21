@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from sqlalchemy import create_engine, text
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -8,11 +9,147 @@ engine = create_engine(DATABASE_URL)
 
 app = FastAPI(title="Real Estate Asset Management API")
 
-@app.get("/")
-def read_root():
-    return {
-        "message": "Real Estate Asset Management API is running"
-    }
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            SELECT
+                (SELECT COUNT(*) FROM projects) AS project_count,
+                (SELECT COUNT(*) FROM asset_pools) AS asset_pool_count,
+                (SELECT COUNT(*) FROM trust_products) AS trust_product_count,
+                (SELECT COUNT(*) FROM investors) AS investor_count,
+                (SELECT COALESCE(SUM(raised_amount), 0) FROM trust_products) AS total_raised_amount,
+                (SELECT COALESCE(SUM(total_budget), 0) FROM projects) AS total_project_budget
+        """)).fetchone()
+
+    project_count = int(row.project_count)
+    asset_pool_count = int(row.asset_pool_count)
+    trust_product_count = int(row.trust_product_count)
+    investor_count = int(row.investor_count)
+    total_raised_amount = float(row.total_raised_amount)
+    total_project_budget = float(row.total_project_budget)
+
+    def fmt_money(value: float) -> str:
+        return f"¥{value:,.2f}"
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>房地产资产管理平台</title>
+    <style>
+        * {{
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
+            min-height: 100vh;
+            color: #e2e8f0;
+            padding: 2rem 1rem;
+        }}
+        .container {{
+            max-width: 960px;
+            margin: 0 auto;
+        }}
+        header {{
+            margin-bottom: 2.5rem;
+            text-align: center;
+        }}
+        header h1 {{
+            font-size: 1.75rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            color: #f8fafc;
+        }}
+        header p {{
+            margin-top: 0.5rem;
+            font-size: 0.95rem;
+            color: #94a3b8;
+        }}
+        .grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.25rem;
+        }}
+        .card {{
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 1.5rem;
+            backdrop-filter: blur(8px);
+            transition: transform 0.2s, border-color 0.2s;
+        }}
+        .card:hover {{
+            transform: translateY(-2px);
+            border-color: rgba(56, 189, 248, 0.4);
+        }}
+        .card-label {{
+            font-size: 0.875rem;
+            color: #94a3b8;
+            margin-bottom: 0.75rem;
+        }}
+        .card-value {{
+            font-size: 2rem;
+            font-weight: 700;
+            color: #f8fafc;
+            line-height: 1.2;
+        }}
+        .card-value.money {{
+            color: #38bdf8;
+            font-size: 1.75rem;
+        }}
+        .card-value.budget {{
+            color: #34d399;
+        }}
+        footer {{
+            margin-top: 2.5rem;
+            text-align: center;
+            font-size: 0.8rem;
+            color: #64748b;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>房地产资产管理平台</h1>
+            <p>数据概览 Dashboard</p>
+        </header>
+        <div class="grid">
+            <div class="card">
+                <div class="card-label">项目数量</div>
+                <div class="card-value">{project_count}</div>
+            </div>
+            <div class="card">
+                <div class="card-label">资产包数量</div>
+                <div class="card-value">{asset_pool_count}</div>
+            </div>
+            <div class="card">
+                <div class="card-label">信托产品数量</div>
+                <div class="card-value">{trust_product_count}</div>
+            </div>
+            <div class="card">
+                <div class="card-label">投资人数量</div>
+                <div class="card-value">{investor_count}</div>
+            </div>
+            <div class="card">
+                <div class="card-label">已募集总金额</div>
+                <div class="card-value money">{fmt_money(total_raised_amount)}</div>
+            </div>
+            <div class="card">
+                <div class="card-label">项目总预算</div>
+                <div class="card-value money budget">{fmt_money(total_project_budget)}</div>
+            </div>
+        </div>
+        <footer>Real Estate Asset Management API</footer>
+    </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 @app.get("/projects")
 def list_projects():
