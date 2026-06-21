@@ -1,0 +1,75 @@
+---
+description: Coding standards — FastAPI, PostgreSQL, SQLAlchemy; keep it simple
+globs: backend/**/*.py,**/*.sql
+alwaysApply: false
+---
+
+# Coding Standards
+
+Stack: **FastAPI + PostgreSQL + SQLAlchemy (`text()`)**. Prefer the simplest working solution.
+
+## Do Not Introduce
+
+- **Redis** — no caching layer, sessions, or queues via Redis
+- **Kafka** — no event streaming or message brokers
+- **ORM models** — no `declarative_base()`, unless explicitly requested
+- **Extra layers** — no repository/service/DI frameworks, routers split across many files, or abstractions used only once
+- **New infra** — no Celery, Elasticsearch, GraphQL, microservices split
+
+## FastAPI
+
+- Keep routes in `backend/app/main.py` until the file becomes genuinely hard to maintain
+- Use plain functions; `@app.get` / `@app.post` with explicit return types
+- JSON endpoints return `dict` / `list`; HTML Dashboard uses `HTMLResponse`
+- Errors: `raise HTTPException(status_code=404, detail="...")` for missing resources
+- Read config from env (`DATABASE_URL`); do not hardcode credentials
+
+```python
+# ✅ Match existing pattern
+@app.get("/items")
+def list_items():
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT id, name FROM items ORDER BY id"))
+        return [{"id": row.id, "name": row.name} for row in result]
+```
+
+## SQLAlchemy
+
+- Single module-level `engine = create_engine(DATABASE_URL)`
+- Use `with engine.connect() as conn:` per request handler
+- Queries via `sqlalchemy.text()` with named params (`:id`), not string concatenation
+- Map rows to dicts manually; convert `NUMERIC` → `float`, dates → `str`
+
+```python
+# ✅ Parameterized query
+conn.execute(text("SELECT * FROM projects WHERE id = :id"), {"id": project_id})
+```
+
+## PostgreSQL
+
+- Schema changes go in `schema.sql`; seed/test data in `seed.sql`
+- Use existing types: `BIGINT`, `NUMERIC(18,2)`, `VARCHAR`, `DATE`, `TIMESTAMPTZ`
+- Prefer `COALESCE`, `SUM`, `COUNT` in SQL over Python aggregation when straightforward
+- Add indexes only when a query pattern clearly needs them; avoid premature optimization
+- Keep FK relationships aligned with `business.mdc`
+
+## Simplicity Checklist
+
+Before adding code, ask:
+
+1. Can this be a single SQL query + a route function?
+2. Does an existing endpoint pattern already solve it?
+3. Am I adding a library or file that serves only one use case?
+
+If yes to (3) and no strong need — **don't add it**.
+
+## Response Conventions
+
+| Type | Rule |
+|------|------|
+| Money | `float(value)` |
+| Date / timestamp | `str(value)` or `None` |
+| Counts | `int(value)` |
+| Lists | Return `[]`, not `null`, when empty |
+
+Rebuild after backend changes: `docker compose up -d --build backend`

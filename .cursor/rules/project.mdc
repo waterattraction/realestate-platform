@@ -1,0 +1,77 @@
+---
+description: 房地产资产证券化平台 — project overview, stack, and constraints
+alwaysApply: true
+---
+
+# 房地产资产证券化平台
+
+**项目名称**：房地产资产证券化平台  
+**英文名称**：Real Estate Securitization Platform
+
+Use these names consistently in UI copy, FastAPI `title`, HTML `<title>`, comments, and docs.
+
+## 技术栈
+
+| Layer | Technology |
+|-------|------------|
+| API | FastAPI (`backend/app/main.py`) |
+| Database | PostgreSQL 16 (`schema.sql`, `seed.sql`) |
+| Data access | SQLAlchemy — direct `text()` queries |
+| Runtime | Docker Compose (`postgres` + `backend`) |
+
+## 架构原则
+
+1. **保持架构简单** — 单体 FastAPI 应用，不拆分过多模块
+2. **不引入 Redis**
+3. **不引入 Kafka**
+4. **不引入微服务**
+5. **优先直接 SQLAlchemy 查询** — 使用 `sqlalchemy.text()`，避免 ORM 模型层
+6. **保持现有数据库结构** — 表结构以 `schema.sql` 为准，不擅自改表除非明确要求
+7. **优先简单实现** — 能用一个 SQL + 一个路由解决，就不要加抽象层
+
+## 核心实体
+
+| Entity | 中文 | Table |
+|--------|------|-------|
+| Projects | 项目 | `projects` |
+| Asset Pools | 资产包 | `asset_pools` |
+| Trust Products | 信托产品 | `trust_products` |
+| Investors | 投资人 | `investors` |
+| Investments | 投资记录 | `investments` |
+
+关联表：`project_asset_pools`（Project ↔ Asset Pool，多对多）
+
+业务链：`Projects → Asset Pools → Trust Products → Investments ← Investors`
+
+## 项目结构
+
+```
+backend/app/main.py   # FastAPI routes + SQL queries
+backend/Dockerfile
+backend/requirements.txt
+schema.sql            # PostgreSQL schema
+seed.sql              # Test data
+docker-compose.yml    # postgres (5432) + backend (8000)
+```
+
+## API 现状
+
+- `GET /` — HTML Dashboard
+- `GET /projects`, `/asset-pools`, `/trust-products`, `/investors`, `/investments`
+- `GET /asset-pools/{id}/overview` — 资产包聚合视图
+
+## 本地开发
+
+```bash
+docker compose up -d --build backend
+curl http://localhost:8000/
+```
+
+数据库初始化：手动执行 `schema.sql`，再执行 `seed.sql`。
+
+## 变更约定
+
+- 保持 diff 聚焦；匹配现有命名与响应格式
+- 金额 → `float`；日期/时间 → `str` 或 `None`
+- 不提交 secrets（`.env`、凭证）
+- 不擅自添加前端框架、ORM、测试、文档或 git commit，除非明确要求

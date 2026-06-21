@@ -1,0 +1,77 @@
+---
+description: Business domain — Project, Asset Pool, Trust Product, Investor, Investment
+alwaysApply: true
+---
+
+# Business Domain
+
+资产证券化业务链：**底层资产（项目）→ 资产包 → 信托产品 → 投资人认购**
+
+## Entity Overview
+
+| Entity | 中文 | Table | Role |
+|--------|------|-------|------|
+| Project | 项目 | `projects` | 底层装修/改造项目，承载地址、预算、工期 |
+| Asset Pool | 资产包 | `asset_pools` | 将多个项目打包为可证券化的资产组合 |
+| Trust Product | 信托产品 | `trust_products` | 基于资产包发行的融资/信托产品 |
+| Investor | 投资人 | `investors` | 认购方（个人 `individual` / 机构 `institutional`） |
+| Investment | 投资记录 | `investments` | 投资人对某信托产品的一笔认购 |
+
+## Relationships
+
+```
+Project (N) ──< project_asset_pools >── (N) Asset Pool (1) ──< (N) Trust Product (1) ──< (N) Investment
+                                                                                              │
+Investor (1) ───────────────────────────────────────────────────────────────────────────────┘
+```
+
+| From | To | Cardinality | Join / FK |
+|------|----|-------------|-----------|
+| Project | Asset Pool | **N : N** | `project_asset_pools` (`project_id`, `asset_pool_id`) |
+| Asset Pool | Trust Product | **1 : N** | `trust_products.asset_pool_id` |
+| Trust Product | Investment | **1 : N** | `investments.trust_product_id` |
+| Investor | Investment | **1 : N** | `investments.investor_id` |
+
+**Indirect paths** (no direct FK):
+
+- Project → Trust Product：经 Asset Pool（`projects → project_asset_pools → asset_pools → trust_products`）
+- Project → Investment：经 Asset Pool + Trust Product
+- Investor → Trust Product：经 Investment
+
+## Key Business Rules
+
+- 一个 **Asset Pool** 可包含多个 **Project**；一个 **Project** 也可属于多个 Asset Pool
+- 一个 **Trust Product** 必须绑定且仅绑定一个 **Asset Pool**（底层资产来源）
+- 一笔 **Investment** 必须同时关联一个 **Investor** 和一个 **Trust Product**
+- `investments.subscription_no` 全局唯一，代表认购编号
+- `trust_products.raised_amount` 为已募集金额汇总；seed 中由 `status = 'confirmed'` 的投资记录求和同步
+
+## Aggregations (used in APIs / Dashboard)
+
+| Metric | 计算方式 |
+|--------|----------|
+| 项目总预算 | `SUM(projects.total_budget)` |
+| 已募集总金额 | `SUM(trust_products.raised_amount)` 或 confirmed 投资求和 |
+| 资产包概览 | Asset Pool + 关联 Projects + Trust Products + 各产品下 Investments |
+
+## Seed Example (滨江公寓)
+
+```
+3 Projects (A栋/B栋/车库) ──→ 1 Asset Pool (滨江公寓组合资产包)
+                                      └──→ 1 Trust Product (滨江公寓信托一期, target ¥5M)
+                                                ├── Investment: 张三 ¥800,000
+                                                └── Investment: 明德资本 ¥1,200,000
+                                              raised_amount = ¥2,000,000
+```
+
+## Common Status Values
+
+| Entity | Examples |
+|--------|----------|
+| Project | `draft`, `in_progress`, `completed` |
+| Asset Pool | `pending`, `active` |
+| Trust Product | `draft`, `raising` |
+| Investor KYC | `pending`, `approved` |
+| Investment | `pending`, `confirmed` |
+
+When adding features, preserve these relationships and avoid introducing direct Project ↔ Trust Product or Investor ↔ Asset Pool links unless the schema is explicitly extended.
