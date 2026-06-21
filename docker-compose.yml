@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: realestate-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: realestate
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: ChangeThisPassword123!
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    container_name: realestate-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://admin:ChangeThisPassword123!@postgres:5432/realestate 
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:
