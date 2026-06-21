@@ -7,7 +7,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 engine = create_engine(DATABASE_URL)
 
-app = FastAPI(title="Real Estate Asset Management API")
+app = FastAPI(title="Real Estate Securitization Platform")
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -37,7 +37,7 @@ def dashboard():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>房地产资产管理平台</title>
+    <title>房地产资产证券化平台</title>
     <style>
         * {{
             box-sizing: border-box;
@@ -116,8 +116,8 @@ def dashboard():
 <body>
     <div class="container">
         <header>
-            <h1>房地产资产管理平台</h1>
-            <p>数据概览 Dashboard</p>
+            <h1>房地产资产证券化平台</h1>
+            <p>数据概览 · Real Estate Securitization Platform</p>
         </header>
         <div class="grid">
             <div class="card">
@@ -145,7 +145,7 @@ def dashboard():
                 <div class="card-value money budget">{fmt_money(total_project_budget)}</div>
             </div>
         </div>
-        <footer>Real Estate Asset Management API</footer>
+        <footer>Real Estate Securitization Platform</footer>
     </div>
 </body>
 </html>"""
