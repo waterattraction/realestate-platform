@@ -1,13 +1,18 @@
 import os
+import uuid
 from html import escape
 from typing import Annotated
+from urllib.parse import quote
 
-from fastapi import Body, Depends, FastAPI, Form, HTTPException
+from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import create_engine, text
 
 from app import auth
+from app import auth_html
+from app import ingestion_html
 from app import ingestion_pipeline
+from app import ingestion_upload
 from app import risk_hub
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -17,6 +22,18 @@ engine = create_engine(DATABASE_URL)
 app = FastAPI(title="Real Estate Securitization Platform")
 
 get_current_user = auth.make_current_user_dependency(engine)
+get_page_user = auth.make_page_user_dependency(engine)
+
+
+def _safe_next_path(next_url: str) -> str:
+    if not next_url or not next_url.startswith("/") or next_url.startswith("//"):
+        return "/"
+    return next_url
+
+
+@app.exception_handler(auth.LoginRedirect)
+async def handle_login_redirect(_request: Request, exc: auth.LoginRedirect):
+    return RedirectResponse(url=f"/login?next={quote(exc.next_path)}", status_code=302)
 
 
 @app.on_event("startup")
@@ -566,6 +583,8 @@ def fetch_overdue_workbench(
                 SELECT
                     m.trust_asset_id,
                     m.asset_code,
+                    COALESCE(m.custody_asset_code, ta.custody_asset_code) AS custody_asset_code,
+                    COALESCE(m.source_asset_code, ta.source_asset_code, m.asset_code) AS source_asset_code,
                     m.trust_product_id,
                     m.data_date,
                     m.overdue_days,
@@ -628,6 +647,8 @@ def fetch_overdue_workbench(
         queue.append({
             "trust_asset_id": r.trust_asset_id,
             "asset_code": r.asset_code,
+            "custody_asset_code": r.custody_asset_code,
+            "source_asset_code": r.source_asset_code,
             "asset_name": r.asset_name,
             "trust_product_id": r.trust_product_id,
             "trust_product_name": r.trust_product_name,
@@ -765,6 +786,26 @@ def update_overdue_followup_record(
     conn.commit()
 
 
+def fmt_asset_identity(item: dict) -> str:
+    custody = item.get("custody_asset_code") or "—"
+    source = item.get("source_asset_code") or item.get("asset_code") or "—"
+    return (
+        f'<span class="asset-id">'
+        f'<span title="托管房源号">{escape(str(custody))}</span>'
+        f' <span class="muted" title="资产分笔号">/ {escape(str(source))}</span>'
+        f"</span>"
+    )
+
+
+def fmt_asset_identity_block(item: dict) -> str:
+    custody = item.get("custody_asset_code") or "—"
+    source = item.get("source_asset_code") or item.get("asset_code") or "—"
+    return f"""
+      <p><span class="lbl">托管房源号</span>{escape(str(custody))}</p>
+      <p><span class="lbl">资产分笔号</span>{escape(str(source))}</p>
+  """
+
+
 def fmt_check_result(passed: bool, label: str = "") -> str:
     if passed:
         return f'<span class="badge ok-badge">{escape(label)}通过</span>'
@@ -799,7 +840,7 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
             <a class="queue-item {active}"
                href="/overdue/workbench{workbench_qs(item['trust_asset_id'])}">
                 <div class="queue-top">
-                    <span class="queue-code">{escape(item['asset_code'])}{recon_flag}</span>
+                    <span class="queue-code">{fmt_asset_identity(item)}{recon_flag}</span>
                     {fmt_risk_badge(item['risk_level']) if item.get('risk_level') else fmt_delinquency_badge(item['delinquency_bucket'])}
                 </div>
                 <div class="queue-meta">
@@ -871,7 +912,8 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
 
         detail_html = f"""
             <div class="panel-section">
-                <h3>{escape(detail['asset_code'])} · {escape(detail['asset_name'] or '')}</h3>
+                <h3>{escape(detail.get('asset_name') or '房源详情')}</h3>
+                {fmt_asset_identity_block(detail)}
                 <p class="muted">{escape(detail['trust_product_name'])} · 数据日期 {escape(detail['data_date'])}</p>
             </div>
             <div class="panel-section kpi-row">
@@ -1271,7 +1313,7 @@ def render_risk_workbench_html(data: dict):
         queue_rows += f"""
             <a class="queue-item {active}" href="/risk/workbench?trust_asset_id={item['trust_asset_id']}">
                 <div class="queue-top">
-                    <span class="queue-code">{escape(item['asset_code'])}</span>
+                    <span class="queue-code">{fmt_asset_identity(item)}</span>
                     {fmt_risk_badge(item['risk_level'])}
                 </div>
                 <div class="queue-meta">
@@ -1323,6 +1365,7 @@ def render_risk_workbench_html(data: dict):
         detail_html = f"""
             <div class="panel-section">
                 <h3>风险画像</h3>
+                {fmt_asset_identity_block(detail)}
                 <div class="hero-score">
                     <div class="score">{detail['risk_score'] or '—'}</div>
                     <div>{fmt_risk_badge(detail['risk_level'])} {fmt_sla_badge(case['sla_status'] if case else None)}</div>
@@ -2045,7 +2088,7 @@ def render_not_found_html():
 </html>"""
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard():
+def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
     with engine.connect() as conn:
         row = conn.execute(text("""
             SELECT
@@ -2213,6 +2256,19 @@ def dashboard():
                 <div class="card-label">项目总预算</div>
                 <div class="card-value money budget">{fmt_money(total_project_budget)}</div>
             </div>
+            <a href="/ingestion/upload" class="card card-link">
+                <div class="card-label">数据导入 V2</div>
+                <div class="card-value" style="font-size:1.25rem;">Excel</div>
+                <div class="card-label" style="margin-top:0.5rem;margin-bottom:0;">还款明细 / 监控快照 →</div>
+            </a>
+            <a href="/ingestion/repayment-records" class="card card-link">
+                <div class="card-label">还款明细</div>
+                <div class="card-value" style="font-size:1.25rem;">查看</div>
+            </a>
+            <a href="/ingestion/monitor-records" class="card card-link">
+                <div class="card-label">监控快照</div>
+                <div class="card-value" style="font-size:1.25rem;">查看</div>
+            </a>
             <a href="/risk/workbench" class="card card-link">
                 <div class="card-label">风控中台</div>
                 <div class="card-value risk">{high_risk_count}</div>
@@ -2228,7 +2284,7 @@ def dashboard():
     </div>
 </body>
 </html>"""
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 @app.get("/projects")
 def list_projects():
@@ -2289,7 +2345,10 @@ def list_asset_pools():
         return asset_pools
 
 @app.get("/asset-pools/{asset_pool_id}", response_class=HTMLResponse)
-def asset_pool_detail(asset_pool_id: int):
+def asset_pool_detail(
+    asset_pool_id: int,
+    page_user: Annotated[dict, Depends(get_page_user)],
+):
     with engine.connect() as conn:
         data = fetch_asset_pool_overview(conn, asset_pool_id)
         if data is None:
@@ -2297,7 +2356,7 @@ def asset_pool_detail(asset_pool_id: int):
         investor_map = fetch_investor_map(conn)
         html = render_asset_pool_detail_html(data, investor_map)
 
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 @app.get("/asset-pools/{asset_pool_id}/overview")
 def get_asset_pool_overview(asset_pool_id: int):
@@ -2430,7 +2489,7 @@ def overdue_followups(trust_product_id: int | None = None, status: str | None = 
 
 
 @app.get("/overdue", response_class=HTMLResponse)
-def overdue_dashboard():
+def overdue_dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
     with engine.connect() as conn:
         overview = fetch_overdue_overview(conn)
         checks_data = fetch_overdue_checks(conn)
@@ -2443,7 +2502,7 @@ def overdue_dashboard():
         recon_data["items"],
         followups,
     )
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
 def _workbench_redirect(trust_asset_id: int, trust_product_id: int | None) -> RedirectResponse:
@@ -2455,6 +2514,7 @@ def _workbench_redirect(trust_asset_id: int, trust_product_id: int | None) -> Re
 
 @app.get("/overdue/workbench/data")
 def overdue_workbench_data(
+    current_user: Annotated[dict, Depends(get_current_user)],
     trust_product_id: int | None = None,
     trust_asset_id: int | None = None,
     data_date: str | None = None,
@@ -2465,17 +2525,20 @@ def overdue_workbench_data(
 
 @app.get("/overdue/workbench", response_class=HTMLResponse)
 def overdue_workbench_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
     trust_product_id: int | None = None,
     trust_asset_id: int | None = None,
     data_date: str | None = None,
 ):
     with engine.connect() as conn:
         data = fetch_overdue_workbench(conn, trust_product_id, trust_asset_id, data_date)
-    return HTMLResponse(content=render_overdue_workbench_html(data, trust_product_id))
+    html = render_overdue_workbench_html(data, trust_product_id)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
 @app.post("/overdue/workbench/followups")
 def overdue_workbench_create_followup(
+    current_user: Annotated[dict, Depends(get_current_user)],
     trust_asset_id: int = Form(...),
     trust_product_id: int | None = Form(None),
     overdue_reason: str = Form(""),
@@ -2493,6 +2556,7 @@ def overdue_workbench_create_followup(
 @app.post("/overdue/workbench/followups/{followup_id}/update")
 def overdue_workbench_update_followup(
     followup_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
     trust_asset_id: int = Form(...),
     trust_product_id: int | None = Form(None),
     status: str = Form("in_progress"),
@@ -2508,6 +2572,7 @@ def overdue_workbench_update_followup(
 @app.post("/overdue/workbench/followups/{followup_id}/resolve")
 def overdue_workbench_resolve_followup(
     followup_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
     trust_asset_id: int = Form(...),
     trust_product_id: int | None = Form(None),
 ):
@@ -2517,16 +2582,25 @@ def overdue_workbench_resolve_followup(
 
 
 @app.get("/risk/workbench/data")
-def risk_workbench_data(trust_product_id: int | None = None, trust_asset_id: int | None = None):
+def risk_workbench_data(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: int | None = None,
+    trust_asset_id: int | None = None,
+):
     with engine.connect() as conn:
         return risk_hub.fetch_risk_workbench(conn, trust_product_id, trust_asset_id)
 
 
 @app.get("/risk/workbench", response_class=HTMLResponse)
-def risk_workbench_page(trust_product_id: int | None = None, trust_asset_id: int | None = None):
+def risk_workbench_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
+    trust_product_id: int | None = None,
+    trust_asset_id: int | None = None,
+):
     with engine.connect() as conn:
         data = risk_hub.fetch_risk_workbench(conn, trust_product_id, trust_asset_id)
-    return HTMLResponse(content=render_risk_workbench_html(data))
+    html = render_risk_workbench_html(data)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
 @app.get("/risk/assets")
@@ -2545,7 +2619,10 @@ def risk_asset_detail(trust_asset_id: int):
 
 
 @app.post("/risk/score/recalculate")
-def risk_score_recalculate(trust_product_id: int | None = None):
+def risk_score_recalculate(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: int | None = None,
+):
     with engine.connect() as conn:
         return risk_hub.recalculate_risk_scores(conn, trust_product_id)
 
@@ -2561,7 +2638,11 @@ def risk_alerts(
 
 
 @app.patch("/risk/alerts/{alert_id}")
-def risk_alert_patch(alert_id: int, body: dict = Body(...)):
+def risk_alert_patch(
+    alert_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
     with engine.connect() as conn:
         result = risk_hub.patch_risk_alert(conn, alert_id, body)
     if result is None:
@@ -2580,7 +2661,10 @@ def risk_cases(
 
 
 @app.post("/risk/cases")
-def risk_case_create(body: dict = Body(...)):
+def risk_case_create(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
     if "trust_asset_id" not in body:
         raise HTTPException(status_code=400, detail="trust_asset_id is required")
     with engine.connect() as conn:
@@ -2591,7 +2675,11 @@ def risk_case_create(body: dict = Body(...)):
 
 
 @app.patch("/risk/cases/{case_id}")
-def risk_case_patch(case_id: int, body: dict = Body(...)):
+def risk_case_patch(
+    case_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
     with engine.connect() as conn:
         result = risk_hub.patch_risk_case(conn, case_id, body)
     if result is None:
@@ -2599,10 +2687,44 @@ def risk_case_patch(case_id: int, body: dict = Body(...)):
     return result
 
 
-@app.post("/auth/login")
-def auth_login(body: auth.LoginRequest):
+@app.get("/login", response_class=HTMLResponse)
+def login_page(next: str = "/"):
+    return HTMLResponse(content=auth_html.render_login_page(None, _safe_next_path(next)))
+
+
+@app.post("/login")
+def login_submit(
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form("/"),
+):
+    next_safe = _safe_next_path(next)
     with engine.connect() as conn:
-        return auth.login(conn, body.username, body.password)
+        user = auth.authenticate_user(conn, username, password)
+    if user is None:
+        return HTMLResponse(
+            content=auth_html.render_login_page("用户名或密码错误", next_safe),
+            status_code=401,
+        )
+    token = auth.create_access_token(user["id"], user["username"], user["role"])
+    redirect = RedirectResponse(url=next_safe, status_code=303)
+    auth.set_auth_cookie(redirect, token)
+    return redirect
+
+
+@app.post("/logout")
+def logout():
+    redirect = RedirectResponse(url="/login", status_code=303)
+    auth.clear_auth_cookie(redirect)
+    return redirect
+
+
+@app.post("/auth/login")
+def auth_login(body: auth.LoginRequest, response: Response):
+    with engine.connect() as conn:
+        result = auth.login(conn, body.username, body.password)
+    auth.set_auth_cookie(response, result["access_token"])
+    return result
 
 
 @app.get("/auth/me")
@@ -2627,3 +2749,172 @@ def ingestion_pipeline_run(
             asset_lookup_path=body.get("asset_lookup_path"),
             user_id=current_user["id"],
         )
+
+
+@app.get("/ingestion/upload", response_class=HTMLResponse)
+def ingestion_upload_page(page_user: Annotated[dict, Depends(get_page_user)]):
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
+        products = [{"id": r.id, "name": r.name} for r in rows]
+    return HTMLResponse(content=ingestion_html.render_upload_page(products, page_user["username"]))
+
+
+@app.post("/ingestion/preview")
+async def ingestion_preview(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: int = Form(...),
+    files: list[UploadFile] = File(...),
+):
+    batch_uuid = str(uuid.uuid4())
+    saved = await ingestion_upload.save_batch_files(batch_uuid, files)
+    with engine.connect() as conn:
+        return ingestion_upload.run_preview(conn, trust_product_id, batch_uuid, saved)
+
+
+@app.post("/ingestion/import")
+def ingestion_import(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    batch_uuid = body.get("batch_uuid")
+    trust_product_id = body.get("trust_product_id")
+    if not batch_uuid or trust_product_id is None:
+        raise HTTPException(status_code=400, detail="batch_uuid and trust_product_id required")
+    with engine.connect() as conn:
+        return ingestion_upload.run_import(
+            conn,
+            batch_uuid=batch_uuid,
+            trust_product_id=int(trust_product_id),
+            user_id=current_user["id"],
+            confirm_sheet_keys=body.get("confirm_sheet_keys"),
+        )
+
+
+@app.get("/ingestion/repayment-records/data")
+def ingestion_repayment_records_data(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    page: int = 1,
+    page_size: int = 50,
+    trust_product_id: str | None = Query(default=None),
+    data_date: str | None = Query(default=None),
+    asset_code: str | None = Query(default=None),
+    custody_asset_code: str | None = Query(default=None),
+    source_asset_code: str | None = Query(default=None),
+    source_file_name: str | None = Query(default=None),
+    source_sheet_name: str | None = Query(default=None),
+):
+    filters = ingestion_upload.build_record_filters(
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        asset_code=asset_code,
+        custody_asset_code=custody_asset_code,
+        source_asset_code=source_asset_code,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+    )
+    with engine.connect() as conn:
+        return ingestion_upload.fetch_paginated_records(
+            conn, "repayment", page, page_size, filters,
+        )
+
+
+@app.get("/ingestion/repayment-records", response_class=HTMLResponse)
+def ingestion_repayment_records_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
+    page: int = 1,
+    page_size: int = 50,
+    trust_product_id: str | None = Query(default=None),
+    data_date: str | None = Query(default=None),
+    asset_code: str | None = Query(default=None),
+    custody_asset_code: str | None = Query(default=None),
+    source_asset_code: str | None = Query(default=None),
+    source_file_name: str | None = Query(default=None),
+    source_sheet_name: str | None = Query(default=None),
+):
+    filters = ingestion_upload.build_record_filters(
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        asset_code=asset_code,
+        custody_asset_code=custody_asset_code,
+        source_asset_code=source_asset_code,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+    )
+    with engine.connect() as conn:
+        data = ingestion_upload.fetch_paginated_records(
+            conn, "repayment", page, page_size, filters,
+        )
+        products = [
+            {"id": r.id, "name": r.name}
+            for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
+        ]
+    return HTMLResponse(content=ingestion_html.render_records_page(
+        "还款明细", "/ingestion/repayment-records/data", filters, data, products,
+        page_user["username"],
+        record_type="repayment",
+    ))
+
+
+@app.get("/ingestion/monitor-records/data")
+def ingestion_monitor_records_data(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    page: int = 1,
+    page_size: int = 50,
+    trust_product_id: str | None = Query(default=None),
+    data_date: str | None = Query(default=None),
+    asset_code: str | None = Query(default=None),
+    custody_asset_code: str | None = Query(default=None),
+    source_asset_code: str | None = Query(default=None),
+    source_file_name: str | None = Query(default=None),
+    source_sheet_name: str | None = Query(default=None),
+):
+    filters = ingestion_upload.build_record_filters(
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        asset_code=asset_code,
+        custody_asset_code=custody_asset_code,
+        source_asset_code=source_asset_code,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+    )
+    with engine.connect() as conn:
+        return ingestion_upload.fetch_paginated_records(
+            conn, "monitor", page, page_size, filters,
+        )
+
+
+@app.get("/ingestion/monitor-records", response_class=HTMLResponse)
+def ingestion_monitor_records_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
+    page: int = 1,
+    page_size: int = 50,
+    trust_product_id: str | None = Query(default=None),
+    data_date: str | None = Query(default=None),
+    asset_code: str | None = Query(default=None),
+    custody_asset_code: str | None = Query(default=None),
+    source_asset_code: str | None = Query(default=None),
+    source_file_name: str | None = Query(default=None),
+    source_sheet_name: str | None = Query(default=None),
+):
+    filters = ingestion_upload.build_record_filters(
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        asset_code=asset_code,
+        custody_asset_code=custody_asset_code,
+        source_asset_code=source_asset_code,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+    )
+    with engine.connect() as conn:
+        data = ingestion_upload.fetch_paginated_records(
+            conn, "monitor", page, page_size, filters,
+        )
+        products = [
+            {"id": r.id, "name": r.name}
+            for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
+        ]
+    return HTMLResponse(content=ingestion_html.render_records_page(
+        "资产监控快照", "/ingestion/monitor-records/data", filters, data, products,
+        page_user["username"],
+        record_type="monitor",
+    ))

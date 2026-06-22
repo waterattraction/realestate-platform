@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from passlib.context import CryptContext
 from pydantic import BaseModel
@@ -17,6 +17,15 @@ from sqlalchemy.engine import Connection, Engine
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-me-in-production-realestate-platform")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "480"))
+COOKIE_NAME = "access_token"
+
+
+class LoginRedirect(Exception):
+    """未登录访问 HTML 页面时跳转登录."""
+
+    def __init__(self, next_path: str):
+        self.next_path = next_path
+
 
 DEFAULT_ADMIN_USERNAME = os.getenv("DEFAULT_ADMIN_USERNAME", "admin")
 DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin123")
@@ -74,6 +83,34 @@ def hash_password(password: str) -> str:
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
     return pwd_context.verify(plain_password, password_hash)
+
+
+def resolve_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None,
+) -> str | None:
+    token = request.cookies.get(COOKIE_NAME)
+    if token:
+        return token
+    if credentials is not None and credentials.scheme.lower() == "bearer":
+        return credentials.credentials
+    return None
+
+
+def set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        secure=False,
+        path="/",
+        max_age=JWT_EXPIRE_MINUTES * 60,
+    )
+
+
+def clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(key=COOKIE_NAME, path="/")
 
 
 def create_access_token(user_id: int, username: str, role: str) -> str:
@@ -208,18 +245,37 @@ def user_from_token(conn: Connection, token: str) -> dict:
 
 def make_current_user_dependency(engine: Engine):
     def get_current_user(
+        request: Request,
         credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     ) -> dict:
-        if credentials is None or credentials.scheme.lower() != "bearer":
+        token = resolve_token(request, credentials)
+        if not token:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Not authenticated",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         with engine.connect() as conn:
-            return user_from_token(conn, credentials.credentials)
+            return user_from_token(conn, token)
 
     return get_current_user
+
+
+def make_page_user_dependency(engine: Engine):
+    def get_page_user(
+        request: Request,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    ) -> dict:
+        token = resolve_token(request, credentials)
+        if not token:
+            next_path = request.url.path
+            if request.url.query:
+                next_path += "?" + request.url.query
+            raise LoginRedirect(next_path)
+        with engine.connect() as conn:
+            return user_from_token(conn, token)
+
+    return get_page_user
 
 
 def record_ingestion_run(
@@ -233,22 +289,27 @@ def record_ingestion_run(
     inserted_monitor_count: int,
     inserted_repayment_count: int,
     upsert_asset_count: int,
+    skipped_sheet_count: int = 0,
+    failed_sheet_count: int = 0,
+    error_message: str | None = None,
+    trust_product_name: str | None = None,
 ) -> tuple[int, str]:
     row = conn.execute(
         text("""
             INSERT INTO ingestion_pipeline_runs (
-                trust_product_id, data_date, trust_plan_alias, source_file,
+                trust_product_id, trust_product_name, data_date, trust_plan_alias, source_file,
                 created_by, inserted_monitor_count, inserted_repayment_count,
-                upsert_asset_count
+                upsert_asset_count, skipped_sheet_count, failed_sheet_count, error_message
             ) VALUES (
-                :trust_product_id, :data_date, :trust_plan_alias, :source_file,
+                :trust_product_id, :trust_product_name, :data_date, :trust_plan_alias, :source_file,
                 :created_by, :inserted_monitor_count, :inserted_repayment_count,
-                :upsert_asset_count
+                :upsert_asset_count, :skipped_sheet_count, :failed_sheet_count, :error_message
             )
             RETURNING id, created_at
         """),
         {
             "trust_product_id": trust_product_id,
+            "trust_product_name": trust_product_name,
             "data_date": data_date,
             "trust_plan_alias": trust_plan_alias,
             "source_file": source_file,
@@ -256,6 +317,58 @@ def record_ingestion_run(
             "inserted_monitor_count": inserted_monitor_count,
             "inserted_repayment_count": inserted_repayment_count,
             "upsert_asset_count": upsert_asset_count,
+            "skipped_sheet_count": skipped_sheet_count,
+            "failed_sheet_count": failed_sheet_count,
+            "error_message": error_message,
         },
     ).fetchone()
     return int(row.id), str(row.created_at)
+
+
+def record_sheet_run(
+    conn: Connection,
+    *,
+    pipeline_run_id: int,
+    source_file_name: str,
+    source_sheet_name: str,
+    sheet_type: str,
+    data_date,
+    row_count: int,
+    amount_sum: float | None,
+    action: str,
+    message: str | None,
+    trust_product_id: int | None = None,
+    trust_product_name: str | None = None,
+) -> None:
+    parsed_date = None
+    if data_date:
+        if isinstance(data_date, str):
+            parsed_date = date.fromisoformat(data_date[:10])
+        else:
+            parsed_date = data_date
+    conn.execute(
+        text("""
+            INSERT INTO ingestion_sheet_runs (
+                pipeline_run_id, trust_product_id, trust_product_name,
+                source_file_name, source_sheet_name, sheet_type,
+                data_date, row_count, amount_sum, action, message
+            ) VALUES (
+                :pipeline_run_id, :trust_product_id, :trust_product_name,
+                :source_file_name, :source_sheet_name, :sheet_type,
+                :data_date, :row_count, :amount_sum, :action, :message
+            )
+        """),
+        {
+            "pipeline_run_id": pipeline_run_id,
+            "trust_product_id": trust_product_id,
+            "trust_product_name": trust_product_name,
+            "source_file_name": source_file_name,
+            "source_sheet_name": source_sheet_name,
+            "sheet_type": sheet_type,
+            "data_date": parsed_date,
+            "row_count": row_count,
+            "amount_sum": amount_sum,
+            "action": action,
+            "message": message,
+        },
+    )

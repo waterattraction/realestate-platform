@@ -431,6 +431,8 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
             SELECT
                 m.trust_asset_id,
                 ta.asset_code,
+                ta.custody_asset_code,
+                ta.source_asset_code,
                 ta.asset_name,
                 m.trust_product_id,
                 tp.name AS trust_product_name,
@@ -465,6 +467,8 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
         queue.append({
             "trust_asset_id": r.trust_asset_id,
             "asset_code": r.asset_code,
+            "custody_asset_code": r.custody_asset_code,
+            "source_asset_code": r.source_asset_code,
             "asset_name": r.asset_name,
             "trust_product_id": r.trust_product_id,
             "trust_product_name": r.trust_product_name,
@@ -607,6 +611,8 @@ def fetch_risk_asset_detail(conn, trust_asset_id: int):
             SELECT
                 m.trust_asset_id,
                 ta.asset_code,
+                ta.custody_asset_code,
+                ta.source_asset_code,
                 ta.asset_name,
                 m.trust_product_id,
                 tp.name AS trust_product_name,
@@ -680,6 +686,8 @@ def fetch_risk_asset_detail(conn, trust_asset_id: int):
     return {
         "trust_asset_id": row.trust_asset_id,
         "asset_code": row.asset_code,
+        "custody_asset_code": row.custody_asset_code,
+        "source_asset_code": row.source_asset_code,
         "asset_name": row.asset_name,
         "trust_product_id": row.trust_product_id,
         "trust_product_name": row.trust_product_name,
