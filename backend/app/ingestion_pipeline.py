@@ -11,6 +11,8 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from app.auth import record_ingestion_run
+
 RECONCILIATION_TOLERANCE = 0.01
 SHEET_MONITOR = "2更新的资产数据表"
 SHEET_REPAYMENT = "1全量还款明细汇总"
@@ -362,7 +364,10 @@ def run_ingestion_pipeline(
     trust_plan_alias: str | None = None,
     excel_path: str | None = None,
     asset_lookup_path: str | None = None,
+    user_id: int | None = None,
 ) -> dict:
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
     _verify_trust_product(conn, trust_product_id)
     mappings = load_mapping_config(conn)
 
@@ -495,6 +500,17 @@ def run_ingestion_pipeline(
         inserted_repayment_count += 1
 
     consistency_checks = run_consistency_checks(conn, trust_product_id, data_date)
+    run_id, created_at = record_ingestion_run(
+        conn,
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        trust_plan_alias=trust_plan_alias,
+        source_file=str(excel_file),
+        created_by=user_id,
+        inserted_monitor_count=inserted_monitor_count,
+        inserted_repayment_count=inserted_repayment_count,
+        upsert_asset_count=upsert_asset_count,
+    )
     conn.commit()
 
     return {
@@ -507,4 +523,7 @@ def run_ingestion_pipeline(
         "inserted_repayment_count": inserted_repayment_count,
         "upsert_asset_count": upsert_asset_count,
         "consistency_checks": consistency_checks,
+        "run_id": run_id,
+        "created_by": user_id,
+        "created_at": created_at,
     }

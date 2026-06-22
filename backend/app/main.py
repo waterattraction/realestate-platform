@@ -1,9 +1,12 @@
 import os
 from html import escape
-from fastapi import Body, FastAPI, Form, HTTPException
+from typing import Annotated
+
+from fastapi import Body, Depends, FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import create_engine, text
 
+from app import auth
 from app import ingestion_pipeline
 from app import risk_hub
 
@@ -12,6 +15,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 
 app = FastAPI(title="Real Estate Securitization Platform")
+
+get_current_user = auth.make_current_user_dependency(engine)
+
+
+@app.on_event("startup")
+def on_startup():
+    auth.init_auth(engine)
 
 STATUS_LABELS = {
     "pending": "待激活",
@@ -2589,8 +2599,22 @@ def risk_case_patch(case_id: int, body: dict = Body(...)):
     return result
 
 
+@app.post("/auth/login")
+def auth_login(body: auth.LoginRequest):
+    with engine.connect() as conn:
+        return auth.login(conn, body.username, body.password)
+
+
+@app.get("/auth/me")
+def auth_me(current_user: Annotated[dict, Depends(get_current_user)]):
+    return current_user
+
+
 @app.post("/ingestion/pipeline")
-def ingestion_pipeline_run(body: dict = Body(default={})):
+def ingestion_pipeline_run(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(default={}),
+):
     trust_product_id = body.get("trust_product_id")
     if trust_product_id is None:
         raise HTTPException(status_code=400, detail="trust_product_id is required")
@@ -2601,4 +2625,5 @@ def ingestion_pipeline_run(body: dict = Body(default={})):
             trust_plan_alias=body.get("trust_plan_alias"),
             excel_path=body.get("excel_path"),
             asset_lookup_path=body.get("asset_lookup_path"),
+            user_id=current_user["id"],
         )

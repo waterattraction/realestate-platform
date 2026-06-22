@@ -4,5 +4,8 @@ psycopg2-binary
 sqlalchemy
 python-dotenv
 python-multipart
+pyjwt
+passlib[bcrypt]
+bcrypt==4.0.1
 pandas
 openpyxl
