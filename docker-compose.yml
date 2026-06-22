@@ -20,6 +20,9 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://admin:ChangeThisPassword123!@postgres:5432/realestate 
+      INGESTION_REPO_ROOT: /data/repo
+    volumes:
+      - .:/data/repo:ro
     depends_on:
       - postgres
 
