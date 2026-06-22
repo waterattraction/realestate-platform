@@ -1,0 +1,44 @@
+# HTTPS 示例 — 将 your.domain.com 替换为真实域名
+# 证书：sudo certbot --nginx -d your.domain.com
+
+upstream realestate_backend {
+    server 127.0.0.1:8000;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name your.domain.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name your.domain.com;
+
+    ssl_certificate     /etc/letsencrypt/live/your.domain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your.domain.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    client_max_body_size 50M;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+
+    location /ingestion/ {
+        limit_req zone=realestate_ingestion burst=2 nodelay;
+        proxy_pass http://realestate_backend;
+        include /opt/realestate-platform/deploy/nginx/proxy_params.conf;
+    }
+
+    location / {
+        proxy_pass http://realestate_backend;
+        include /opt/realestate-platform/deploy/nginx/proxy_params.conf;
+    }
+}
