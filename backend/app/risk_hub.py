@@ -3,6 +3,8 @@
 from sqlalchemy import text
 
 RECONCILIATION_TOLERANCE = 0.01
+PERFORMING_MAX_DAYS = 30
+OVERDUE_ASSET_MIN_DAYS = 31
 
 RISK_LEVEL_LABELS = {
     "A": "高风险",
@@ -277,7 +279,10 @@ def sync_risk_alerts(conn, trust_product_id: int | None = None) -> dict:
 
 
 def sync_risk_cases(conn, trust_product_id: int | None = None) -> dict:
-    params: dict = {}
+    params: dict = {
+        "tolerance": RECONCILIATION_TOLERANCE,
+        "overdue_min_days": OVERDUE_ASSET_MIN_DAYS,
+    }
     product_filter = ""
     if trust_product_id is not None:
         product_filter = "AND m.trust_product_id = :trust_product_id"
@@ -295,7 +300,9 @@ def sync_risk_cases(conn, trust_product_id: int | None = None) -> dict:
                 FROM trust_asset_monitor_records m
                 INNER JOIN latest l
                     ON l.trust_product_id = m.trust_product_id AND l.data_date = m.data_date
-                WHERE m.overdue_days > 0 AND m.risk_level IN ('A', 'B', 'C')
+                WHERE m.remaining_amount > :tolerance
+                  AND COALESCE(m.overdue_days, 0) >= :overdue_min_days
+                  AND m.risk_level IN ('A', 'B', 'C')
                 {product_filter}
             )
             SELECT * FROM monitor
@@ -392,6 +399,10 @@ def _refresh_case_sla_statuses(conn, trust_product_id: int | None = None):
 
 def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_id: int | None = None):
     monitor_filter, params = _latest_monitor_filter(trust_product_id, None)
+    if "tolerance" not in params:
+        params = {**params, "tolerance": RECONCILIATION_TOLERANCE}
+    if "performing_max_days" not in params:
+        params = {**params, "performing_max_days": PERFORMING_MAX_DAYS}
 
     summary_row = conn.execute(
         text(f"""
@@ -402,7 +413,24 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
                 COUNT(*) FILTER (WHERE m.risk_level = 'B') AS level_b_count,
                 COUNT(*) FILTER (WHERE m.risk_level = 'C') AS level_c_count,
                 COUNT(*) FILTER (WHERE m.risk_level = 'D') AS level_d_count,
-                COUNT(*) FILTER (WHERE m.overdue_days > 0) AS overdue_count,
+                COUNT(*) AS exposure_count,
+                COUNT(*) FILTER (WHERE m.remaining_amount <= :tolerance) AS es_count,
+                COUNT(*) FILTER (
+                    WHERE m.remaining_amount > :tolerance
+                      AND COALESCE(m.overdue_days, 0) <= :performing_max_days
+                ) AS m1_count,
+                COUNT(*) FILTER (
+                    WHERE m.remaining_amount > :tolerance
+                      AND COALESCE(m.overdue_days, 0) BETWEEN 31 AND 60
+                ) AS m2_count,
+                COUNT(*) FILTER (
+                    WHERE m.remaining_amount > :tolerance
+                      AND COALESCE(m.overdue_days, 0) BETWEEN 61 AND 90
+                ) AS m3_count,
+                COUNT(*) FILTER (
+                    WHERE m.remaining_amount > :tolerance
+                      AND COALESCE(m.overdue_days, 0) > 90
+                ) AS m3_plus_count,
                 ROUND(AVG(m.risk_score)::numeric, 1) AS avg_risk_score
             FROM trust_asset_monitor_records m
             WHERE {monitor_filter}
@@ -491,6 +519,14 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
     if selected_id is not None:
         detail = fetch_risk_asset_detail(conn, selected_id)
 
+    es = int(summary_row.es_count) if summary_row else 0
+    m1 = int(summary_row.m1_count) if summary_row else 0
+    m2 = int(summary_row.m2_count) if summary_row else 0
+    m3 = int(summary_row.m3_count) if summary_row else 0
+    m3_plus = int(summary_row.m3_plus_count) if summary_row else 0
+    exposure_total = es + m1 + m2 + m3 + m3_plus
+    overdue_total = m2 + m3 + m3_plus
+
     return {
         "data_date": str(summary_row.data_date) if summary_row else None,
         "summary": {
@@ -499,7 +535,12 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
             "level_b_count": int(summary_row.level_b_count) if summary_row else 0,
             "level_c_count": int(summary_row.level_c_count) if summary_row else 0,
             "level_d_count": int(summary_row.level_d_count) if summary_row else 0,
-            "overdue_count": int(summary_row.overdue_count) if summary_row else 0,
+            "overdue_count": exposure_total,
+            "overdue_count_deprecated": True,
+            "es_count": es,
+            "exposure_total": exposure_total,
+            "overdue_total": overdue_total,
+            "breakdown": {"ES": es, "M1": m1, "M2": m2, "M3": m3, "M3+": m3_plus},
             "avg_risk_score": float(summary_row.avg_risk_score) if summary_row and summary_row.avg_risk_score else 0,
             "open_alert_count": int(alert_open.cnt) if alert_open else 0,
             "sla_breached_count": int(sla_breached.cnt) if sla_breached else 0,

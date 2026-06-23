@@ -91,3 +91,25 @@ def parse_sheet_repayment_date(sheet_name: str, product_name: str) -> ParsedShee
     result.parsed_date = parsed
     result.rule_label = f"{product_name}规则"
     return result
+
+
+def parse_monitor_snapshot_date(
+    file_name: str,
+    sheet_name: str,
+    product_name: str,
+) -> ParsedSheetDate:
+    """从文件名或 Sheet 名解析监控快照日期（如 _0612）。"""
+    for source in (file_name, sheet_name):
+        parsed = parse_sheet_repayment_date(source, product_name)
+        if parsed.ok:
+            return ParsedSheetDate(
+                ok=True,
+                parsed_date=parsed.parsed_date,
+                rule_label=f"监控快照日期·{parsed.rule_label}",
+                sheet_name=sheet_name,
+            )
+    return ParsedSheetDate(
+        ok=False,
+        error=f"无法从文件名/Sheet名解析监控快照日期: {file_name}",
+        sheet_name=sheet_name,
+    )

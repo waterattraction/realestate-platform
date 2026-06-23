@@ -28,6 +28,14 @@ def coerce_optional_int(value: str | int | None) -> int | None:
     return int(value)
 
 
+def coerce_bool(value: str | int | bool | None) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in ("1", "true", "yes", "on")
+
+
 def build_record_filters(
     *,
     trust_product_id: str | int | None = None,
@@ -37,6 +45,7 @@ def build_record_filters(
     source_asset_code: str | None = None,
     source_file_name: str | None = None,
     source_sheet_name: str | None = None,
+    include_history: str | int | bool | None = None,
 ) -> dict[str, Any]:
     """将查询参数中的空字符串规范为 None，避免 Optional[int] 解析失败."""
     return {
@@ -47,6 +56,7 @@ def build_record_filters(
         "source_asset_code": source_asset_code or None,
         "source_file_name": source_file_name or None,
         "source_sheet_name": source_sheet_name or None,
+        "include_history": coerce_bool(include_history),
     }
 
 
@@ -92,6 +102,115 @@ def sheet_key(file_name: str, sheet_name: str) -> str:
     return f"{file_name}::{sheet_name}"
 
 
+def action_to_status(action: str | None) -> str:
+    """将预检 action 映射为对外 status（import | needs_confirm | reject）."""
+    if action in ("import", "overwrite"):
+        return "import"
+    if action == "needs_confirm":
+        return "needs_confirm"
+    if action == "reject":
+        return "reject"
+    if action == "skip":
+        return "skip"
+    return "reject"
+
+
+def sheet_is_selectable(sheet: dict) -> bool:
+    status = sheet.get("status") or action_to_status(sheet.get("action"))
+    return status in ("import", "needs_confirm")
+
+
+def enrich_preview_sheet(sheet: dict, batch_uuid: str) -> dict:
+    """补充 Sheet 级预检对外字段."""
+    status = action_to_status(sheet.get("action"))
+    return {
+        **sheet,
+        "file_id": batch_uuid,
+        "sheet_key": sheet_key(sheet["file_name"], sheet["sheet_name"]),
+        "type": sheet.get("sheet_type"),
+        "rows": sheet.get("row_count", 0),
+        "amount": sheet.get("amount_sum"),
+        "status": status,
+        "selectable": status in ("import", "needs_confirm"),
+    }
+
+
+def resolve_selected_sheet_keys(
+    preview: dict,
+    selected_sheet_keys: list[str] | None,
+    selected_sheets: list[str] | None,
+) -> set[str]:
+    """解析用户勾选的 Sheet，支持 sheet_key 或 sheet_name（单文件内唯一时）."""
+    if selected_sheet_keys:
+        return {k.strip() for k in selected_sheet_keys if k and str(k).strip()}
+
+    if not selected_sheets:
+        return set()
+
+    names = [str(n).strip() for n in selected_sheets if n and str(n).strip()]
+    if not names:
+        return set()
+
+    preview_sheets = preview.get("sheets", [])
+    resolved: set[str] = set()
+    for name in names:
+        matches = [
+            sheet_key(s["file_name"], s["sheet_name"])
+            for s in preview_sheets
+            if s.get("sheet_name") == name
+        ]
+        if not matches:
+            raise HTTPException(status_code=400, detail=f"未找到 Sheet: {name}")
+        if len(matches) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Sheet 名「{name}」在多个文件中重复，请使用 sheet_key（file::sheet）",
+            )
+        resolved.add(matches[0])
+    return resolved
+
+
+def validate_selected_sheets(
+    preview: dict,
+    selected: set[str],
+    confirm_sheet_keys: set[str],
+) -> None:
+    if not selected:
+        raise HTTPException(status_code=400, detail="必须选择至少一个Sheet")
+
+    preview_by_key = {
+        sheet_key(s["file_name"], s["sheet_name"]): s for s in preview.get("sheets", [])
+    }
+    parsed_keys = set(preview_by_key.keys())
+
+    unknown = selected - parsed_keys
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"selected_sheets 包含未预检的 Sheet: {', '.join(sorted(unknown))}",
+        )
+
+    for key in selected:
+        sheet = preview_by_key[key]
+        status = sheet.get("status") or action_to_status(sheet.get("action"))
+        action = sheet.get("action")
+        if status == "reject" or action in ("reject", "failed"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Sheet「{sheet.get('sheet_name')}」状态为 reject，禁止导入",
+            )
+        if status == "skip" or action == "skip":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Sheet「{sheet.get('sheet_name')}」无需导入（skip）",
+            )
+        if status == "needs_confirm" and key not in confirm_sheet_keys:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Sheet「{sheet.get('sheet_name')}」需二次确认后才能导入",
+            )
+
+
 def _verify_trust_product(conn: Connection, trust_product_id: int) -> dict:
     row = conn.execute(
         text("SELECT id, name FROM trust_products WHERE id = :id"),
@@ -107,6 +226,25 @@ class SheetClassification:
     sheet_type: str
     name_type: str | None = None
     header_type: str | None = None
+
+
+@dataclass
+class MonitorParseResult:
+    rows: list[dict]
+    errors: list[str]
+    batch_date: date | None
+    raw_row_count: int
+    parsed_row_count: int
+    skipped_row_count: int
+    skipped_reason_summary: dict[str, int]
+    detected_columns: list[str]
+    required_column_mapping: dict[str, str | None]
+    batch_date_source: str | None = None
+    warnings: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.warnings is None:
+            self.warnings = []
 
 
 def _text_contains_any(text: str, keywords: tuple[str, ...]) -> bool:
@@ -325,47 +463,230 @@ def _batch_monitor_count(
     return int(row.cnt)
 
 
+def _require_monitor_sheet_name(sheet_name: str) -> str | None:
+    """返回错误信息；合法则返回 None。"""
+    if sheet_name is None or not str(sheet_name).strip():
+        return "source_sheet_name 缺失，无法安全覆盖资产监控快照"
+    return None
+
+
+def _require_repayment_sheet_name(sheet_name: str) -> str | None:
+    if sheet_name is None or not str(sheet_name).strip():
+        return "source_sheet_name 缺失，无法导入还款明细"
+    return None
+
+
+def _require_source_file_name(file_name: str) -> str | None:
+    if file_name is None or not str(file_name).strip():
+        return "source_file_name 缺失，无法导入还款明细"
+    return None
+
+
+def _check_monitor_within_sheet_multi_rows(rows: list[dict]) -> list[str]:
+    """Sheet 内同房源多行提示（不阻止导入）。"""
+    from collections import Counter
+
+    custody_keys = [
+        r.get("custody_asset_code") or r.get("source_asset_code") or r.get("asset_code")
+        for r in rows
+    ]
+    source_keys = [
+        r.get("source_asset_code") or r.get("asset_code")
+        for r in rows
+    ]
+    custody_dup = any(v > 1 for k, v in Counter(custody_keys).items() if k)
+    source_dup = any(v > 1 for k, v in Counter(source_keys).items() if k)
+    if custody_dup or source_dup:
+        return ["同一 Sheet 中存在同一房源多行记录，请确认是否为正常多笔数据"]
+    return []
+
+
+def fetch_monitor_batch_duplicate_checks(
+    conn: Connection,
+    trust_product_id: int | None = None,
+    data_date: str | None = None,
+    source_sheet_name: str | None = None,
+) -> list[dict]:
+    """重复批次检查：同 Sheet 同 trust_asset_id 多行（数据质量，不用于主查询过滤）。"""
+    where_parts = ["1=1"]
+    params: dict = {}
+    if trust_product_id is not None:
+        where_parts.append("trust_product_id = :trust_product_id")
+        params["trust_product_id"] = trust_product_id
+    if data_date:
+        where_parts.append("data_date = :data_date")
+        params["data_date"] = data_date
+    if source_sheet_name:
+        where_parts.append("source_sheet_name = :source_sheet_name")
+        params["source_sheet_name"] = source_sheet_name
+    where_sql = " AND ".join(where_parts)
+
+    rows = conn.execute(
+        text(f"""
+            SELECT
+                trust_product_id,
+                data_date,
+                source_sheet_name,
+                trust_asset_id,
+                COUNT(*) AS row_count
+            FROM trust_asset_monitor_records
+            WHERE {where_sql}
+            GROUP BY trust_product_id, data_date, source_sheet_name, trust_asset_id
+            HAVING COUNT(*) > 1
+            ORDER BY row_count DESC, trust_product_id, data_date, source_sheet_name
+        """),
+        params,
+    )
+    items = []
+    for r in rows:
+        items.append({
+            "trust_product_id": r.trust_product_id,
+            "data_date": str(r.data_date),
+            "source_sheet_name": r.source_sheet_name,
+            "trust_asset_id": r.trust_asset_id,
+            "row_count": int(r.row_count),
+            "check_type": "duplicate_batch_trust_asset_id",
+        })
+
+    custody_rows = conn.execute(
+        text(f"""
+            SELECT
+                trust_product_id,
+                data_date,
+                source_sheet_name,
+                COALESCE(custody_asset_code, asset_code) AS custody_asset_code,
+                COALESCE(source_asset_code, asset_code) AS source_asset_code,
+                COUNT(*) AS row_count
+            FROM trust_asset_monitor_records
+            WHERE {where_sql}
+            GROUP BY trust_product_id, data_date, source_sheet_name,
+                     COALESCE(custody_asset_code, asset_code),
+                     COALESCE(source_asset_code, asset_code)
+            HAVING COUNT(*) > 1
+            ORDER BY row_count DESC
+        """),
+        params,
+    )
+    for r in custody_rows:
+        items.append({
+            "trust_product_id": r.trust_product_id,
+            "data_date": str(r.data_date),
+            "source_sheet_name": r.source_sheet_name,
+            "custody_asset_code": r.custody_asset_code,
+            "source_asset_code": r.source_asset_code,
+            "row_count": int(r.row_count),
+            "check_type": "duplicate_batch_custody_source",
+        })
+    return items
+
+
 def _check_within_sheet_row_duplicates(
     rows: list[dict],
 ) -> tuple[str, str | None, list[str]]:
-    """Sheet 内重复：custody + source + repayment_date + amount (+ period_no)."""
+    """Sheet 内仅拒绝五字段完全相同的行；期数不同视为合法多笔。"""
     warnings: list[str] = []
-    seen: list[dict] = []
-    multi_payment: set[tuple[str, str]] = set()
+    seen: set[tuple] = set()
+    periods_by_four_key: dict[tuple, set] = {}
 
     for r in rows:
         rd = r["repayment_date"]
         custody = r.get("custody_asset_code") or ""
         source = r.get("source_asset_code") or r["asset_code"]
-        pn = r.get("period_no") or ""
+        pn = r.get("period_no")
         amt = r["actual_repayment_amount"]
+        key = (custody, source, rd, amt, pn)
 
-        for prev in seen:
-            if prev["rd"] != rd or prev["custody"] != custody or prev["source"] != source:
-                continue
-            if pn and prev["pn"] and pn != prev["pn"]:
-                continue
-            if pn != prev["pn"]:
-                continue
-            if cleanse.amounts_equal(prev["amt"], amt):
-                if pn:
-                    return (
-                        "reject",
-                        "Sheet 内重复: 托管房源 + 资产分笔 + repayment_date + period_no + 金额",
-                        warnings,
-                    )
-                return "reject", "Sheet 内重复: 托管房源 + 资产分笔 + 同一天 + 同金额", warnings
-            label = custody or source
-            multi_payment.add((label, str(rd)))
+        if key in seen:
+            return (
+                "reject",
+                "Sheet 内完全重复: 托管房源 + 资产分笔 + repayment_date + amount + period_no",
+                warnings,
+            )
+        seen.add(key)
 
-        seen.append({
-            "rd": rd, "custody": custody, "source": source, "pn": pn, "amt": amt,
-        })
+        four_key = (custody, source, rd, amt)
+        periods_by_four_key.setdefault(four_key, set()).add(pn)
 
-    for label, rd in sorted(multi_payment):
-        warnings.append(f"{label} @ {rd}: 合法多笔还款")
+    for (custody, source, rd, _amt), periods in periods_by_four_key.items():
+        if len(periods) > 1:
+            warnings.append(f"{custody or source} @ {rd}: 同日同金额多期数（合法多笔）")
 
     return "ok", None, warnings
+
+
+def _repayment_period_no_warnings(df: pd.DataFrame, rows: list[dict]) -> list[str]:
+    warnings: list[str] = []
+    col_period = cleanse.pick_column(df, *COL_PERIOD)
+    if col_period is None:
+        warnings.append("Excel 未识别到还款期数列（period_no 将为空）")
+        return warnings
+    missing = sum(1 for r in rows if not r.get("period_no"))
+    if missing:
+        warnings.append(f"{missing} 行 period_no 缺失")
+    return warnings
+
+
+def _cross_file_repayment_overlap_count(
+    conn: Connection,
+    trust_product_id: int,
+    file_name: str,
+    rows: list[dict],
+) -> int:
+    """统计当前 Sheet 中有多少行在其他 source_file_name 中已有相同付款实质（四字段）。"""
+    if not rows:
+        return 0
+    from collections import defaultdict
+
+    by_key: dict[tuple, int] = defaultdict(int)
+    for r in rows:
+        custody = r.get("custody_asset_code") or ""
+        source = r.get("source_asset_code") or r["asset_code"]
+        key = (custody, source, r["repayment_date"], r["actual_repayment_amount"])
+        by_key[key] += 1
+
+    overlap_rows = 0
+    for (custody, source, rd, amt), row_count in by_key.items():
+        hit = conn.execute(
+            text("""
+                SELECT 1 FROM trust_repayment_detail_records
+                WHERE trust_product_id = :pid
+                  AND source_file_name != :file
+                  AND custody_asset_code = :custody
+                  AND source_asset_code IS NOT DISTINCT FROM :source
+                  AND repayment_date = :rd
+                  AND actual_repayment_amount = :amt
+                LIMIT 1
+            """),
+            {
+                "pid": trust_product_id,
+                "file": file_name,
+                "custody": custody,
+                "source": source or None,
+                "rd": rd,
+                "amt": amt,
+            },
+        ).fetchone()
+        if hit:
+            overlap_rows += row_count
+    return overlap_rows
+
+
+def _delete_repayment_sheet_scope(
+    conn: Connection,
+    trust_product_id: int,
+    file_name: str,
+    sheet_name: str,
+) -> int:
+    result = conn.execute(
+        text("""
+            DELETE FROM trust_repayment_detail_records
+            WHERE trust_product_id = :pid
+              AND source_file_name = :file
+              AND source_sheet_name = :sheet
+        """),
+        {"pid": trust_product_id, "file": file_name, "sheet": sheet_name},
+    )
+    return int(result.rowcount or 0)
 
 
 def _parse_repayment_rows(
@@ -411,58 +732,179 @@ def _parse_repayment_rows(
     return rows, errors
 
 
-def _parse_monitor_rows(df: pd.DataFrame) -> tuple[list[dict], list[str], date | None]:
+def _resolve_monitor_batch_date(
+    row_dates: list[date],
+    *,
+    file_name: str | None,
+    sheet_name: str | None,
+    product_name: str | None,
+) -> tuple[date | None, str, list[str]]:
+    """确定监控快照 data_date；优先文件名/Sheet 规则，避免按行统计日期众数误删行。"""
+    warnings: list[str] = []
+    if file_name and product_name:
+        parsed = ingestion_date_rules.parse_monitor_snapshot_date(
+            file_name, sheet_name or "", product_name,
+        )
+        if parsed.ok and parsed.parsed_date:
+            return parsed.parsed_date, parsed.rule_label or "文件名/Sheet规则", warnings
+
+    if not row_dates:
+        return None, "", warnings
+
+    from collections import Counter
+
+    counter = Counter(row_dates)
+    batch_date, top_count = counter.most_common(1)[0]
+    if top_count >= max(2, len(row_dates) * 0.5):
+        return batch_date, "列统计日期众数", warnings
+
+    if len(counter) > 1:
+        warnings.append(
+            f"统计日期存在 {len(counter)} 个不同值，已使用最早日期 {batch_date} 作为快照日期；"
+            f"建议确认文件名是否包含 MMDD 快照日期"
+        )
+    return batch_date, "列统计日期最早值", warnings
+
+
+def _parse_monitor_rows(
+    df: pd.DataFrame,
+    *,
+    file_name: str | None = None,
+    sheet_name: str | None = None,
+    product_name: str | None = None,
+) -> MonitorParseResult:
+    raw_row_count = len(df)
+    detected_columns = [str(c) for c in df.columns]
     col_asset = cleanse.pick_column(df, *COL_ASSET_CODE)
     col_custody = cleanse.pick_column(df, *COL_CUSTODY)
     col_data = cleanse.pick_column(df, *COL_DATA_DATE)
     col_initial = cleanse.pick_column(df, *COL_INITIAL)
     col_repaid = cleanse.pick_column(df, *COL_REPAID)
     col_remaining = cleanse.pick_aliased_column(df, "remaining_amount")
-
     remaining_label = cleanse.aliased_column_label("remaining_amount")
-    missing = [c for c, col in [
+
+    required_column_mapping = {
+        "asset_code": col_asset,
+        "custody_asset_code": col_custody,
+        "data_date": col_data,
+        "initial_transfer_amount": col_initial,
+        "repaid_amount": col_repaid,
+        "remaining_amount": col_remaining,
+    }
+
+    missing = [label for label, col in [
         ("统计日期", col_data), ("初始受让金额", col_initial),
         ("已还款金额", col_repaid), (remaining_label, col_remaining),
     ] if col is None]
     if missing:
-        return [], [f"缺少列: {', '.join(missing)}"], None
+        return MonitorParseResult(
+            rows=[], errors=[f"缺少列: {', '.join(missing)}"], batch_date=None,
+            raw_row_count=raw_row_count, parsed_row_count=0,
+            skipped_row_count=raw_row_count,
+            skipped_reason_summary={"missing_columns": raw_row_count},
+            detected_columns=detected_columns,
+            required_column_mapping=required_column_mapping,
+        )
     if not col_custody and not col_asset:
-        return [], ["缺少托管房源编码或资产编号(房源)列"], None
+        return MonitorParseResult(
+            rows=[], errors=["缺少托管房源编码或资产编号(房源)列"], batch_date=None,
+            raw_row_count=raw_row_count, parsed_row_count=0,
+            skipped_row_count=raw_row_count,
+            skipped_reason_summary={"missing_asset_columns": raw_row_count},
+            detected_columns=detected_columns,
+            required_column_mapping=required_column_mapping,
+        )
 
-    rows: list[dict] = []
+    skipped_reason_summary: dict[str, int] = {}
     errors: list[str] = []
-    dates: list[date] = []
+    warnings: list[str] = []
+    row_dates: list[date] = []
+    candidate_rows: list[dict] = []
+
+    def _skip(reason: str) -> None:
+        skipped_reason_summary[reason] = skipped_reason_summary.get(reason, 0) + 1
+
     for idx, row in df.iterrows():
         asset_code, custody, source = _resolve_asset_fields(row, col_asset, col_custody)
         if not asset_code and not custody:
+            _skip("no_asset_identifier")
             continue
-        data_date = cleanse.to_date_value(row[col_data])
-        if not data_date:
-            errors.append(f"行{idx + 2}: 统计日期无效")
-            continue
-        dates.append(data_date)
+        row_date = cleanse.to_date_value(row[col_data])
+        if row_date:
+            row_dates.append(row_date)
         initial = cleanse.to_numeric_value(row[col_initial])
         repaid = cleanse.to_numeric_value(row[col_repaid])
         remaining = cleanse.to_numeric_value(row[col_remaining])
         if initial is None or repaid is None or remaining is None:
+            _skip("invalid_amount")
             errors.append(f"行{idx + 2}: 金额字段无效")
             continue
-        rows.append({
+        candidate_rows.append({
             "asset_code": asset_code,
             "custody_asset_code": custody,
             "source_asset_code": source,
-            "data_date": data_date,
+            "row_stat_date": row_date,
             "initial_transfer_amount": initial,
             "repaid_amount": repaid,
             "remaining_amount": remaining,
         })
 
-    if not dates:
-        return [], errors or ["无有效监控行"], None
-    from collections import Counter
-    batch_date = Counter(dates).most_common(1)[0][0]
-    rows = [r for r in rows if r["data_date"] == batch_date]
-    return rows, errors, batch_date
+    if not candidate_rows:
+        return MonitorParseResult(
+            rows=[], errors=errors or ["无有效监控行"], batch_date=None,
+            raw_row_count=raw_row_count, parsed_row_count=0,
+            skipped_row_count=sum(skipped_reason_summary.values()),
+            skipped_reason_summary=skipped_reason_summary,
+            detected_columns=detected_columns,
+            required_column_mapping=required_column_mapping,
+            warnings=warnings,
+        )
+
+    batch_date, batch_source, batch_warnings = _resolve_monitor_batch_date(
+        row_dates,
+        file_name=file_name,
+        sheet_name=sheet_name,
+        product_name=product_name,
+    )
+    warnings.extend(batch_warnings)
+    if batch_date is None:
+        return MonitorParseResult(
+            rows=[], errors=errors or ["无法确定监控快照 data_date"], batch_date=None,
+            raw_row_count=raw_row_count, parsed_row_count=0,
+            skipped_row_count=sum(skipped_reason_summary.values()),
+            skipped_reason_summary=skipped_reason_summary,
+            detected_columns=detected_columns,
+            required_column_mapping=required_column_mapping,
+            warnings=warnings,
+        )
+
+    rows: list[dict] = []
+    date_mismatch = 0
+    for item in candidate_rows:
+        row_stat = item.pop("row_stat_date", None)
+        if row_stat and row_stat != batch_date:
+            date_mismatch += 1
+        rows.append({**item, "data_date": batch_date})
+
+    if date_mismatch:
+        warnings.append(
+            f"{date_mismatch} 行 Excel 统计日期与快照日期 {batch_date} 不一致，"
+            f"导入时将统一使用快照日期 {batch_date}"
+        )
+
+    return MonitorParseResult(
+        rows=rows,
+        errors=errors,
+        batch_date=batch_date,
+        raw_row_count=raw_row_count,
+        parsed_row_count=len(rows),
+        skipped_row_count=sum(skipped_reason_summary.values()),
+        skipped_reason_summary=skipped_reason_summary,
+        detected_columns=detected_columns,
+        required_column_mapping=required_column_mapping,
+        batch_date_source=batch_source,
+        warnings=warnings,
+    )
 
 
 def precheck_repayment_sheet(
@@ -492,7 +934,22 @@ def precheck_repayment_sheet(
         "warnings": [],
         "db_row_count": 0,
         "db_amount_sum": 0.0,
+        "cross_file_overlap_count": 0,
     }
+
+    if not trust_product_id:
+        result["reason"] = "trust_product_id 缺失，无法预检还款明细"
+        return result
+
+    file_err = _require_source_file_name(file_name)
+    if file_err:
+        result["reason"] = file_err.replace("导入", "预检")
+        return result
+
+    sheet_err = _require_repayment_sheet_name(sheet_name)
+    if sheet_err:
+        result["reason"] = sheet_err.replace("导入", "预检")
+        return result
 
     if not parsed.ok:
         result["reason"] = parsed.error or "Sheet 日期解析失败"
@@ -505,6 +962,15 @@ def precheck_repayment_sheet(
         result["reason"] = "无有效数据行" + (f"; {parse_errors[0]}" if parse_errors else "")
         return result
 
+    result["warnings"].extend(_repayment_period_no_warnings(df, rows))
+
+    status, msg, dup_warnings = _check_within_sheet_row_duplicates(rows)
+    result["warnings"].extend(dup_warnings[:20])
+    if status == "reject":
+        result["action"] = "reject"
+        result["reason"] = msg
+        return result
+
     amount_sum = sum(r["actual_repayment_amount"] for r in rows)
     result["row_count"] = len(rows)
     result["amount_sum"] = amount_sum
@@ -514,21 +980,34 @@ def precheck_repayment_sheet(
     result["db_amount_sum"] = db_sum
     result["exists"] = db_cnt > 0
 
+    cross_overlap = _cross_file_repayment_overlap_count(
+        conn, trust_product_id, file_name, rows,
+    )
+    result["cross_file_overlap_count"] = cross_overlap
+
+    if cross_overlap > 0:
+        result["action"] = "needs_confirm"
+        result["importable"] = True
+        result["reason"] = (
+            f"跨文件疑似重复 {cross_overlap} 条<br>"
+            f"其他 source_file_name 中已存在相同付款实质<br><br>"
+            f"确认导入后将仅覆盖当前文件+Sheet：<br>"
+            f"{file_name} / {sheet_name}<br>"
+            f"不会删除其他文件数据"
+        )
+        return result
+
     if db_cnt > 0:
         if db_cnt == len(rows) and cleanse.amounts_equal(db_sum, amount_sum):
             result["action"] = "skip"
             result["importable"] = False
             result["reason"] = "该 Sheet 已存在且数据一致"
             return result
-        result["action"] = "reject"
-        result["reason"] = "该 Sheet 已存在但数据不一致，需要人工确认"
-        return result
-
-    status, msg, dup_warnings = _check_within_sheet_row_duplicates(rows)
-    result["warnings"].extend(dup_warnings[:20])
-    if status == "reject":
-        result["action"] = "reject"
-        result["reason"] = msg
+        result["action"] = "overwrite"
+        result["importable"] = True
+        result["reason"] = (
+            f"该 Sheet 已存在（DB {db_cnt} 条），将删除旧记录并重新导入 {len(rows)} 条"
+        )
         return result
 
     result["action"] = "import"
@@ -540,6 +1019,7 @@ def precheck_repayment_sheet(
 def precheck_monitor_sheet(
     conn: Connection,
     trust_product_id: int,
+    product_name: str,
     file_name: str,
     sheet_name: str,
     df: pd.DataFrame,
@@ -551,6 +1031,12 @@ def precheck_monitor_sheet(
         "parsed_date": None,
         "date_rule_label": None,
         "row_count": 0,
+        "raw_row_count": 0,
+        "parsed_row_count": 0,
+        "skipped_row_count": 0,
+        "skipped_reason_summary": {},
+        "detected_columns": [],
+        "required_column_mapping": {},
         "amount_sum": None,
         "exists": False,
         "importable": False,
@@ -560,19 +1046,59 @@ def precheck_monitor_sheet(
         "db_row_count": 0,
     }
 
-    rows, parse_errors, batch_date = _parse_monitor_rows(df)
-    if parse_errors:
-        result["warnings"].extend(parse_errors[:20])
-    if not batch_date or not rows:
-        result["reason"] = "统计日期无法解析或无有效行"
+    if not trust_product_id:
+        result["reason"] = "trust_product_id 缺失，无法预检资产监控快照"
         return result
+
+    sheet_err = _require_monitor_sheet_name(sheet_name)
+    if sheet_err:
+        result["reason"] = sheet_err.replace("覆盖", "预检")
+        return result
+
+    parsed = _parse_monitor_rows(
+        df, file_name=file_name, sheet_name=sheet_name, product_name=product_name,
+    )
+    result["raw_row_count"] = parsed.raw_row_count
+    result["parsed_row_count"] = parsed.parsed_row_count
+    result["skipped_row_count"] = parsed.skipped_row_count
+    result["skipped_reason_summary"] = parsed.skipped_reason_summary
+    result["detected_columns"] = parsed.detected_columns
+    result["required_column_mapping"] = parsed.required_column_mapping
+    if parsed.batch_date_source:
+        result["date_rule_label"] = parsed.batch_date_source
+    if parsed.warnings:
+        result["warnings"].extend(parsed.warnings)
+    if parsed.errors:
+        result["warnings"].extend(parsed.errors[:20])
+
+    batch_date = parsed.batch_date
+    rows = parsed.rows
+    if not batch_date:
+        result["reason"] = "data_date（统计日期）无法解析，无法预检资产监控快照"
+        return result
+    if not rows:
+        result["reason"] = "无有效行"
+        return result
+
+    result["warnings"].extend(_check_monitor_within_sheet_multi_rows(rows))
 
     result["parsed_date"] = str(batch_date)
     result["row_count"] = len(rows)
+    result["parsed_row_count"] = len(rows)
 
     db_cnt = _batch_monitor_count(conn, trust_product_id, batch_date, sheet_name)
     result["db_row_count"] = db_cnt
     result["exists"] = db_cnt > 0
+
+    dup_checks = fetch_monitor_batch_duplicate_checks(
+        conn, trust_product_id, str(batch_date), sheet_name,
+    )
+    for item in dup_checks[:10]:
+        if item["check_type"] == "duplicate_batch_trust_asset_id":
+            result["warnings"].append(
+                f"数据质量：同 Sheet 内 trust_asset_id={item['trust_asset_id']} 存在 "
+                f"{item['row_count']} 行重复批次记录"
+            )
 
     if db_cnt == 0:
         result["action"] = "import"
@@ -586,8 +1112,17 @@ def precheck_monitor_sheet(
         result["reason"] = "记录数一致，允许覆盖更新"
         return result
 
-    result["action"] = "reject"
-    result["reason"] = f"记录数不一致（DB {db_cnt} vs 文件 {len(rows)}），需要人工确认"
+    excel_cnt = len(rows)
+    result["action"] = "needs_confirm"
+    result["importable"] = True
+    result["reason"] = (
+        f"数据库已有 {db_cnt} 条记录<br>"
+        f"当前文件解析出 {excel_cnt} 条记录<br><br>"
+        f"记录数不一致<br><br>"
+        f"确认导入后将：<br>"
+        f"删除旧记录<br>"
+        f"重新导入 {excel_cnt} 条记录"
+    )
     return result
 
 
@@ -662,13 +1197,26 @@ def _import_repayment_sheet(
     df: pd.DataFrame,
     synced_at: datetime,
 ) -> tuple[int, int, str]:
+    if not trust_product_id:
+        raise HTTPException(status_code=400, detail="trust_product_id 缺失，无法导入还款明细")
+
+    file_err = _require_source_file_name(file_name)
+    if file_err:
+        raise HTTPException(status_code=400, detail=file_err)
+
+    sheet_err = _require_repayment_sheet_name(sheet_name)
+    if sheet_err:
+        raise HTTPException(status_code=400, detail=sheet_err)
+
     parsed = ingestion_date_rules.parse_sheet_repayment_date(sheet_name, product_name)
     if not parsed.ok or not parsed.parsed_date:
         raise HTTPException(status_code=400, detail=parsed.error or "日期解析失败")
 
-    rows, _ = _parse_repayment_rows(df, parsed.parsed_date)
+    rows, parse_errors = _parse_repayment_rows(df, parsed.parsed_date)
     if not rows:
         return 0, 0, "无有效行"
+
+    _delete_repayment_sheet_scope(conn, trust_product_id, file_name, sheet_name)
 
     upsert_count = 0
     inserted = 0
@@ -711,20 +1259,42 @@ def _import_repayment_sheet(
             },
         )
         inserted += 1
-    return inserted, upsert_count, "imported"
+    msg = "imported"
+    if parse_errors:
+        msg = f"imported（{len(parse_errors)} 行解析警告）"
+    return inserted, upsert_count, msg
 
 
 def _import_monitor_sheet(
     conn: Connection,
     trust_product_id: int,
+    product_name: str,
     file_name: str,
     sheet_name: str,
     df: pd.DataFrame,
     synced_at: datetime,
 ) -> tuple[int, int, str, date | None, list[str]]:
-    rows, _, batch_date = _parse_monitor_rows(df)
-    if not batch_date or not rows:
-        return 0, 0, "无有效行", None, []
+    sheet_err = _require_monitor_sheet_name(sheet_name)
+    if sheet_err:
+        return 0, 0, sheet_err, None, []
+
+    if not trust_product_id:
+        return 0, 0, "trust_product_id 缺失，无法导入资产监控快照", None, []
+
+    parsed = _parse_monitor_rows(
+        df, file_name=file_name, sheet_name=sheet_name, product_name=product_name,
+    )
+    batch_date = parsed.batch_date
+    rows = parsed.rows
+    if not batch_date:
+        return 0, 0, "data_date（统计日期）无法解析，无法导入资产监控快照", None, parsed.errors[:20]
+    if not rows:
+        return 0, 0, "无有效行", None, parsed.errors[:20]
+
+    quality_warnings = list(parsed.errors[:20])
+    if parsed.warnings:
+        quality_warnings.extend(parsed.warnings)
+    quality_warnings.extend(_check_monitor_within_sheet_multi_rows(rows))
 
     conn.execute(
         text("""
@@ -780,7 +1350,16 @@ def _import_monitor_sheet(
         )
         inserted += 1
 
-    quality_warnings = recompute_monitor_payment_fields(conn, trust_product_id, batch_date)
+    quality_warnings.extend(recompute_monitor_payment_fields(conn, trust_product_id, batch_date))
+    dup_checks = fetch_monitor_batch_duplicate_checks(
+        conn, trust_product_id, str(batch_date), sheet_name,
+    )
+    for item in dup_checks[:5]:
+        if item["check_type"] == "duplicate_batch_trust_asset_id":
+            quality_warnings.append(
+                f"重复批次检查：trust_asset_id={item['trust_asset_id']} 在同 Sheet 内有 "
+                f"{item['row_count']} 行"
+            )
     return inserted, upsert_count, "imported", batch_date, quality_warnings
 
 
@@ -848,16 +1427,17 @@ def run_preview(
                 ))
             elif st == "asset_monitor":
                 sheets.append(precheck_monitor_sheet(
-                    conn, trust_product_id, file_name, sheet_name, df,
+                    conn, trust_product_id, product_name, file_name, sheet_name, df,
                 ))
 
     payload = {
+        "file_id": batch_uuid,
         "batch_uuid": batch_uuid,
         "trust_product_id": trust_product_id,
         "product_name": product_name,
         "trust_product_name": product_name,
         "files": file_names,
-        "sheets": sheets,
+        "sheets": [enrich_preview_sheet(s, batch_uuid) for s in sheets],
     }
     preview_json_path(batch_uuid).write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8",
@@ -870,6 +1450,8 @@ def run_import(
     batch_uuid: str,
     trust_product_id: int,
     user_id: int,
+    selected_sheet_keys: list[str] | None = None,
+    selected_sheets: list[str] | None = None,
     confirm_sheet_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     preview_path = preview_json_path(batch_uuid)
@@ -881,7 +1463,9 @@ def run_import(
         raise HTTPException(status_code=400, detail="trust_product_id 与预检不一致")
 
     product_name = preview["product_name"]
+    selected = resolve_selected_sheet_keys(preview, selected_sheet_keys, selected_sheets)
     confirm_set = set(confirm_sheet_keys or [])
+    validate_selected_sheets(preview, selected, confirm_set)
     synced_at = datetime.now(timezone.utc)
 
     inserted_monitor = 0
@@ -889,6 +1473,7 @@ def run_import(
     upsert_assets = 0
     skipped = 0
     failed = 0
+    not_selected = 0
     sheet_results: list[dict] = []
     monitor_dates: list[date] = []
     quality_warnings: list[str] = []
@@ -899,6 +1484,12 @@ def run_import(
         key = sheet_key(sheet["file_name"], sheet["sheet_name"])
         file_name = sheet["file_name"]
         sheet_name = sheet["sheet_name"]
+
+        if key not in selected:
+            not_selected += 1
+            sheet_results.append({**sheet, "final_action": "not_selected"})
+            continue
+
         path = batch_dir(batch_uuid) / file_name
         df = _load_sheet(path, sheet_name)
 
@@ -928,21 +1519,31 @@ def run_import(
                 )
                 inserted_repayment += ins
                 upsert_assets += ups
-                sheet_results.append({**sheet, "final_action": "imported", "inserted": ins})
+                replaced = action in ("overwrite", "needs_confirm") and sheet.get("db_row_count", 0) > 0
+                sheet_results.append({
+                    **sheet,
+                    "final_action": "overwritten" if replaced else "imported",
+                    "inserted": ins,
+                })
             elif sheet["sheet_type"] == "asset_monitor":
                 ins, ups, msg, batch_date, warns = _import_monitor_sheet(
-                    conn, trust_product_id, file_name, sheet_name, df, synced_at,
+                    conn, trust_product_id, product_name, file_name, sheet_name, df, synced_at,
                 )
                 inserted_monitor += ins
                 upsert_assets += ups
                 quality_warnings.extend(warns)
                 if batch_date:
                     monitor_dates.append(batch_date)
-                if action == "overwrite":
+                if action == "overwrite" or (
+                    action == "needs_confirm" and sheet.get("db_row_count", 0) > 0
+                ):
                     risk_recalc_hint = True
+                replaced = action == "overwrite" or (
+                    action == "needs_confirm" and sheet.get("db_row_count", 0) > 0
+                )
                 sheet_results.append({
                     **sheet,
-                    "final_action": "overwritten" if action == "overwrite" else "imported",
+                    "final_action": "overwritten" if replaced else "imported",
                     "inserted": ins,
                     "quality_warnings": warns,
                 })
@@ -1003,13 +1604,37 @@ def run_import(
         "inserted_repayment_count": inserted_repayment,
         "upsert_asset_count": upsert_assets,
         "skipped_sheet_count": skipped,
+        "not_selected_sheet_count": not_selected,
         "failed_sheet_count": failed,
+        "selected_sheet_count": len(selected),
         "sheet_results": sheet_results,
         "quality_warnings": quality_warnings,
     }
     if risk_recalc_hint:
         result["risk_recalc_hint"] = "监控快照已覆盖，请手动重新计算风险评分（POST /risk/score/recalculate）"
     return result
+
+
+def _monitor_snapshot_view_mode(filters: dict[str, Any]) -> str:
+    if filters.get("include_history"):
+        return "history"
+    if filters.get("data_date"):
+        return "fixed_date"
+    return "latest_effective"
+
+
+def _monitor_latest_snapshot_join_sql() -> str:
+    """每个 (trust_product_id, trust_asset_id) 仅保留 MAX(data_date) 记录。"""
+    return """
+        INNER JOIN (
+            SELECT trust_product_id, trust_asset_id, MAX(data_date) AS data_date
+            FROM trust_asset_monitor_records
+            GROUP BY trust_product_id, trust_asset_id
+        ) latest_snap
+            ON latest_snap.trust_product_id = r.trust_product_id
+           AND latest_snap.trust_asset_id = r.trust_asset_id
+           AND latest_snap.data_date = r.data_date
+    """
 
 
 def fetch_paginated_records(
@@ -1045,11 +1670,16 @@ def fetch_paginated_records(
             params[key] = int(val) if key == "trust_product_id" else val
 
     where_sql = " AND ".join(where_parts)
+    snapshot_join = ""
+    if table == "monitor" and _monitor_snapshot_view_mode(filters) == "latest_effective":
+        snapshot_join = _monitor_latest_snapshot_join_sql()
+
     count_row = conn.execute(
         text(f"""
             SELECT COUNT(*) AS cnt
             FROM {table_name} r
             JOIN trust_products tp ON tp.id = r.trust_product_id
+            {snapshot_join}
             WHERE {where_sql}
         """),
         params,
@@ -1061,6 +1691,7 @@ def fetch_paginated_records(
             SELECT r.*, tp.name AS trust_product_name
             FROM {table_name} r
             JOIN trust_products tp ON tp.id = r.trust_product_id
+            {snapshot_join}
             WHERE {where_sql}
             ORDER BY r.data_date DESC,
                      r.custody_asset_code ASC NULLS LAST,
@@ -1081,9 +1712,13 @@ def fetch_paginated_records(
                 item[k] = float(v)
         items.append(item)
 
-    return {
+    result: dict[str, Any] = {
         "page": page,
         "page_size": page_size,
         "total": total,
         "items": items,
     }
+    if table == "monitor":
+        result["view_mode"] = _monitor_snapshot_view_mode(filters)
+        result["include_history"] = bool(filters.get("include_history"))
+    return result

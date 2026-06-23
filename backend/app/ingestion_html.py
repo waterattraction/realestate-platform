@@ -6,6 +6,8 @@ from datetime import date, datetime, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
+from app.ui_css import TABLE_SCROLL_CSS
+
 DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -44,122 +46,51 @@ def _page_shell(title: str, body: str, username: str | None = None) -> str:
         }}
         button {{ cursor: pointer; background: #0ea5e9; border-color: #0ea5e9; margin-top: 1rem; }}
         button.secondary {{ background: transparent; margin-left: 0.5rem; }}
-        table {{ width: 100%; border-collapse: collapse; font-size: 0.85rem; }}
+        {TABLE_SCROLL_CSS}
         th, td {{ padding: 0.5rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.08); text-align: left; }}
         th {{ color: #94a3b8; }}
-        .records-table {{
-            table-layout: fixed;
-            width: max-content;
-            min-width: 100%;
-        }}
-        .records-table th,
-        .records-table td {{
-            word-break: normal;
-            overflow-wrap: normal;
-            vertical-align: top;
-            overflow: hidden;
-        }}
+        .records-table {{ font-size: 0.85rem; }}
         .records-table th.col-num,
         .records-table td.col-num {{
             text-align: right;
-            white-space: nowrap;
-        }}
-        .records-table th.col-single-line,
-        .records-table td.col-single-line {{
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }}
-        .records-table th.col-trust-product,
-        .records-table td.col-trust-product {{
-            width: 220px;
-            min-width: 220px;
-            max-width: 220px;
-        }}
-        .records-table th.col-custody,
-        .records-table td.col-custody {{
-            width: 130px;
-            min-width: 130px;
-            max-width: 130px;
-            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-            font-size: 0.82rem;
-        }}
-        .records-table th.col-source-split,
-        .records-table td.col-source-split {{
-            width: 150px;
-            min-width: 150px;
-            max-width: 150px;
-            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-            font-size: 0.82rem;
-        }}
-        .records-table th.col-source-file-name,
-        .records-table td.col-source-file-name {{
-            width: 380px;
-            min-width: 380px;
-            max-width: 380px;
-            overflow: hidden;
-        }}
-        .records-table th.col-source-sheet-name,
-        .records-table td.col-source-sheet-name {{
-            width: 180px;
-            min-width: 180px;
-            max-width: 180px;
-            overflow: hidden;
-        }}
-        .records-table th.col-date,
-        .records-table td.col-date {{
-            width: 110px;
-            min-width: 110px;
-            max-width: 110px;
-            white-space: nowrap;
-        }}
-        .records-table th.col-timestamp,
-        .records-table td.col-timestamp {{
-            width: 130px;
-            min-width: 130px;
-            max-width: 130px;
-            white-space: nowrap;
-        }}
-        .records-table th.col-id,
-        .records-table td.col-id {{
-            width: 72px;
-            min-width: 72px;
-            max-width: 72px;
-            white-space: nowrap;
-        }}
-        .records-table th.col-asset-code,
-        .records-table td.col-asset-code {{
-            width: 150px;
-            min-width: 150px;
-            max-width: 150px;
-            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-            font-size: 0.82rem;
-        }}
-        .records-table .source-file-name-text {{
-            display: -webkit-box;
-            -webkit-line-clamp: 2;
-            -webkit-box-orient: vertical;
-            overflow: hidden;
-            word-break: break-word;
-            line-height: 1.4;
-            max-width: 100%;
-        }}
-        .records-table .sheet-name-text {{
-            display: block;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            max-width: 100%;
-        }}
-        .records-table .cell-ellipsis {{
-            display: block;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            max-width: 100%;
         }}
         details.compat-filters summary {{ cursor: pointer; color: #cbd5e1; }}
         .ok {{ color: #34d399; }} .warn {{ color: #fbbf24; }} .err {{ color: #f87171; }}
+        .snapshot-hint {{
+            margin: 0.75rem 0 0;
+            padding: 0.55rem 0.75rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.1);
+        }}
+        .snapshot-hint.ok {{
+            border-color: rgba(52,211,153,0.35);
+            color: #a7f3d0;
+        }}
+        .snapshot-hint.warn {{
+            border-color: rgba(251,191,36,0.35);
+            color: #fde68a;
+        }}
+        .snapshot-toggle label {{
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            font-size: 0.9rem;
+            color: #e2e8f0;
+            cursor: pointer;
+        }}
+        .snapshot-toggle input {{
+            width: auto;
+            margin: 0;
+        }}
+        .sheet-toolbar {{ display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.75rem 0; }}
+        .sheet-toolbar button {{ margin-top: 0; font-size: 0.82rem; padding: 0.35rem 0.65rem; }}
+        .sheet-cb {{ width: auto; margin-right: 0.35rem; }}
+        .sheet-confirm-cb {{ width: auto; margin-left: 0.5rem; }}
+        tr.row-reject {{ opacity: 0.55; }}
+        tr.row-needs_confirm {{ background: rgba(251,191,36,0.06); }}
+        .import-bar {{ margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.08); }}
         .filters {{ display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end; }}
         .filters > div {{ min-width: 140px; }}
         .pager {{
@@ -201,31 +132,116 @@ def render_upload_page(trust_products: list[dict], username: str) -> str:
         <label>Excel 文件（可多选）</label>
         <input type="file" id="files" multiple accept=".xlsx,.xls" style="width:100%">
         <button type="button" onclick="runPreview()">预检</button>
-        <button type="button" class="secondary" onclick="runImport()">确认导入</button>
     </div>
     <div class="card" id="result"><p class="muted">预检结果将显示在此处</p></div>
+    <div class="card import-bar" id="importBar" style="display:none">
+        <p class="muted">已选 <strong id="selCount">0</strong> 个 Sheet · 仅导入选中项</p>
+        <button type="button" onclick="runImport()">确认导入选中 Sheet</button>
+    </div>
     <script>
     let batchUuid = null;
     let previewData = null;
+    let confirmedKeys = new Set();
+
     async function runPreview() {{
         const fd = new FormData();
         fd.append('trust_product_id', document.getElementById('trust_product_id').value);
         for (const f of document.getElementById('files').files) fd.append('files', f);
         const res = await fetch('/ingestion/preview', {{ method: 'POST', credentials: 'same-origin', body: fd }});
         const data = await res.json();
-        batchUuid = data.batch_uuid;
+        batchUuid = data.batch_uuid || data.file_id;
         previewData = data;
+        confirmedKeys = new Set();
         renderPreview(data, res.ok);
     }}
+
+    function sheetKey(s) {{ return s.sheet_key || (s.file_name + '::' + s.sheet_name); }}
+
+    function isSelectable(s) {{
+        const st = s.status || s.action;
+        return st === 'import' || st === 'needs_confirm' || s.action === 'overwrite';
+    }}
+
+    function isReject(s) {{
+        const st = s.status || s.action;
+        return st === 'reject' || s.action === 'failed' || st === 'skip' || s.action === 'skip';
+    }}
+
+    function canCheckSheet(s) {{
+        if (isReject(s)) return false;
+        if ((s.status || s.action) === 'needs_confirm' || s.action === 'needs_confirm') {{
+            return confirmedKeys.has(sheetKey(s));
+        }}
+        return isSelectable(s);
+    }}
+
+    function toggleConfirm(key, checked) {{
+        if (checked) confirmedKeys.add(key); else confirmedKeys.delete(key);
+        const s = previewData.sheets.find(x => sheetKey(x) === key);
+        const cb = document.querySelector('input.sheet-select[data-sheet-key="'+key+'"]');
+        if (cb && s) {{
+            cb.disabled = !canCheckSheet(s);
+            if (!canCheckSheet(s)) cb.checked = false;
+        }}
+        updateSelCount();
+    }}
+
+    function toggleSheet(key, checked) {{
+        updateSelCount();
+    }}
+
+    function selectedKeys() {{
+        const keys = [];
+        document.querySelectorAll('input.sheet-select:checked').forEach(el => keys.push(el.dataset.sheetKey));
+        return keys;
+    }}
+
+    function updateSelCount() {{
+        const n = selectedKeys().length;
+        const el = document.getElementById('selCount');
+        if (el) el.textContent = n;
+    }}
+
+    function selectAllImport() {{
+        document.querySelectorAll('input.sheet-select').forEach(el => {{
+            const s = previewData.sheets.find(x => sheetKey(x) === el.dataset.sheetKey);
+            if (!s) return;
+            const st = s.status || s.action;
+            if (st === 'import' || s.action === 'overwrite') {{
+                el.checked = true;
+                el.disabled = false;
+            }}
+        }});
+        updateSelCount();
+    }}
+
+    function selectExcludeNeedsConfirm() {{
+        document.querySelectorAll('input.sheet-select').forEach(el => {{
+            const s = previewData.sheets.find(x => sheetKey(x) === el.dataset.sheetKey);
+            if (!s) return;
+            const st = s.status || s.action;
+            if (st === 'import' || s.action === 'overwrite') {{
+                el.checked = true;
+                el.disabled = false;
+            }} else {{
+                el.checked = false;
+            }}
+        }});
+        updateSelCount();
+    }}
+
     async function runImport() {{
         if (!batchUuid) {{ alert('请先预检'); return; }}
-        const confirmKeys = (previewData.sheets || [])
-            .filter(s => s.action === 'needs_confirm')
-            .map(s => s.file_name + '::' + s.sheet_name);
+        const keys = selectedKeys();
+        if (!keys.length) {{ alert('必须选择至少一个 Sheet'); return; }}
+        const confirmKeys = [...confirmedKeys];
         const body = {{
+            file_id: batchUuid,
             batch_uuid: batchUuid,
             trust_product_id: parseInt(document.getElementById('trust_product_id').value),
-            confirm_sheet_keys: confirmKeys
+            selected_sheet_keys: keys,
+            confirm_sheet_keys: confirmKeys,
+            confirm: true
         }};
         const res = await fetch('/ingestion/import', {{
             method: 'POST',
@@ -234,26 +250,51 @@ def render_upload_page(trust_products: list[dict], username: str) -> str:
             body: JSON.stringify(body)
         }});
         const data = await res.json();
-        document.getElementById('result').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+        const pre = document.createElement('pre');
+        pre.textContent = JSON.stringify(data, null, 2);
+        document.getElementById('result').after(pre);
+        if (!res.ok) alert(data.detail || '导入失败');
     }}
+
     function renderPreview(data, ok) {{
-        let html = '<p class="' + (ok ? 'ok' : 'err') + '">batch: ' + (data.batch_uuid||'') + '</p><table><tr>';
-        ['file','sheet','type','parsed_date','rule','rows','amount','action','reason'].forEach(h => html += '<th>'+h+'</th>');
-        html += '</tr>';
-        (data.sheets||[]).forEach(s => {{
-            let typeCell = s.sheet_type;
+        const sheets = data.sheets || [];
+        let html = '<p class="' + (ok ? 'ok' : 'err') + '">file_id: ' + (data.file_id || data.batch_uuid || '') + '</p>';
+        html += '<div class="sheet-toolbar">';
+        html += '<button type="button" class="secondary" onclick="selectAllImport()">全选 import</button>';
+        html += '<button type="button" class="secondary" onclick="selectExcludeNeedsConfirm()">仅 import（排除 needs_confirm）</button>';
+        html += '</div>';
+        html += '<div class="table-wrap"><table><tr><th>选</th><th>file</th><th>sheet</th><th>type</th><th>rows</th><th>amount</th><th>status</th><th>reason</th></tr>';
+        sheets.forEach(s => {{
+            const key = sheetKey(s);
+            const st = s.status || s.action || '—';
+            const rowCls = st === 'reject' || s.action === 'failed' ? 'row-reject' : (st === 'needs_confirm' ? 'row-needs_confirm' : '');
+            const reject = isReject(s);
+            const needsConfirm = st === 'needs_confirm' || s.action === 'needs_confirm';
+            let cb = '';
+            if (!reject) {{
+                const disabled = needsConfirm && !confirmedKeys.has(key);
+                cb = '<input type="checkbox" class="sheet-select sheet-cb" data-sheet-key="'+key+'"';
+                cb += (disabled ? ' disabled' : '') + ' onchange="toggleSheet(\\''+key+'\\', this.checked)">';
+                if (needsConfirm) {{
+                    cb += '<br><label class="muted" style="font-size:0.75rem"><input type="checkbox" class="sheet-confirm-cb" onchange="toggleConfirm(\\''+key+'\\', this.checked)">二次确认</label>';
+                }}
+            }} else {{
+                cb = '<span class="err">禁选</span>';
+            }}
             let reasonCell = s.reason || '';
             if (s.sheet_type === 'ambiguous_sheet_type') {{
-                typeCell = '<span class="err">❌ 类型冲突</span>';
-                reasonCell = '名称识别：' + (s.name_type || '') + '<br>表头识别：' + (s.header_type || '') + '<br>请人工确认文件模板';
+                reasonCell = '名称识别：' + (s.name_type || '') + ' / 表头：' + (s.header_type || '');
             }}
-            html += '<tr><td>'+s.file_name+'</td><td>'+s.sheet_name+'</td><td>'+typeCell+'</td>';
-            html += '<td>'+(s.parsed_date||'—')+'</td><td>'+(s.date_rule_label||'—')+'</td>';
-            html += '<td>'+(s.row_count??'—')+'</td><td>'+(s.amount_sum??'—')+'</td>';
-            html += '<td>'+s.action+'</td><td>'+reasonCell+'</td></tr>';
+            html += '<tr class="'+rowCls+'"><td>'+cb+'</td>';
+            html += '<td>'+s.file_name+'</td><td>'+s.sheet_name+'</td><td>'+(s.type||s.sheet_type||'—')+'</td>';
+            html += '<td>'+(s.rows ?? s.row_count ?? '—')+'</td><td>'+(s.amount ?? s.amount_sum ?? '—')+'</td>';
+            html += '<td><span class="'+(st==='reject'?'err':(st==='needs_confirm'?'warn':'ok'))+'">'+st+'</span></td>';
+            html += '<td>'+reasonCell+'</td></tr>';
         }});
-        html += '</table>';
+        html += '</table></div>';
         document.getElementById('result').innerHTML = html;
+        document.getElementById('importBar').style.display = sheets.length ? 'block' : 'none';
+        updateSelCount();
     }}
     </script>
     """
@@ -263,6 +304,10 @@ def render_upload_page(trust_products: list[dict], username: str) -> str:
 def _filter_query_string(filters: dict, page: int | None = None) -> str:
     parts = []
     for key, val in filters.items():
+        if key == "include_history":
+            if val:
+                parts.append("include_history=1")
+            continue
         if val is not None and val != "":
             parts.append(f"{key}={escape(str(val))}")
     if page is not None:
@@ -346,7 +391,6 @@ RECORD_NUMERIC_COLUMNS: frozenset[str] = frozenset({
     "trust_product_id",
     "id",
     "trust_asset_id",
-    "period_no",
     "actual_repayment_amount",
     "initial_transfer_amount",
     "repaid_amount",
@@ -417,17 +461,17 @@ def _format_cell_display(key: str, value) -> str:
 def _record_col_class(key: str) -> str:
     classes: list[str] = []
     if key == "trust_product_name":
-        classes.extend(["col-trust-product", "col-single-line"])
+        classes.append("col-trust-product")
     elif key == "custody_asset_code":
-        classes.extend(["col-custody", "col-single-line"])
+        classes.append("col-custody")
     elif key == "source_asset_code":
-        classes.extend(["col-source-split", "col-single-line"])
+        classes.append("col-source-split")
     elif key == "asset_code":
-        classes.extend(["col-asset-code", "col-single-line"])
+        classes.append("col-asset-code")
     elif key == "source_file_name":
         classes.append("col-source-file-name")
     elif key == "source_sheet_name":
-        classes.extend(["col-source-sheet-name", "col-single-line"])
+        classes.append("col-source-sheet-name")
     elif key in RECORD_TIMESTAMP_COLUMNS:
         classes.append("col-timestamp")
     elif key in RECORD_DATE_ONLY_COLUMNS:
@@ -464,21 +508,13 @@ def _cell_display(key: str, value) -> str:
 def _render_source_file_name_cell(value) -> str:
     display = _cell_display("source_file_name", value)
     cls = _record_col_class("source_file_name")
-    title_attr = f' title="{escape(display)}"' if display != "—" else ""
-    return (
-        f'<td class="{cls}" data-col="source_file_name"{title_attr}>'
-        f'<span class="source-file-name-text">{escape(display)}</span></td>'
-    )
+    return f'<td class="{cls}" data-col="source_file_name">{escape(display)}</td>'
 
 
 def _render_source_sheet_name_cell(value) -> str:
     display = _cell_display("source_sheet_name", value)
     cls = _record_col_class("source_sheet_name")
-    title_attr = f' title="{escape(display)}"' if display != "—" else ""
-    return (
-        f'<td class="{cls}" data-col="source_sheet_name"{title_attr}>'
-        f'<span class="sheet-name-text">{escape(display)}</span></td>'
-    )
+    return f'<td class="{cls}" data-col="source_sheet_name">{escape(display)}</td>'
 
 
 def _render_record_cell(key: str, value) -> str:
@@ -490,16 +526,6 @@ def _render_record_cell(key: str, value) -> str:
     display = _cell_display(key, value)
     cls = _record_col_class(key)
     class_attr = f' class="{cls}"' if cls else ""
-    if key in ("trust_product_name", "custody_asset_code", "source_asset_code", "asset_code"):
-        title_attr = f' title="{escape(display)}"' if display != "—" else ""
-        return (
-            f'<td{class_attr} data-col="{escape(key)}"{title_attr}>'
-            f'<span class="cell-ellipsis">{escape(display)}</span></td>'
-        )
-    if key in RECORD_TIMESTAMP_COLUMNS:
-        raw_title = str(value) if value is not None else ""
-        title_attr = f' title="{escape(raw_title)}"' if raw_title else ""
-        return f'<td{class_attr} data-col="{escape(key)}"{title_attr}>{escape(display)}</td>'
     return f'<td{class_attr} data-col="{escape(key)}">{escape(display)}</td>'
 
 
@@ -546,6 +572,33 @@ def render_records_page(
                 <input name="asset_code" value="{compat_asset}" form="f" style="width:100%">
             </div>
         </details>"""
+
+    snapshot_banner = ""
+    if record_type == "monitor":
+        include_history = bool(filters.get("include_history"))
+        history_checked = " checked" if include_history else ""
+        view_mode = data.get("view_mode") or (
+            "history" if include_history else ("fixed_date" if filters.get("data_date") else "latest_effective")
+        )
+        if view_mode == "latest_effective":
+            snapshot_banner = (
+                '<p class="snapshot-hint ok">当前有效快照层：每个资产仅展示最新 data_date 记录</p>'
+            )
+        elif view_mode == "fixed_date":
+            snapshot_banner = (
+                f'<p class="snapshot-hint">已按指定数据日期筛选：{escape(str(filters.get("data_date")))}</p>'
+            )
+        else:
+            snapshot_banner = (
+                '<p class="snapshot-hint warn">历史快照模式：同一资产可能出现在多个 data_date 下</p>'
+            )
+        filter_inputs += f"""
+        <div class="snapshot-toggle">
+            <label>
+                <input type="checkbox" name="include_history" value="1" form="f"{history_checked}>
+                查看历史快照
+            </label>
+        </div>"""
 
     rows = ""
     headers = ""
@@ -597,10 +650,11 @@ def render_records_page(
             {filter_inputs}
             <div><button type="submit">筛选</button></div>
         </form>
+        {snapshot_banner}
     </div>
     {pager_block}
     <p class="muted"><a href="{escape(data_path)}?{json_qs}">JSON</a></p>
-    <div class="card" style="overflow-x:auto">
+    <div class="card table-wrap">
         <table class="records-table"><thead><tr>{headers}</tr></thead><tbody>{rows or '<tr><td>无数据</td></tr>'}</tbody></table>
     </div>
     {pager_block}

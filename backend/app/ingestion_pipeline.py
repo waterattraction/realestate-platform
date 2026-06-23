@@ -252,7 +252,37 @@ def _verify_trust_product(conn: Connection, trust_product_id: int) -> None:
         raise HTTPException(status_code=404, detail=f"trust_product_id {trust_product_id} not found")
 
 
-def _delete_existing_batch(conn: Connection, trust_product_id: int, data_date: date) -> None:
+def _delete_existing_monitor_batch(
+    conn: Connection,
+    trust_product_id: int,
+    data_date: date,
+    source_sheet_name: str,
+) -> None:
+    if not source_sheet_name or not str(source_sheet_name).strip():
+        raise HTTPException(
+            status_code=400,
+            detail="source_sheet_name 缺失，无法安全覆盖监控快照",
+        )
+    conn.execute(
+        text("""
+            DELETE FROM trust_asset_monitor_records
+            WHERE trust_product_id = :trust_product_id
+              AND data_date = :data_date
+              AND source_sheet_name = :source_sheet_name
+        """),
+        {
+            "trust_product_id": trust_product_id,
+            "data_date": data_date,
+            "source_sheet_name": source_sheet_name,
+        },
+    )
+
+
+def _delete_existing_repayment_batch(
+    conn: Connection,
+    trust_product_id: int,
+    data_date: date,
+) -> None:
     conn.execute(
         text("""
             DELETE FROM trust_repayment_detail_records
@@ -260,13 +290,16 @@ def _delete_existing_batch(conn: Connection, trust_product_id: int, data_date: d
         """),
         {"trust_product_id": trust_product_id, "data_date": data_date},
     )
-    conn.execute(
-        text("""
-            DELETE FROM trust_asset_monitor_records
-            WHERE trust_product_id = :trust_product_id AND data_date = :data_date
-        """),
-        {"trust_product_id": trust_product_id, "data_date": data_date},
-    )
+
+
+def _delete_existing_batch(
+    conn: Connection,
+    trust_product_id: int,
+    data_date: date,
+    monitor_sheet_name: str,
+) -> None:
+    _delete_existing_repayment_batch(conn, trust_product_id, data_date)
+    _delete_existing_monitor_batch(conn, trust_product_id, data_date, monitor_sheet_name)
 
 
 def _upsert_trust_asset(
@@ -387,6 +420,12 @@ def run_ingestion_pipeline(
     if monitor_raw.empty:
         raise HTTPException(status_code=400, detail="No monitor rows after filter")
 
+    if not SHEET_MONITOR or not str(SHEET_MONITOR).strip():
+        raise HTTPException(
+            status_code=400,
+            detail="source_sheet_name 缺失，无法安全覆盖监控快照",
+        )
+
     monitor_mapped = _map_dataframe(monitor_raw, _mappings_for_sheet(mappings, SHEET_MONITOR))
     repayment_mapped = _map_dataframe(repayment_raw, _mappings_for_sheet(mappings, SHEET_REPAYMENT))
 
@@ -407,7 +446,7 @@ def run_ingestion_pipeline(
     synced_at = datetime.now(timezone.utc)
     source_file_name = excel_file.name
 
-    _delete_existing_batch(conn, trust_product_id, data_date)
+    _delete_existing_batch(conn, trust_product_id, data_date, SHEET_MONITOR)
 
     upsert_asset_count = 0
     inserted_monitor_count = 0
