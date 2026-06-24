@@ -17,23 +17,19 @@ from sqlalchemy.engine import Connection
 
 from app import ingestion_cleanse as cleanse
 from app import ingestion_date_rules
+from app import query_utils
 from app.auth import record_ingestion_run, record_sheet_run
 
 RECONCILIATION_TOLERANCE = cleanse.RECONCILIATION_TOLERANCE
 
 
 def coerce_optional_int(value: str | int | None) -> int | None:
-    if value is None or value == "":
-        return None
-    return int(value)
+    return query_utils.parse_optional_int(value)
 
 
 def coerce_bool(value: str | int | bool | None) -> bool:
-    if value is None or value == "":
-        return False
-    if isinstance(value, bool):
-        return value
-    return str(value).lower() in ("1", "true", "yes", "on")
+    parsed = query_utils.parse_optional_bool(value)
+    return bool(parsed) if parsed is not None else False
 
 
 def build_record_filters(

@@ -114,7 +114,27 @@ def _page_shell(title: str, body: str, username: str | None = None) -> str:
         pre {{ white-space: pre-wrap; font-size: 0.8rem; color: #cbd5e1; }}
     </style>
 </head>
-<body><div class="container">{user_bar}{body}</div></body></html>"""
+<body><div class="container">{user_bar}{body}</div>
+<script>
+(function() {{
+    var filterForm = document.getElementById('f');
+    if (!filterForm || filterForm.method.toLowerCase() !== 'get') return;
+    filterForm.addEventListener('submit', function(ev) {{
+        ev.preventDefault();
+        var params = new URLSearchParams();
+        filterForm.querySelectorAll('input, select, textarea').forEach(function(el) {{
+            if (!el.name || el.disabled) return;
+            if (el.type === 'checkbox' && !el.checked) return;
+            var val = (el.value || '').trim();
+            if (val) params.set(el.name, val);
+        }});
+        var qs = params.toString();
+        var action = filterForm.getAttribute('action') || window.location.pathname;
+        window.location = action + (qs ? '?' + qs : '');
+    }});
+}})();
+</script>
+</body></html>"""
 
 
 def render_upload_page(trust_products: list[dict], username: str) -> str:

@@ -15,6 +15,7 @@ from app import auth_html
 from app import ingestion_html
 from app import ingestion_pipeline
 from app import ingestion_upload
+from app import query_utils
 from app import risk_hub
 from app.ui_css import TABLE_SCROLL_CSS
 
@@ -64,6 +65,34 @@ TRIGGER_SOURCE_LABELS = {
     "system": "系统自检",
     "trust": "信托要求",
 }
+
+TRUST_MARKER_OPTIONS = [
+    "未标记",
+    "信托已关注",
+    "信托要求跟进",
+    "信托确认无风险",
+    "信托要求说明",
+    "已反馈信托",
+]
+INTERNAL_STATUS_OPTIONS = ["待跟进", "跟进中", "已解决", "已关闭"]
+TRUST_MARKER_DEFAULT = "未标记"
+INTERNAL_STATUS_DEFAULT = "待跟进"
+
+CUSTODY_LIST_HEADERS = [
+    "托管房源号",
+    "信托产品",
+    "asset_code（兼容）",
+    "等级",
+    "逾期天数 / 提前结清日期",
+    "最后回款日",
+    "信托标记",
+    "内部状态",
+    "跟进台账",
+    "数据日期",
+    "初始受让金额",
+    "已还款金额",
+    "剩余还款金额",
+]
 
 DELINQUENCY_BUCKET_LABELS = {
     "ES": "ES（提前结清）",
@@ -399,36 +428,109 @@ def _custody_has_follow_up_sql() -> str:
     """
 
 
+def _custody_followup_count_sql() -> str:
+    return """
+        (
+            SELECT COUNT(DISTINCT f.id)
+            FROM monitor_enriched d2
+            INNER JOIN trust_overdue_followups f ON f.trust_asset_id = d2.trust_asset_id
+            WHERE d2.trust_product_id = mc.trust_product_id
+              AND d2.data_date = mc.data_date
+              AND d2.custody_asset_code = mc.custody_asset_code
+        )
+    """
+
+
+def _custody_marks_join_sql() -> str:
+    return """
+        LEFT JOIN trust_asset_trust_marks tm
+            ON tm.trust_product_id = mc.trust_product_id
+           AND tm.custody_asset_code = mc.custody_asset_code
+           AND tm.data_date = mc.data_date
+    """
+
+
+def _sort_custody_items_in_bucket(items: list, bucket: str) -> list:
+    if bucket == "ES":
+        return sorted(
+            items,
+            key=lambda it: it.get("last_payment_date") or "0000-01-01",
+            reverse=True,
+        )
+    return sorted(
+        items,
+        key=lambda it: -(it.get("overdue_days") if it.get("overdue_days") is not None else -1),
+    )
+
+
+def _apply_custody_list_filters(item: dict, filters: dict | None) -> bool:
+    if not filters:
+        return True
+    if filters.get("trust_product_id") is not None:
+        if item["trust_product_id"] != filters["trust_product_id"]:
+            return False
+    if filters.get("delinquency_bucket"):
+        if item["delinquency_bucket"] != filters["delinquency_bucket"]:
+            return False
+    if filters.get("trust_marker"):
+        if item.get("trust_marker") != filters["trust_marker"]:
+            return False
+    if filters.get("internal_status"):
+        if item.get("internal_status") != filters["internal_status"]:
+            return False
+    has_followup = filters.get("has_followup")
+    if has_followup == "yes" and int(item.get("followup_count") or 0) <= 0:
+        return False
+    if has_followup == "no" and int(item.get("followup_count") or 0) > 0:
+        return False
+    custody_q = (filters.get("custody_asset_code") or "").strip().lower()
+    if custody_q and custody_q not in item["custody_asset_code"].lower():
+        return False
+    return True
+
+
 def is_es_closed(remaining_amount: float, *, tolerance: float = RECONCILIATION_TOLERANCE) -> bool:
     return remaining_amount <= tolerance
 
 
 def _settlement_date_from_row(row) -> str | None:
     """提前结清日期：优先 max_payment_date，否则 last_payment_date."""
-    if row.max_payment_date:
+    if getattr(row, "max_payment_date", None):
         return str(row.max_payment_date)
-    if row.last_payment_date:
-        return str(row.last_payment_date)
+    raw = getattr(row, "raw_last_payment_date", None) or getattr(row, "last_payment_date", None)
+    if raw:
+        return str(raw)
     return None
 
 
 def _custody_item_from_row(row) -> dict:
     remaining = float(row.remaining_amount)
     source_codes = list(row.source_asset_codes) if row.source_asset_codes else []
+    asset_code = source_codes[0] if source_codes else row.custody_asset_code
     settlement_date = _settlement_date_from_row(row)
+    raw_last_payment = (
+        str(row.raw_last_payment_date)
+        if getattr(row, "raw_last_payment_date", None)
+        else None
+    )
+    trust_marker = getattr(row, "trust_marker", None) or TRUST_MARKER_DEFAULT
+    internal_status = getattr(row, "internal_status", None) or INTERNAL_STATUS_DEFAULT
+    followup_count = int(getattr(row, "followup_count", 0) or 0)
     base = {
         "trust_product_id": row.trust_product_id,
         "trust_product_name": row.trust_product_name,
         "data_date": str(row.data_date),
         "custody_asset_code": row.custody_asset_code,
+        "asset_code": asset_code,
         "source_asset_count": int(row.source_asset_count),
         "source_asset_codes": source_codes,
         "initial_transfer_amount": float(row.initial_transfer_amount),
         "repaid_amount": float(row.repaid_amount),
         "remaining_amount": remaining,
-        "last_payment_date": settlement_date,
-        "max_payment_date": settlement_date,
-        "has_follow_up": bool(row.has_follow_up),
+        "trust_marker": trust_marker,
+        "internal_status": internal_status,
+        "followup_count": followup_count,
+        "has_follow_up": bool(getattr(row, "has_follow_up", False)),
     }
     if is_es_closed(remaining):
         return {
@@ -437,6 +539,8 @@ def _custody_item_from_row(row) -> dict:
             "delinquency_bucket": "ES",
             "status": "closed",
             "overdue_days": None,
+            "last_payment_date": settlement_date,
+            "settlement_date": settlement_date,
         }
     raw_od = row.overdue_days
     overdue_days = int(raw_od) if raw_od is not None else 0
@@ -448,6 +552,8 @@ def _custody_item_from_row(row) -> dict:
         "delinquency_bucket": bucket,
         "status": status,
         "overdue_days": overdue_days,
+        "last_payment_date": raw_last_payment,
+        "settlement_date": None,
     }
 
 
@@ -592,7 +698,25 @@ def _fetch_overdue_recalc_meta(
     }
 
 
-def fetch_overdue_overview(conn, trust_product_id: int | None = None, data_date: str | None = None):
+def fetch_overdue_overview(
+    conn,
+    trust_product_id: int | None = None,
+    data_date: str | None = None,
+    *,
+    delinquency_bucket: str | None = None,
+    trust_marker: str | None = None,
+    internal_status: str | None = None,
+    has_followup: str | None = None,
+    custody_asset_code: str | None = None,
+):
+    list_filters = {
+        "trust_product_id": trust_product_id,
+        "delinquency_bucket": delinquency_bucket,
+        "trust_marker": trust_marker,
+        "internal_status": internal_status,
+        "has_followup": has_followup,
+        "custody_asset_code": custody_asset_code,
+    }
     monitor_filter, params = _latest_monitor_filter(trust_product_id, data_date)
     custody_ctes = _monitor_custody_ctes(monitor_filter)
 
@@ -698,28 +822,48 @@ def fetch_overdue_overview(conn, trust_product_id: int | None = None, data_date:
                 mc.initial_transfer_amount,
                 mc.repaid_amount,
                 mc.remaining_amount,
-                mc.last_payment_date,
+                mc.last_payment_date AS raw_last_payment_date,
                 mc.max_payment_date,
                 mc.overdue_days,
                 mc.source_asset_codes,
+                COALESCE(tm.trust_marker, :default_trust_marker) AS trust_marker,
+                COALESCE(tm.internal_status, :default_internal_status) AS internal_status,
+                {_custody_followup_count_sql()} AS followup_count,
                 {_custody_has_follow_up_sql()} AS has_follow_up
             FROM monitor_custody mc
             INNER JOIN trust_products tp ON tp.id = mc.trust_product_id
+            {_custody_marks_join_sql()}
             ORDER BY
-                CASE WHEN mc.remaining_amount <= :tolerance THEN 0 ELSE 1 END,
+                CASE
+                    WHEN mc.remaining_amount <= :tolerance THEN 4
+                    WHEN COALESCE(mc.overdue_days, 0) > 90 THEN 0
+                    WHEN COALESCE(mc.overdue_days, 0) > 60 THEN 1
+                    WHEN COALESCE(mc.overdue_days, 0) > 30 THEN 2
+                    WHEN mc.remaining_amount > :tolerance THEN 3
+                    ELSE 5
+                END,
                 COALESCE(mc.overdue_days, 0) DESC,
                 mc.max_payment_date DESC NULLS LAST,
                 mc.custody_asset_code
         """),
-        query_params,
+        {
+            **query_params,
+            "default_trust_marker": TRUST_MARKER_DEFAULT,
+            "default_internal_status": INTERNAL_STATUS_DEFAULT,
+        },
     )
 
     top_overdue_by_bucket: dict[str, list] = {k: [] for k in empty_buckets}
     for r in overdue_rows:
         item = _custody_item_from_row(r)
+        if not _apply_custody_list_filters(item, list_filters):
+            continue
         bucket = item["delinquency_bucket"]
         if bucket in top_overdue_by_bucket:
             top_overdue_by_bucket[bucket].append(item)
+
+    for bucket, items in top_overdue_by_bucket.items():
+        top_overdue_by_bucket[bucket] = _sort_custody_items_in_bucket(items, bucket)
 
     es = int(row.es_count)
     m1 = int(row.m1_count)
@@ -744,8 +888,108 @@ def fetch_overdue_overview(conn, trust_product_id: int | None = None, data_date:
         "reconciliation_count_basis": "custody_asset_code",
         "active_followup_count": int(followup_row.cnt) if followup_row else 0,
         "top_overdue_by_bucket": top_overdue_by_bucket,
+        "list_filters": list_filters,
         **_fetch_overdue_recalc_meta(conn, trust_product_id, data_date),
     }
+
+
+def upsert_custody_trust_mark(
+    conn,
+    trust_product_id: int,
+    custody_asset_code: str,
+    data_date: str,
+    *,
+    trust_marker: str | None = None,
+    internal_status: str | None = None,
+    updated_by: str | None = None,
+) -> dict:
+    if trust_marker is not None and trust_marker not in TRUST_MARKER_OPTIONS:
+        raise HTTPException(status_code=400, detail="Invalid trust_marker")
+    if internal_status is not None and internal_status not in INTERNAL_STATUS_OPTIONS:
+        raise HTTPException(status_code=400, detail="Invalid internal_status")
+    if trust_marker is None and internal_status is None:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    existing = conn.execute(
+        text("""
+            SELECT id, trust_marker, internal_status
+            FROM trust_asset_trust_marks
+            WHERE trust_product_id = :trust_product_id
+              AND custody_asset_code = :custody_asset_code
+              AND data_date = :data_date
+        """),
+        {
+            "trust_product_id": trust_product_id,
+            "custody_asset_code": custody_asset_code,
+            "data_date": data_date,
+        },
+    ).fetchone()
+
+    if existing:
+        new_marker = trust_marker if trust_marker is not None else existing.trust_marker
+        new_status = (
+            internal_status if internal_status is not None else existing.internal_status
+        )
+        conn.execute(
+            text("""
+                UPDATE trust_asset_trust_marks
+                SET trust_marker = :trust_marker,
+                    internal_status = :internal_status,
+                    updated_by = :updated_by,
+                    updated_at = NOW()
+                WHERE id = :id
+            """),
+            {
+                "id": existing.id,
+                "trust_marker": new_marker,
+                "internal_status": new_status,
+                "updated_by": updated_by,
+            },
+        )
+        return {
+            "id": existing.id,
+            "trust_product_id": trust_product_id,
+            "custody_asset_code": custody_asset_code,
+            "data_date": data_date,
+            "trust_marker": new_marker,
+            "internal_status": new_status,
+        }
+
+    new_marker = trust_marker or TRUST_MARKER_DEFAULT
+    new_status = internal_status or INTERNAL_STATUS_DEFAULT
+    row = conn.execute(
+        text("""
+            INSERT INTO trust_asset_trust_marks (
+                trust_product_id, custody_asset_code, data_date,
+                trust_marker, internal_status, created_by, updated_by
+            ) VALUES (
+                :trust_product_id, :custody_asset_code, :data_date,
+                :trust_marker, :internal_status, :updated_by, :updated_by
+            )
+            RETURNING id
+        """),
+        {
+            "trust_product_id": trust_product_id,
+            "custody_asset_code": custody_asset_code,
+            "data_date": data_date,
+            "trust_marker": new_marker,
+            "internal_status": new_status,
+            "updated_by": updated_by,
+        },
+    ).fetchone()
+    return {
+        "id": row.id,
+        "trust_product_id": trust_product_id,
+        "custody_asset_code": custody_asset_code,
+        "data_date": data_date,
+        "trust_marker": new_marker,
+        "internal_status": new_status,
+    }
+
+
+def fetch_trust_products(conn) -> list[dict]:
+    rows = conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
+    return [{"id": r.id, "name": r.name} for r in rows]
 
 
 def fetch_overdue_checks(conn, trust_product_id: int | None = None, data_date: str | None = None):
@@ -1063,14 +1307,15 @@ def fetch_overdue_followups(conn, trust_product_id: int | None = None, status: s
 def _recon_checks_for_asset(
     initial: float, repaid: float, remaining: float, detail_total: float
 ) -> dict:
-    balance_diff = (initial - repaid) - remaining
+    """与 /overdue/reconciliation 一致的核对口径（托管维度累计还款明细）。"""
+    balance_remainder = remaining - initial + repaid
     cross_diff = repaid - detail_total
     return {
         "balance_equation": {
-            "passed": abs(balance_diff) <= RECONCILIATION_TOLERANCE,
-            "left_amount": initial - repaid,
-            "right_amount": remaining,
-            "diff_amount": balance_diff,
+            "passed": abs(balance_remainder) <= RECONCILIATION_TOLERANCE,
+            "left_amount": remaining,
+            "right_amount": initial - repaid,
+            "diff_amount": balance_remainder,
         },
         "cross_sheet_repayment": {
             "passed": abs(cross_diff) <= RECONCILIATION_TOLERANCE,
@@ -1081,11 +1326,28 @@ def _recon_checks_for_asset(
     }
 
 
+def _followup_status_options(current: str | None) -> str:
+    options = ""
+    for value, label in FOLLOWUP_STATUS_LABELS.items():
+        selected = " selected" if value == current else ""
+        options += f'<option value="{value}"{selected}>{escape(label)}</option>'
+    return options
+
+
+def fmt_workbench_risk_rating(level: str | None) -> str:
+    if level == "ES":
+        return fmt_risk_badge("ES")
+    if not level:
+        return '<span class="badge unrated-badge">未评分</span>'
+    return fmt_risk_badge(level)
+
+
 def fetch_overdue_workbench(
     conn,
     trust_product_id: int | None = None,
     trust_asset_id: int | None = None,
     data_date: str | None = None,
+    custody_asset_code: str | None = None,
 ):
     monitor_filter, params = _latest_monitor_filter(trust_product_id, data_date)
 
@@ -1094,7 +1356,13 @@ def fetch_overdue_workbench(
         params,
     ).fetchone()
     if date_row is None:
-        return {"data_date": data_date, "queue": [], "selected_asset_id": None, "detail": None}
+        return {
+            "data_date": data_date,
+            "queue": [],
+            "selected_asset_id": None,
+            "detail": None,
+            "custody_asset_code": custody_asset_code,
+        }
 
     resolved_data_date = date_row.data_date
     query_params = dict(params)
@@ -1109,13 +1377,21 @@ def fetch_overdue_workbench(
         else:
             recon_filter = "m.data_date = :data_date"
 
+    if custody_asset_code:
+        asset_scope_filter = (
+            "COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code) = :custody_asset_code"
+        )
+        query_params["custody_asset_code"] = custody_asset_code
+    else:
+        asset_scope_filter = sql_overdue_asset_filter("m.overdue_days", "m.remaining_amount")
+
     rows = conn.execute(
         text(f"""
             WITH monitor AS (
                 SELECT
                     m.trust_asset_id,
                     m.asset_code,
-                    COALESCE(m.custody_asset_code, ta.custody_asset_code) AS custody_asset_code,
+                    COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code) AS custody_asset_code,
                     COALESCE(m.source_asset_code, ta.source_asset_code, m.asset_code) AS source_asset_code,
                     m.trust_product_id,
                     m.data_date,
@@ -1133,18 +1409,21 @@ def fetch_overdue_workbench(
                 INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
                 INNER JOIN trust_products tp ON tp.id = m.trust_product_id
                 WHERE {recon_filter}
-                  AND {sql_overdue_asset_filter("m.overdue_days", "m.remaining_amount")}
+                  AND {asset_scope_filter}
             ),
-            repayment_sum AS (
-                SELECT trust_asset_id, COALESCE(SUM(actual_repayment_amount), 0) AS total_repaid
-                FROM trust_repayment_detail_records
-                WHERE data_date = :data_date
-                  {"AND trust_product_id = :trust_product_id" if trust_product_id is not None else ""}
-                GROUP BY trust_asset_id
+            repayment_custody AS (
+                SELECT
+                    r.trust_product_id,
+                    COALESCE(r.custody_asset_code, r.asset_code) AS custody_asset_code,
+                    COALESCE(SUM(r.actual_repayment_amount), 0) AS total_repaid
+                FROM trust_repayment_detail_records r
+                WHERE 1=1
+                  {"AND r.trust_product_id = :trust_product_id" if trust_product_id is not None else ""}
+                GROUP BY r.trust_product_id, COALESCE(r.custody_asset_code, r.asset_code)
             )
             SELECT
                 mon.*,
-                COALESCE(rs.total_repaid, 0) AS detail_total_repaid,
+                COALESCE(rc.total_repaid, 0) AS detail_total_repaid,
                 f.id AS followup_id,
                 f.status AS followup_status,
                 f.owner_name AS followup_owner,
@@ -1153,7 +1432,9 @@ def fetch_overdue_workbench(
                 f.trust_feedback AS followup_feedback,
                 f.last_follow_up_at AS followup_last_at
             FROM monitor mon
-            LEFT JOIN repayment_sum rs ON rs.trust_asset_id = mon.trust_asset_id
+            LEFT JOIN repayment_custody rc
+                ON rc.trust_product_id = mon.trust_product_id
+               AND rc.custody_asset_code = mon.custody_asset_code
             LEFT JOIN LATERAL (
                 SELECT id, status, owner_name, overdue_reason, follow_up_plan,
                        trust_feedback, last_follow_up_at
@@ -1170,10 +1451,13 @@ def fetch_overdue_workbench(
 
     queue = []
     for r in rows:
+        remaining = float(r.remaining_amount)
+        is_es = is_es_closed(remaining)
+        od_val = None if is_es or r.overdue_days is None else int(r.overdue_days)
         checks = _recon_checks_for_asset(
             float(r.initial_transfer_amount),
             float(r.repaid_amount),
-            float(r.remaining_amount),
+            remaining,
             float(r.detail_total_repaid),
         )
         queue.append({
@@ -1185,38 +1469,65 @@ def fetch_overdue_workbench(
             "trust_product_id": r.trust_product_id,
             "trust_product_name": r.trust_product_name,
             "data_date": str(r.data_date),
-            "overdue_days": int(r.overdue_days),
+            "overdue_days": od_val,
             "risk_score": int(r.risk_score) if r.risk_score is not None else None,
-            "risk_level": r.risk_level,
-            "delinquency_bucket": calc_risk_level(
-                int(r.overdue_days), float(r.remaining_amount),
+            "risk_level": "ES" if is_es else r.risk_level,
+            "delinquency_bucket": "ES" if is_es else calc_risk_level(
+                int(r.overdue_days or 0), remaining,
             ),
             "last_payment_date": str(r.last_payment_date) if r.last_payment_date else None,
             "checks": checks,
             "followup_id": r.followup_id,
             "followup_status": r.followup_status,
+            "followup_owner": r.followup_owner,
+            "followup_reason": r.followup_reason,
+            "followup_plan": r.followup_plan,
+            "followup_feedback": r.followup_feedback,
+            "followup_last_at": (
+                str(r.followup_last_at) if r.followup_last_at else None
+            ),
             "has_follow_up": r.followup_id is not None,
         })
 
     selected_id = trust_asset_id
-    if selected_id is None and queue:
+    if selected_id is None and custody_asset_code and queue:
+        selected_id = queue[0]["trust_asset_id"]
+    elif selected_id is None and queue:
         selected_id = queue[0]["trust_asset_id"]
 
     detail = None
     if selected_id is not None:
         detail = next((q for q in queue if q["trust_asset_id"] == selected_id), None)
         if detail:
-            history = [
-                f for f in fetch_overdue_followups(conn, trust_product_id=trust_product_id)
-                if f["trust_asset_id"] == selected_id
+            custody_code = detail["custody_asset_code"]
+            custody_asset_ids = {
+                q["trust_asset_id"]
+                for q in queue
+                if q["custody_asset_code"] == custody_code
+            }
+            all_followups = fetch_overdue_followups(
+                conn, trust_product_id=trust_product_id
+            )
+            asset_history = [
+                f for f in all_followups if f["trust_asset_id"] == selected_id
             ]
-            detail = {**detail, "followup_history": history}
+            custody_history = [
+                f for f in all_followups if f["trust_asset_id"] in custody_asset_ids
+            ]
+            asset_history.sort(key=lambda h: h.get("created_at") or "", reverse=True)
+            custody_history.sort(key=lambda h: h.get("created_at") or "", reverse=True)
+            detail = {
+                **detail,
+                "followup_history": asset_history,
+                "custody_followup_history": custody_history,
+            }
 
     return {
         "data_date": str(resolved_data_date),
         "queue": queue,
         "selected_asset_id": selected_id,
         "detail": detail,
+        "custody_asset_code": custody_asset_code,
     }
 
 
@@ -1297,25 +1608,27 @@ def update_overdue_followup_record(
     if row is None:
         raise HTTPException(status_code=404, detail="Follow-up not found")
 
+    sets = ["last_follow_up_at = NOW()"]
+    params: dict = {"id": followup_id}
+    if status is not None:
+        sets.append("status = :status")
+        params["status"] = status
+    if owner_name is not None:
+        sets.append("owner_name = :owner_name")
+        params["owner_name"] = owner_name or None
+    if overdue_reason is not None:
+        sets.append("overdue_reason = :overdue_reason")
+        params["overdue_reason"] = overdue_reason or None
+    if follow_up_plan is not None:
+        sets.append("follow_up_plan = :follow_up_plan")
+        params["follow_up_plan"] = follow_up_plan or None
+    if trust_feedback is not None:
+        sets.append("trust_feedback = :trust_feedback")
+        params["trust_feedback"] = trust_feedback or None
+
     conn.execute(
-        text("""
-            UPDATE trust_overdue_followups SET
-                status = COALESCE(:status, status),
-                owner_name = COALESCE(:owner_name, owner_name),
-                overdue_reason = COALESCE(:overdue_reason, overdue_reason),
-                follow_up_plan = COALESCE(:follow_up_plan, follow_up_plan),
-                trust_feedback = COALESCE(:trust_feedback, trust_feedback),
-                last_follow_up_at = NOW()
-            WHERE id = :id
-        """),
-        {
-            "id": followup_id,
-            "status": status,
-            "owner_name": owner_name,
-            "overdue_reason": overdue_reason,
-            "follow_up_plan": follow_up_plan,
-            "trust_feedback": trust_feedback,
-        },
+        text(f"UPDATE trust_overdue_followups SET {', '.join(sets)} WHERE id = :id"),
+        params,
     )
     conn.commit()
 
@@ -1346,16 +1659,24 @@ def fmt_check_result(passed: bool, label: str = "") -> str:
     return f'<span class="badge fail-badge">{escape(label)}异常</span>'
 
 
-def render_overdue_workbench_html(data: dict, trust_product_id: int | None = None):
+def render_overdue_workbench_html(
+    data: dict,
+    trust_product_id: int | None = None,
+    custody_asset_code: str | None = None,
+    new_followup: bool = False,
+):
     queue = data["queue"]
     detail = data.get("detail")
     selected_id = data.get("selected_asset_id")
     data_date = data.get("data_date") or "—"
+    resolved_custody = custody_asset_code or data.get("custody_asset_code")
 
     def workbench_qs(trust_asset_id: int | None = None) -> str:
         parts = []
         if trust_product_id is not None:
             parts.append(f"trust_product_id={trust_product_id}")
+        if resolved_custody:
+            parts.append(f"custody_asset_code={quote(resolved_custody)}")
         if trust_asset_id is not None:
             parts.append(f"trust_asset_id={trust_asset_id}")
         return "?" + "&".join(parts) if parts else ""
@@ -1365,11 +1686,21 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
         if trust_product_id is not None
         else ""
     )
+    custody_hidden = (
+        f'<input type="hidden" name="custody_asset_code" value="{escape(resolved_custody)}">'
+        if resolved_custody
+        else ""
+    )
 
     queue_items = ""
     for item in queue:
         active = "active" if item["trust_asset_id"] == selected_id else ""
         recon_flag = "" if item["checks"]["cross_sheet_repayment"]["passed"] else " ⚠"
+        od_label = (
+            f"提前结清 {item.get('last_payment_date') or '—'}"
+            if item.get("delinquency_bucket") == "ES"
+            else f"逾期 {item['overdue_days']}天"
+        )
         queue_items += f"""
             <a class="queue-item {active}"
                href="/overdue/workbench{workbench_qs(item['trust_asset_id'])}">
@@ -1378,14 +1709,19 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
                     {fmt_risk_badge(item['risk_level']) if item.get('risk_level') else fmt_delinquency_badge(item['delinquency_bucket'])}
                 </div>
                 <div class="queue-meta">
-                    <span>逾期 {item['overdue_days']}天</span>
+                    <span>{od_label}</span>
                     <span>评分 {item['risk_score'] if item['risk_score'] is not None else '—'}</span>
                     <span>{'已跟进' if item['has_follow_up'] else '未跟进'}</span>
                 </div>
             </a>
         """
     if not queue_items:
-        queue_items = '<div class="empty">暂无逾期房源</div>'
+        empty_msg = "暂无房源" if resolved_custody else "暂无逾期房源"
+        queue_items = f'<div class="empty">{empty_msg}</div>'
+
+    panel_title = "托管房源"
+    if resolved_custody:
+        panel_title = f"托管房源 · {escape(resolved_custody)}"
 
     detail_html = '<div class="empty">请从左侧选择房源</div>'
     if detail:
@@ -1393,56 +1729,114 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
         bal = checks["balance_equation"]
         cross = checks["cross_sheet_repayment"]
         owner_val = escape(detail.get("followup_owner") or "")
+        reason_val = escape(detail.get("followup_reason") or "")
+        plan_val = escape(detail.get("followup_plan") or "")
+        feedback_val = escape(detail.get("followup_feedback") or "")
+        current_status = detail.get("followup_status") or "open"
 
         followup_section = ""
-        if detail.get("followup_id"):
+        show_create = new_followup or not detail.get("followup_id")
+        if detail.get("followup_id") and not new_followup:
             fid = detail["followup_id"]
             followup_section = f"""
                 <div class="panel-section">
-                    <h3>跟进台账</h3>
+                    <h3>当前跟进台账</h3>
                     <p><span class="lbl">状态</span>
                        {escape(FOLLOWUP_STATUS_LABELS.get(detail['followup_status'], detail['followup_status'] or '—'))}</p>
                     <p><span class="lbl">负责人</span>{escape(detail.get('followup_owner') or '—')}</p>
                     <p><span class="lbl">逾期原因</span>{escape(detail.get('followup_reason') or '—')}</p>
                     <p><span class="lbl">跟进方案</span>{escape(detail.get('followup_plan') or '—')}</p>
-                    <form class="inline-form" method="post"
+                    <p><span class="lbl">信托反馈</span>{escape(detail.get('followup_feedback') or '—')}</p>
+                    <p><span class="lbl">最近跟进</span>{escape(detail.get('followup_last_at') or '—')}</p>
+                    <form class="followup-form" method="post"
                           action="/overdue/workbench/followups/{fid}/update{workbench_qs()}">
                         <input type="hidden" name="trust_asset_id" value="{detail['trust_asset_id']}">
                         {product_hidden}
-                        <label>更新状态
-                            <select name="status">
-                                <option value="open">待处理</option>
-                                <option value="in_progress">跟进中</option>
-                                <option value="resolved">已解决</option>
-                                <option value="closed">已关闭</option>
-                            </select>
+                        {custody_hidden}
+                        <label>状态
+                            <select name="status">{_followup_status_options(current_status)}</select>
                         </label>
                         <label>负责人 <input name="owner_name" value="{owner_val}"></label>
+                        <label>逾期原因<textarea name="overdue_reason" rows="2">{reason_val}</textarea></label>
+                        <label>跟进方案<textarea name="follow_up_plan" rows="2">{plan_val}</textarea></label>
+                        <label>信托反馈<textarea name="trust_feedback" rows="2">{feedback_val}</textarea></label>
                         <button type="submit" class="btn">更新</button>
                     </form>
                     <form class="inline-form" method="post"
                           action="/overdue/workbench/followups/{fid}/resolve{workbench_qs()}">
                         <input type="hidden" name="trust_asset_id" value="{detail['trust_asset_id']}">
                         {product_hidden}
+                        {custody_hidden}
                         <button type="submit" class="btn primary">标记已解决</button>
                     </form>
                 </div>
             """
-        else:
+        elif show_create:
             followup_section = f"""
-                <div class="panel-section">
+                <div class="panel-section" id="new-followup-form">
                     <h3>创建跟进台账</h3>
-                    <form method="post" action="/overdue/workbench/followups{workbench_qs()}">
+                    <form class="followup-form" method="post" action="/overdue/workbench/followups{workbench_qs()}">
                         <input type="hidden" name="trust_asset_id" value="{detail['trust_asset_id']}">
                         {product_hidden}
+                        {custody_hidden}
                         <label>逾期原因<textarea name="overdue_reason" rows="2"></textarea></label>
                         <label>跟进方案<textarea name="follow_up_plan" rows="2"></textarea></label>
                         <label>负责人<input name="owner_name"></label>
-                        <label>信托反馈口径<textarea name="trust_feedback" rows="2"></textarea></label>
+                        <label>信托反馈<textarea name="trust_feedback" rows="2"></textarea></label>
                         <button type="submit" class="btn primary">创建跟进</button>
                     </form>
                 </div>
             """
+
+        def _history_rows(items: list, row_class: str) -> str:
+            rows = ""
+            for h in items:
+                rows += f"""
+                <tr class="{row_class}">
+                    <td>{escape(h.get('asset_code') or '—')}</td>
+                    <td>{escape(FOLLOWUP_STATUS_LABELS.get(h.get('status'), h.get('status') or '—'))}</td>
+                    <td>{escape(h.get('owner_name') or '—')}</td>
+                    <td>{escape(h.get('overdue_reason') or '—')}</td>
+                    <td>{escape(h.get('last_follow_up_at') or h.get('created_at') or '—')}</td>
+                </tr>
+            """
+            return rows
+
+        asset_history = detail.get("followup_history") or []
+        custody_history = detail.get("custody_followup_history") or []
+        show_custody_toggle = len(custody_history) > len(asset_history)
+        history_rows = _history_rows(asset_history, "history-row history-asset")
+        if show_custody_toggle:
+            history_rows += _history_rows(custody_history, "history-row history-custody")
+        history_section = ""
+        if history_rows:
+            toggle_html = ""
+            if show_custody_toggle:
+                toggle_html = """
+                    <label class="history-toggle">
+                        <input type="checkbox" id="custody-history-toggle">
+                        查看托管房源全部历史
+                    </label>
+                """
+            history_section = f"""
+                <div class="panel-section" id="followup-history-section">
+                    <h3>跟进历史</h3>
+                    {toggle_html}
+                    <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>房源</th><th>状态</th><th>负责人</th><th>原因</th><th>时间</th></tr></thead>
+                        <tbody>{history_rows}</tbody>
+                    </table>
+                    </div>
+                </div>
+            """
+
+        od_display = (
+            escape(detail.get("last_payment_date") or "—")
+            if detail.get("delinquency_bucket") == "ES"
+            else str(detail.get("overdue_days") if detail.get("overdue_days") is not None else "—")
+        )
+        od_label = "提前结清日期" if detail.get("delinquency_bucket") == "ES" else "逾期天数"
 
         detail_html = f"""
             <div class="panel-section">
@@ -1451,13 +1845,14 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
                 <p class="muted">{escape(detail['trust_product_name'])} · 数据日期 {escape(detail['data_date'])}</p>
             </div>
             <div class="panel-section kpi-row">
-                <div class="kpi"><span class="lbl">逾期天数</span><span class="val warn">{detail['overdue_days']}</span></div>
-                <div class="kpi"><span class="lbl">风险等级</span>{fmt_risk_badge(detail.get('risk_level'))}</div>
-                <div class="kpi"><span class="lbl">M级</span>{fmt_delinquency_badge(detail['delinquency_bucket'])}</div>
+                <div class="kpi"><span class="lbl">{od_label}</span><span class="val warn">{od_display}</span></div>
+                <div class="kpi"><span class="lbl">风控评级</span>{fmt_workbench_risk_rating(detail.get('risk_level'))}</div>
+                <div class="kpi"><span class="lbl">M级（逾期分层）</span>{fmt_delinquency_badge(detail['delinquency_bucket'])}</div>
                 <div class="kpi"><span class="lbl">最后回款</span><span class="val">{escape(detail.get('last_payment_date') or '—')}</span></div>
             </div>
             <div class="panel-section">
                 <h3>金额核对</h3>
+                <p class="muted">核对基准：{escape(RECONCILIATION_BASIS_LABEL)}</p>
                 <div class="table-wrap">
                 <table>
                     <thead><tr><th>核对项</th><th>结果</th><th>左侧</th><th>右侧</th><th>差额</th></tr></thead>
@@ -1465,15 +1860,15 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
                         <tr>
                             <td>余额等式</td>
                             <td>{fmt_check_result(bal['passed'])}</td>
-                            <td class="num">{fmt_money(bal['left_amount'])}</td>
-                            <td class="num">{fmt_money(bal['right_amount'])}</td>
+                            <td class="num">{fmt_money(bal['left_amount'])}<br><span class="muted tiny">剩余还款金额</span></td>
+                            <td class="num">{fmt_money(bal['right_amount'])}<br><span class="muted tiny">初始受让−已还</span></td>
                             <td class="num {'warn' if not bal['passed'] else ''}">{fmt_money(bal['diff_amount'])}</td>
                         </tr>
                         <tr>
                             <td>跨表已还</td>
                             <td>{fmt_check_result(cross['passed'])}</td>
-                            <td class="num">{fmt_money(cross['left_amount'])}</td>
-                            <td class="num">{fmt_money(cross['right_amount'])}</td>
+                            <td class="num">{fmt_money(cross['left_amount'])}<br><span class="muted tiny">监控已还</span></td>
+                            <td class="num">{fmt_money(cross['right_amount'])}<br><span class="muted tiny">还款明细累计</span></td>
                             <td class="num {'warn' if not cross['passed'] else ''}">{fmt_money(cross['diff_amount'])}</td>
                         </tr>
                     </tbody>
@@ -1481,6 +1876,7 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
                 </div>
             </div>
             {followup_section}
+            {history_section}
             <div class="panel-section">
                 <h3>API</h3>
                 <p class="muted">
@@ -1492,6 +1888,26 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
         """
 
     json_qs = workbench_qs()
+    page_scripts = """
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        var el = document.getElementById('new-followup-form');
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        var toggle = document.getElementById('custody-history-toggle');
+        if (!toggle) return;
+        function applyHistoryFilter() {
+            var showAll = toggle.checked;
+            document.querySelectorAll('.history-row.history-asset').forEach(function(row) {
+                row.style.display = showAll ? 'none' : '';
+            });
+            document.querySelectorAll('.history-row.history-custody').forEach(function(row) {
+                row.style.display = showAll ? '' : 'none';
+            });
+        }
+        toggle.addEventListener('change', applyHistoryFilter);
+        applyHistoryFilter();
+    });
+    </script>"""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1532,6 +1948,12 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
         .badge {{ display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.72rem; border: 1px solid rgba(255,255,255,0.15); }}
         .ok-badge {{ background: #34d39922; color: #34d399; border-color: #34d39955; }}
         .fail-badge {{ background: #f8717122; color: #f87171; border-color: #f8717155; }}
+        .unrated-badge {{ background: rgba(148,163,184,0.15); color: #94a3b8; border-color: rgba(148,163,184,0.35); }}
+        .history-row.history-custody {{ display: none; }}
+        .history-toggle {{ display: block; margin-bottom: 0.65rem; font-size: 0.85rem; color: #94a3b8; }}
+        .history-toggle input {{ width: auto; margin-right: 0.35rem; vertical-align: middle; }}
+        .tiny {{ font-size: 0.72rem; font-weight: 400; }}
+        .followup-form {{ margin-top: 0.75rem; }}
         .empty {{ color: #64748b; text-align: center; padding: 1.5rem; }}
         .muted {{ color: #94a3b8; font-size: 0.85rem; }}
         .lbl {{ color: #64748b; font-size: 0.8rem; }}
@@ -1559,12 +1981,13 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
         </nav>
         <header>
             <h1>逾期工作台</h1>
-            <p>数据日期 {escape(data_date)} · 共 {len(queue)} 户逾期 ·
+            <p>数据日期 {escape(data_date)} · 共 {len(queue)} 户
+               {f"· 托管 {escape(resolved_custody)}" if resolved_custody else ""} ·
                <a href="/overdue/workbench/data{json_qs}">JSON</a></p>
         </header>
         <div class="workbench">
             <div class="panel">
-                <div class="panel-hd">逾期房源（按风险排序）</div>
+                <div class="panel-hd">{panel_title}</div>
                 <div>{queue_items}</div>
             </div>
             <div class="panel">
@@ -1574,46 +1997,73 @@ def render_overdue_workbench_html(data: dict, trust_product_id: int | None = Non
         </div>
         <footer>Real Estate Securitization Platform</footer>
     </div>
+    {page_scripts}
 </body>
 </html>"""
 
 
-def _render_custody_table_rows(items: list) -> str:
+def _render_custody_mark_select(field: str, value: str, options: list[str], item: dict) -> str:
+    opts = ""
+    for opt in options:
+        selected = " selected" if opt == value else ""
+        opts += f'<option value="{escape(opt)}"{selected}>{escape(opt)}</option>'
+    return f"""
+        <select class="custody-mark-select" data-field="{field}"
+            data-trust-product-id="{item['trust_product_id']}"
+            data-custody-asset-code="{escape(item['custody_asset_code'])}"
+            data-data-date="{escape(item['data_date'])}">{opts}</select>
+    """
+
+
+def _render_followup_cell(item: dict) -> str:
+    cnt = int(item.get("followup_count") or 0)
+    custody_q = quote(item["custody_asset_code"])
+    pid = item["trust_product_id"]
+    base = f"/overdue/workbench?custody_asset_code={custody_q}&trust_product_id={pid}"
+    if cnt > 0:
+        return f'<a href="{base}">{cnt}条</a>'
+    return f'<a href="{base}&new_followup=1">新建</a>'
+
+
+def _render_overdue_custody_rows(items: list, *, empty_label: str = "暂无记录") -> str:
     if not items:
-        return '<tr><td colspan="6" class="empty">暂无逾期房源</td></tr>'
+        return f'<tr><td colspan="{len(CUSTODY_LIST_HEADERS)}" class="empty">{escape(empty_label)}</td></tr>'
     rows = ""
     for item in items:
-        od = item.get("overdue_days")
-        od_display = "—" if od is None else str(od)
+        is_es = item.get("delinquency_bucket") == "ES"
+        if is_es:
+            col5 = escape(item.get("last_payment_date") or "—")
+            col6 = escape(item.get("last_payment_date") or "—")
+        else:
+            od = item.get("overdue_days")
+            col5 = escape(str(od) if od is not None else "—")
+            col6 = escape(item.get("last_payment_date") or "—")
         rows += f"""
             <tr>
                 <td>{escape(item["custody_asset_code"])}</td>
-                <td class="num">{item["source_asset_count"]}</td>
                 <td>{escape(item["trust_product_name"])}</td>
-                <td class="num">{od_display}</td>
+                <td>{escape(item.get("asset_code") or "—")}</td>
                 <td>{fmt_delinquency_badge(item["delinquency_bucket"])}</td>
-                <td>{"是" if item["has_follow_up"] else "否"}</td>
+                <td class="num">{col5}</td>
+                <td>{col6}</td>
+                <td>{_render_custody_mark_select("trust_marker", item.get("trust_marker", TRUST_MARKER_DEFAULT), TRUST_MARKER_OPTIONS, item)}</td>
+                <td>{_render_custody_mark_select("internal_status", item.get("internal_status", INTERNAL_STATUS_DEFAULT), INTERNAL_STATUS_OPTIONS, item)}</td>
+                <td>{_render_followup_cell(item)}</td>
+                <td>{escape(item.get("data_date") or "—")}</td>
+                <td class="num">{fmt_money(item["initial_transfer_amount"])}</td>
+                <td class="num">{fmt_money(item["repaid_amount"])}</td>
+                <td class="num">{fmt_money(item["remaining_amount"])}</td>
             </tr>
         """
     return rows
+
+
+def _render_custody_table_rows(items: list) -> str:
+    return _render_overdue_custody_rows(items, empty_label="暂无逾期房源")
 
 
 def _render_custody_es_table_rows(items: list) -> str:
-    if not items:
-        return '<tr><td colspan="5" class="empty">暂无提前结清资产</td></tr>'
-    rows = ""
-    for item in items:
-        settlement = item.get("last_payment_date") or "—"
-        rows += f"""
-            <tr>
-                <td>{escape(item["custody_asset_code"])}</td>
-                <td>{escape(item["trust_product_name"])}</td>
-                <td>{escape(settlement)}</td>
-                <td class="num">{item["source_asset_count"]}</td>
-                <td>{"是" if item["has_follow_up"] else "否"}</td>
-            </tr>
-        """
-    return rows
+    return _render_overdue_custody_rows(items, empty_label="暂无提前结清资产")
 
 
 def _render_reconciliation_table_rows(reconciliation: list) -> str:
@@ -1642,52 +2092,124 @@ def _render_reconciliation_table_rows(reconciliation: list) -> str:
     return rows
 
 
-def render_overdue_html(overview: dict, reconciliation: list, followups: list):
+def render_overdue_html(
+    overview: dict,
+    reconciliation: list,
+    followups: list,
+    *,
+    filters: dict | None = None,
+    products: list | None = None,
+):
     buckets = overview.get("top_overdue_by_bucket") or {}
     tab_defs = [
-        ("ES", "ES（提前结清）", buckets.get("ES", [])),
-        ("M1", "M1（正常）", buckets.get("M1", [])),
-        ("M2", "M2", buckets.get("M2", [])),
-        ("M3", "M3", buckets.get("M3", [])),
         ("M3_PLUS", "M3+", buckets.get("M3_PLUS", [])),
+        ("M3", "M3", buckets.get("M3", [])),
+        ("M2", "M2", buckets.get("M2", [])),
+        ("M1", "M1（正常）", buckets.get("M1", [])),
+        ("ES", "ES（提前结清）", buckets.get("ES", [])),
     ]
+    active_bucket = (filters or {}).get("delinquency_bucket")
+    default_tab_idx = 0
+    if active_bucket:
+        for idx, (key, _, _) in enumerate(tab_defs):
+            if key == active_bucket:
+                default_tab_idx = idx
+                break
+    elif (filters or {}).get("custody_asset_code") or any(
+        (filters or {}).get(k)
+        for k in (
+            "trust_product_id",
+            "trust_marker",
+            "internal_status",
+            "has_followup",
+        )
+    ):
+        for idx, (_, _, items) in enumerate(tab_defs):
+            if items:
+                default_tab_idx = idx
+                break
+
+    table_head = "".join(f"<th>{escape(h)}</th>" for h in CUSTODY_LIST_HEADERS)
     tab_buttons = ""
     tab_panels = ""
     for idx, (key, label, items) in enumerate(tab_defs):
-        active = "active" if idx == 0 else ""
+        active = "active" if idx == default_tab_idx else ""
         tab_buttons += (
             f'<button type="button" class="tab-btn {active}" data-tab="{key}">'
             f'{escape(label)} ({len(items)})</button>'
         )
-        panel_style = "" if idx == 0 else ' style="display:none"'
-        if key == "ES":
-            tab_panels += f"""
+        panel_style = "" if idx == default_tab_idx else ' style="display:none"'
+        tab_panels += f"""
             <div class="tab-panel {active}" id="tab-{key}"{panel_style}>
                 <table>
-                    <thead>
-                        <tr>
-                            <th>托管房源号</th><th>信托产品</th>
-                            <th>提前结清日期</th><th>资产分笔数</th><th>是否已建台账</th>
-                        </tr>
-                    </thead>
-                    <tbody>{_render_custody_es_table_rows(items)}</tbody>
+                    <thead><tr>{table_head}</tr></thead>
+                    <tbody>{_render_overdue_custody_rows(items)}</tbody>
                 </table>
             </div>
         """
-        else:
-            tab_panels += f"""
-            <div class="tab-panel {active}" id="tab-{key}"{panel_style}>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>托管房源号</th><th>资产分笔数</th><th>信托产品</th>
-                            <th>逾期天数</th><th>等级</th><th>已建台账</th>
-                        </tr>
-                    </thead>
-                    <tbody>{_render_custody_table_rows(items)}</tbody>
-                </table>
-            </div>
-        """
+
+    f = filters or {}
+    products = products or []
+    product_options = '<option value="">全部信托产品</option>'
+    for p in products:
+        sel = " selected" if f.get("trust_product_id") == p["id"] else ""
+        product_options += (
+            f'<option value="{p["id"]}"{sel}>{escape(p["name"])}</option>'
+        )
+
+    def bucket_option(val: str, label: str) -> str:
+        sel = " selected" if f.get("delinquency_bucket") == val else ""
+        return f'<option value="{val}"{sel}>{escape(label)}</option>'
+
+    bucket_options = '<option value="">全部等级</option>'
+    bucket_options += bucket_option("ES", "ES（提前结清）")
+    bucket_options += bucket_option("M1", "M1")
+    bucket_options += bucket_option("M2", "M2")
+    bucket_options += bucket_option("M3", "M3")
+    bucket_options += bucket_option("M3_PLUS", "M3+")
+
+    marker_options = '<option value="">全部信托标记</option>'
+    for m in TRUST_MARKER_OPTIONS:
+        sel = " selected" if f.get("trust_marker") == m else ""
+        marker_options += f'<option value="{escape(m)}"{sel}>{escape(m)}</option>'
+
+    status_options = '<option value="">全部内部状态</option>'
+    for s in INTERNAL_STATUS_OPTIONS:
+        sel = " selected" if f.get("internal_status") == s else ""
+        status_options += f'<option value="{escape(s)}"{sel}>{escape(s)}</option>'
+
+    followup_yes = " selected" if f.get("has_followup") == "yes" else ""
+    followup_no = " selected" if f.get("has_followup") == "no" else ""
+    custody_q = escape(f.get("custody_asset_code") or "")
+
+    filter_bar = f"""
+        <form class="filter-form" method="get" action="/overdue">
+            <label>信托产品
+                <select name="trust_product_id">{product_options}</select>
+            </label>
+            <label>等级
+                <select name="delinquency_bucket">{bucket_options}</select>
+            </label>
+            <label>信托标记
+                <select name="trust_marker">{marker_options}</select>
+            </label>
+            <label>内部状态
+                <select name="internal_status">{status_options}</select>
+            </label>
+            <label>跟进台账
+                <select name="has_followup">
+                    <option value="">全部</option>
+                    <option value="yes"{followup_yes}>有台账</option>
+                    <option value="no"{followup_no}>无台账</option>
+                </select>
+            </label>
+            <label>托管房源号
+                <input type="text" name="custody_asset_code" value="{custody_q}" placeholder="模糊匹配">
+            </label>
+            <button type="submit" class="tab-btn">筛选</button>
+            <a class="api-link" href="/overdue">清除</a>
+        </form>
+    """
 
     recon_rows = _render_reconciliation_table_rows(reconciliation)
     recon_anomaly_count = sum(1 for item in reconciliation if item.get("has_anomaly"))
@@ -1788,6 +2310,28 @@ def render_overdue_html(overview: dict, reconciliation: list, followups: list):
         .badge.fail-badge {{ background: #f8717122; color: #f87171; border-color: #f8717155; }}
         .filter-bar {{ display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; align-items: center; }}
         .filter-bar .muted-count {{ font-size: 0.78rem; color: #64748b; margin-left: auto; }}
+        .filter-form {{
+            display: flex; flex-wrap: wrap; gap: 0.65rem; align-items: flex-end;
+            margin-bottom: 0.85rem; padding-bottom: 0.85rem;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+        }}
+        .filter-form label {{
+            display: flex; flex-direction: column; gap: 0.25rem;
+            font-size: 0.75rem; color: #94a3b8; min-width: 120px;
+        }}
+        .filter-form select, .filter-form input[type="text"] {{
+            padding: 0.35rem 0.5rem; border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.15);
+            background: rgba(0,0,0,0.2); color: #e2e8f0; font-size: 0.82rem;
+        }}
+        .custody-mark-select {{
+            max-width: 140px; padding: 0.25rem 0.35rem; font-size: 0.78rem;
+            border-radius: 6px; border: 1px solid rgba(255,255,255,0.15);
+            background: rgba(0,0,0,0.25); color: #e2e8f0;
+        }}
+        .custody-mark-select.saving {{ opacity: 0.6; }}
+        .custody-mark-select.saved {{ border-color: #34d399; }}
+        .custody-mark-select.error {{ border-color: #f87171; }}
         .badge {{
             display: inline-block;
             padding: 0.2rem 0.6rem;
@@ -1889,6 +2433,7 @@ def render_overdue_html(overview: dict, reconciliation: list, followups: list):
                 <a class="api-link" href="/overdue/checks">查看全部 JSON</a>
             </h2>
             <div class="card table-wrap">
+                {filter_bar}
                 <div class="tabs">{tab_buttons}</div>
                 {tab_panels}
             </div>
@@ -1949,6 +2494,22 @@ def render_overdue_html(overview: dict, reconciliation: list, followups: list):
         <footer>Real Estate Securitization Platform</footer>
     </div>
     <script>
+    (function() {{
+        var filterForm = document.querySelector('form.filter-form');
+        if (!filterForm) return;
+        filterForm.addEventListener('submit', function(ev) {{
+            ev.preventDefault();
+            var params = new URLSearchParams();
+            filterForm.querySelectorAll('input, select, textarea').forEach(function(el) {{
+                if (!el.name || el.disabled) return;
+                var val = (el.value || '').trim();
+                if (val) params.set(el.name, val);
+            }});
+            var qs = params.toString();
+            window.location = filterForm.getAttribute('action') + (qs ? '?' + qs : '');
+        }});
+    }})();
+
     function applyReconFilter(mode) {{
         var rows = document.querySelectorAll('#recon-table tbody tr.recon-row');
         var visible = 0;
@@ -2079,6 +2640,39 @@ def render_overdue_html(overview: dict, reconciliation: list, followups: list):
         }});
     }})();
 
+    document.querySelectorAll('.custody-mark-select').forEach(function(sel) {{
+        sel.addEventListener('change', function() {{
+            var field = sel.getAttribute('data-field');
+            var payload = {{
+                trust_product_id: parseInt(sel.getAttribute('data-trust-product-id'), 10),
+                custody_asset_code: sel.getAttribute('data-custody-asset-code'),
+                data_date: sel.getAttribute('data-data-date')
+            }};
+            payload[field] = sel.value;
+            sel.classList.remove('saved', 'error');
+            sel.classList.add('saving');
+            fetch('/overdue/custody-marks', {{
+                method: 'PATCH',
+                credentials: 'same-origin',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify(payload)
+            }}).then(function(res) {{
+                return res.json().then(function(data) {{
+                    sel.classList.remove('saving');
+                    if (!res.ok) {{
+                        sel.classList.add('error');
+                        throw new Error(data.detail || '保存失败');
+                    }}
+                    sel.classList.add('saved');
+                    setTimeout(function() {{ sel.classList.remove('saved'); }}, 1200);
+                }});
+            }}).catch(function() {{
+                sel.classList.remove('saving');
+                sel.classList.add('error');
+            }});
+        }});
+    }});
+
     document.querySelectorAll('.tab-btn[data-tab]').forEach(function(btn) {{
         btn.addEventListener('click', function() {{
             var key = btn.getAttribute('data-tab');
@@ -2111,6 +2705,16 @@ def fmt_risk_badge(level: str | None) -> str:
     )
 
 
+def _fmt_risk_day_meta(item: dict) -> str:
+    if item.get("is_es") or item.get("risk_level") == "ES":
+        settlement = item.get("settlement_date") or item.get("last_payment_date") or "—"
+        return f'<span>提前结清 {escape(str(settlement))}</span>'
+    od = item.get("overdue_days")
+    if od is None:
+        return "<span>逾期 —</span>"
+    return f"<span>逾期 {od}天</span>"
+
+
 def fmt_sla_badge(status: str | None) -> str:
     if not status:
         return '<span class="badge">—</span>'
@@ -2140,7 +2744,7 @@ def render_risk_workbench_html(data: dict):
                 </div>
                 <div class="queue-meta">
                     <span>评分 {item['risk_score'] or '—'}</span>
-                    <span>逾期 {item['overdue_days']}天</span>
+                    {_fmt_risk_day_meta(item)}
                     <span>预警 {item['alert_count']}</span>
                 </div>
                 <div class="queue-meta">
@@ -2184,6 +2788,18 @@ def render_risk_workbench_html(data: dict):
                 <p class="case-text">{escape(case['follow_up_plan'] or '—')}</p>
             """
 
+        if detail.get("is_es"):
+            breakdown_line = "已结清（ES），不参与逾期评分与告警"
+            settlement = detail.get("settlement_date") or detail.get("last_payment_date") or "—"
+            lifecycle_line = f'<p class="muted">提前结清日期：{escape(str(settlement))}</p>'
+        else:
+            breakdown_line = (
+                f"逾期权重 {bd['overdue_weight']} + "
+                f"金额异常 {bd['reconciliation_weight']} + "
+                f"回款波动 {bd['volatility_weight']}"
+            )
+            lifecycle_line = ""
+
         detail_html = f"""
             <div class="panel-section">
                 <h3>风险画像</h3>
@@ -2192,11 +2808,8 @@ def render_risk_workbench_html(data: dict):
                     <div class="score">{detail['risk_score'] or '—'}</div>
                     <div>{fmt_risk_badge(detail['risk_level'])} {fmt_sla_badge(case['sla_status'] if case else None)}</div>
                 </div>
-                <div class="breakdown">
-                    逾期权重 {bd['overdue_weight']} +
-                    金额异常 {bd['reconciliation_weight']} +
-                    回款波动 {bd['volatility_weight']}
-                </div>
+                {lifecycle_line}
+                <div class="breakdown">{breakdown_line}</div>
             </div>
             <div class="panel-section">
                 <h3>风险触发源</h3>
@@ -3280,39 +3893,70 @@ def list_investments():
         return investments
 
 @app.get("/overdue/overview")
-def overdue_overview(trust_product_id: int | None = None, data_date: str | None = None):
+def overdue_overview(
+    trust_product_id: str | None = None,
+    data_date: str | None = None,
+    delinquency_bucket: str | None = None,
+    trust_marker: str | None = None,
+    internal_status: str | None = None,
+    has_followup: str | None = None,
+    custody_asset_code: str | None = None,
+):
+    pid = query_utils.parse_optional_int(trust_product_id)
+    dd = query_utils.parse_optional_date(data_date)
     with engine.connect() as conn:
-        return fetch_overdue_overview(conn, trust_product_id, data_date)
+        return fetch_overdue_overview(
+            conn,
+            pid,
+            dd,
+            delinquency_bucket=query_utils.clean_optional_str(delinquency_bucket),
+            trust_marker=query_utils.clean_optional_str(trust_marker),
+            internal_status=query_utils.clean_optional_str(internal_status),
+            has_followup=query_utils.clean_optional_str(has_followup),
+            custody_asset_code=query_utils.clean_optional_str(custody_asset_code),
+        )
 
 
 @app.get("/overdue/checks")
-def overdue_checks(trust_product_id: int | None = None, data_date: str | None = None):
+def overdue_checks(trust_product_id: str | None = None, data_date: str | None = None):
     with engine.connect() as conn:
-        return fetch_overdue_checks(conn, trust_product_id, data_date)
+        return fetch_overdue_checks(
+            conn,
+            query_utils.parse_optional_int(trust_product_id),
+            query_utils.parse_optional_date(data_date),
+        )
 
 
 @app.get("/overdue/reconciliation")
-def overdue_reconciliation(trust_product_id: int | None = None, data_date: str | None = None):
+def overdue_reconciliation(trust_product_id: str | None = None, data_date: str | None = None):
     with engine.connect() as conn:
-        return fetch_reconciliation(conn, trust_product_id, data_date)
+        return fetch_reconciliation(
+            conn,
+            query_utils.parse_optional_int(trust_product_id),
+            query_utils.parse_optional_date(data_date),
+        )
 
 
 @app.get("/overdue/followups")
-def overdue_followups(trust_product_id: int | None = None, status: str | None = None):
+def overdue_followups(trust_product_id: str | None = None, status: str | None = None):
     with engine.connect() as conn:
-        return fetch_overdue_followups(conn, trust_product_id, status)
+        return fetch_overdue_followups(
+            conn,
+            query_utils.parse_optional_int(trust_product_id),
+            query_utils.clean_optional_str(status),
+        )
 
 
 @app.post("/overdue/reconciliation/recalculate")
 def overdue_reconciliation_recalculate(
     current_user: Annotated[dict, Depends(get_current_user)],
-    trust_product_id: int | None = Query(default=None),
+    trust_product_id: str | None = Query(default=None),
     data_date: str | None = Query(default=None),
     body: dict | None = Body(default=None),
 ):
     payload = body or {}
-    pid = payload.get("trust_product_id", trust_product_id)
-    dd = payload.get("data_date", data_date)
+    pid = payload.get("trust_product_id", query_utils.parse_optional_int(trust_product_id))
+    dd = payload.get("data_date", query_utils.parse_optional_date(data_date))
     if pid is not None:
         pid = int(pid)
     with engine.connect() as conn:
@@ -3322,13 +3966,13 @@ def overdue_reconciliation_recalculate(
 @app.post("/overdue/recalculate")
 def overdue_recalculate(
     current_user: Annotated[dict, Depends(get_current_user)],
-    trust_product_id: int | None = Query(default=None),
+    trust_product_id: str | None = Query(default=None),
     data_date: str | None = Query(default=None),
     body: dict | None = Body(default=None),
 ):
     payload = body or {}
-    pid = payload.get("trust_product_id", trust_product_id)
-    dd = payload.get("data_date", data_date)
+    pid = payload.get("trust_product_id", query_utils.parse_optional_int(trust_product_id))
+    dd = payload.get("data_date", query_utils.parse_optional_date(data_date))
     if pid is not None:
         pid = int(pid)
     with engine.begin() as conn:
@@ -3336,49 +3980,133 @@ def overdue_recalculate(
     return result
 
 
+@app.patch("/overdue/custody-marks")
+def update_custody_mark(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    trust_product_id = body.get("trust_product_id")
+    custody_asset_code = body.get("custody_asset_code")
+    data_date = body.get("data_date")
+    if not trust_product_id or not custody_asset_code or not data_date:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+    with engine.begin() as conn:
+        return upsert_custody_trust_mark(
+            conn,
+            int(trust_product_id),
+            str(custody_asset_code),
+            str(data_date),
+            trust_marker=body.get("trust_marker"),
+            internal_status=body.get("internal_status"),
+            updated_by=current_user.get("username"),
+        )
+
+
 @app.get("/overdue", response_class=HTMLResponse)
-def overdue_dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
+def overdue_dashboard(
+    page_user: Annotated[dict, Depends(get_page_user)],
+    trust_product_id: str | None = None,
+    delinquency_bucket: str | None = None,
+    trust_marker: str | None = None,
+    internal_status: str | None = None,
+    has_followup: str | None = None,
+    custody_asset_code: str | None = None,
+):
+    pid = query_utils.parse_optional_int(trust_product_id)
+    parsed_delinquency = query_utils.clean_optional_str(delinquency_bucket)
+    parsed_trust_marker = query_utils.clean_optional_str(trust_marker)
+    parsed_internal_status = query_utils.clean_optional_str(internal_status)
+    parsed_has_followup = query_utils.clean_optional_str(has_followup)
+    parsed_custody = query_utils.clean_optional_str(custody_asset_code)
+    filters = {
+        "trust_product_id": pid,
+        "delinquency_bucket": parsed_delinquency,
+        "trust_marker": parsed_trust_marker,
+        "internal_status": parsed_internal_status,
+        "has_followup": parsed_has_followup,
+        "custody_asset_code": parsed_custody,
+    }
     with engine.connect() as conn:
-        overview = fetch_overdue_overview(conn)
-        recon_data = fetch_reconciliation(conn)
-        followups = fetch_overdue_followups(conn)
+        overview = fetch_overdue_overview(
+            conn,
+            pid,
+            delinquency_bucket=parsed_delinquency,
+            trust_marker=parsed_trust_marker,
+            internal_status=parsed_internal_status,
+            has_followup=parsed_has_followup,
+            custody_asset_code=parsed_custody,
+        )
+        recon_data = fetch_reconciliation(conn, pid)
+        followups = fetch_overdue_followups(conn, pid)
+        products = fetch_trust_products(conn)
 
     html = render_overdue_html(
         overview,
         recon_data["items"],
         followups,
+        filters=filters,
+        products=products,
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
-def _workbench_redirect(trust_asset_id: int, trust_product_id: int | None) -> RedirectResponse:
+def _workbench_redirect(
+    trust_asset_id: int,
+    trust_product_id: int | None,
+    custody_asset_code: str | None = None,
+) -> RedirectResponse:
     qs = f"?trust_asset_id={trust_asset_id}"
     if trust_product_id is not None:
         qs += f"&trust_product_id={trust_product_id}"
+    if custody_asset_code:
+        qs += f"&custody_asset_code={quote(custody_asset_code)}"
     return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
 
 
 @app.get("/overdue/workbench/data")
 def overdue_workbench_data(
     current_user: Annotated[dict, Depends(get_current_user)],
-    trust_product_id: int | None = None,
-    trust_asset_id: int | None = None,
+    trust_product_id: str | None = None,
+    trust_asset_id: str | None = None,
     data_date: str | None = None,
+    custody_asset_code: str | None = None,
 ):
     with engine.connect() as conn:
-        return fetch_overdue_workbench(conn, trust_product_id, trust_asset_id, data_date)
+        return fetch_overdue_workbench(
+            conn,
+            query_utils.parse_optional_int(trust_product_id),
+            query_utils.parse_optional_int(trust_asset_id),
+            query_utils.parse_optional_date(data_date),
+            custody_asset_code=query_utils.clean_optional_str(custody_asset_code),
+        )
 
 
 @app.get("/overdue/workbench", response_class=HTMLResponse)
 def overdue_workbench_page(
     page_user: Annotated[dict, Depends(get_page_user)],
-    trust_product_id: int | None = None,
-    trust_asset_id: int | None = None,
+    trust_product_id: str | None = None,
+    trust_asset_id: str | None = None,
     data_date: str | None = None,
+    custody_asset_code: str | None = None,
+    new_followup: str | None = None,
 ):
+    pid = query_utils.parse_optional_int(trust_product_id)
+    aid = query_utils.parse_optional_int(trust_asset_id)
+    custody = query_utils.clean_optional_str(custody_asset_code)
     with engine.connect() as conn:
-        data = fetch_overdue_workbench(conn, trust_product_id, trust_asset_id, data_date)
-    html = render_overdue_workbench_html(data, trust_product_id)
+        data = fetch_overdue_workbench(
+            conn,
+            pid,
+            aid,
+            query_utils.parse_optional_date(data_date),
+            custody_asset_code=custody,
+        )
+    html = render_overdue_workbench_html(
+        data,
+        pid,
+        custody_asset_code=custody,
+        new_followup=bool(query_utils.parse_optional_int(new_followup)),
+    )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
@@ -3387,6 +4115,7 @@ def overdue_workbench_create_followup(
     current_user: Annotated[dict, Depends(get_current_user)],
     trust_asset_id: int = Form(...),
     trust_product_id: int | None = Form(None),
+    custody_asset_code: str | None = Form(None),
     overdue_reason: str = Form(""),
     follow_up_plan: str = Form(""),
     owner_name: str = Form(""),
@@ -3396,7 +4125,7 @@ def overdue_workbench_create_followup(
         create_overdue_followup_record(
             conn, trust_asset_id, overdue_reason, follow_up_plan, owner_name, trust_feedback
         )
-    return _workbench_redirect(trust_asset_id, trust_product_id)
+    return _workbench_redirect(trust_asset_id, trust_product_id, custody_asset_code)
 
 
 @app.post("/overdue/workbench/followups/{followup_id}/update")
@@ -3405,14 +4134,24 @@ def overdue_workbench_update_followup(
     current_user: Annotated[dict, Depends(get_current_user)],
     trust_asset_id: int = Form(...),
     trust_product_id: int | None = Form(None),
+    custody_asset_code: str | None = Form(None),
     status: str = Form("in_progress"),
     owner_name: str = Form(""),
+    overdue_reason: str = Form(""),
+    follow_up_plan: str = Form(""),
+    trust_feedback: str = Form(""),
 ):
     with engine.connect() as conn:
         update_overdue_followup_record(
-            conn, followup_id, status=status or None, owner_name=owner_name or None
+            conn,
+            followup_id,
+            status=status,
+            owner_name=owner_name,
+            overdue_reason=overdue_reason,
+            follow_up_plan=follow_up_plan,
+            trust_feedback=trust_feedback,
         )
-    return _workbench_redirect(trust_asset_id, trust_product_id)
+    return _workbench_redirect(trust_asset_id, trust_product_id, custody_asset_code)
 
 
 @app.post("/overdue/workbench/followups/{followup_id}/resolve")
@@ -3421,38 +4160,51 @@ def overdue_workbench_resolve_followup(
     current_user: Annotated[dict, Depends(get_current_user)],
     trust_asset_id: int = Form(...),
     trust_product_id: int | None = Form(None),
+    custody_asset_code: str | None = Form(None),
 ):
     with engine.connect() as conn:
         update_overdue_followup_record(conn, followup_id, status="resolved")
-    return _workbench_redirect(trust_asset_id, trust_product_id)
+    return _workbench_redirect(trust_asset_id, trust_product_id, custody_asset_code)
 
 
 @app.get("/risk/workbench/data")
 def risk_workbench_data(
     current_user: Annotated[dict, Depends(get_current_user)],
-    trust_product_id: int | None = None,
-    trust_asset_id: int | None = None,
+    trust_product_id: str | None = None,
+    trust_asset_id: str | None = None,
 ):
     with engine.connect() as conn:
-        return risk_hub.fetch_risk_workbench(conn, trust_product_id, trust_asset_id)
+        return risk_hub.fetch_risk_workbench(
+            conn,
+            query_utils.parse_optional_int(trust_product_id),
+            query_utils.parse_optional_int(trust_asset_id),
+        )
 
 
 @app.get("/risk/workbench", response_class=HTMLResponse)
 def risk_workbench_page(
     page_user: Annotated[dict, Depends(get_page_user)],
-    trust_product_id: int | None = None,
-    trust_asset_id: int | None = None,
+    trust_product_id: str | None = None,
+    trust_asset_id: str | None = None,
 ):
     with engine.connect() as conn:
-        data = risk_hub.fetch_risk_workbench(conn, trust_product_id, trust_asset_id)
+        data = risk_hub.fetch_risk_workbench(
+            conn,
+            query_utils.parse_optional_int(trust_product_id),
+            query_utils.parse_optional_int(trust_asset_id),
+        )
     html = render_risk_workbench_html(data)
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
 @app.get("/risk/assets")
-def risk_assets(trust_product_id: int | None = None, risk_level: str | None = None):
+def risk_assets(trust_product_id: str | None = None, risk_level: str | None = None):
     with engine.connect() as conn:
-        return risk_hub.fetch_risk_assets(conn, trust_product_id, risk_level)
+        return risk_hub.fetch_risk_assets(
+            conn,
+            query_utils.parse_optional_int(trust_product_id),
+            query_utils.clean_optional_str(risk_level),
+        )
 
 
 @app.get("/risk/assets/{trust_asset_id}")
@@ -3467,20 +4219,27 @@ def risk_asset_detail(trust_asset_id: int):
 @app.post("/risk/score/recalculate")
 def risk_score_recalculate(
     current_user: Annotated[dict, Depends(get_current_user)],
-    trust_product_id: int | None = None,
+    trust_product_id: str | None = None,
 ):
     with engine.connect() as conn:
-        return risk_hub.recalculate_risk_scores(conn, trust_product_id)
+        return risk_hub.recalculate_risk_scores(
+            conn, query_utils.parse_optional_int(trust_product_id)
+        )
 
 
 @app.get("/risk/alerts")
 def risk_alerts(
-    trust_product_id: int | None = None,
-    trust_asset_id: int | None = None,
+    trust_product_id: str | None = None,
+    trust_asset_id: str | None = None,
     status: str | None = None,
 ):
     with engine.connect() as conn:
-        return risk_hub.fetch_risk_alerts(conn, trust_product_id, trust_asset_id, status=status)
+        return risk_hub.fetch_risk_alerts(
+            conn,
+            query_utils.parse_optional_int(trust_product_id),
+            query_utils.parse_optional_int(trust_asset_id),
+            status=query_utils.clean_optional_str(status),
+        )
 
 
 @app.patch("/risk/alerts/{alert_id}")
@@ -3498,12 +4257,17 @@ def risk_alert_patch(
 
 @app.get("/risk/cases")
 def risk_cases(
-    trust_product_id: int | None = None,
-    trust_asset_id: int | None = None,
+    trust_product_id: str | None = None,
+    trust_asset_id: str | None = None,
     status: str | None = None,
 ):
     with engine.connect() as conn:
-        return risk_hub.fetch_risk_cases(conn, trust_product_id, trust_asset_id, status)
+        return risk_hub.fetch_risk_cases(
+            conn,
+            query_utils.parse_optional_int(trust_product_id),
+            query_utils.parse_optional_int(trust_asset_id),
+            query_utils.clean_optional_str(status),
+        )
 
 
 @app.post("/risk/cases")
@@ -3641,8 +4405,8 @@ def ingestion_import(
 @app.get("/ingestion/repayment-records/data")
 def ingestion_repayment_records_data(
     current_user: Annotated[dict, Depends(get_current_user)],
-    page: int = 1,
-    page_size: int = 50,
+    page: str | None = Query(default=None),
+    page_size: str | None = Query(default=None),
     trust_product_id: str | None = Query(default=None),
     data_date: str | None = Query(default=None),
     asset_code: str | None = Query(default=None),
@@ -3651,6 +4415,7 @@ def ingestion_repayment_records_data(
     source_file_name: str | None = Query(default=None),
     source_sheet_name: str | None = Query(default=None),
 ):
+    page_no, page_sz = query_utils.parse_pagination(page, page_size)
     filters = ingestion_upload.build_record_filters(
         trust_product_id=trust_product_id,
         data_date=data_date,
@@ -3662,15 +4427,15 @@ def ingestion_repayment_records_data(
     )
     with engine.connect() as conn:
         return ingestion_upload.fetch_paginated_records(
-            conn, "repayment", page, page_size, filters,
+            conn, "repayment", page_no, page_sz, filters,
         )
 
 
 @app.get("/ingestion/repayment-records", response_class=HTMLResponse)
 def ingestion_repayment_records_page(
     page_user: Annotated[dict, Depends(get_page_user)],
-    page: int = 1,
-    page_size: int = 50,
+    page: str | None = Query(default=None),
+    page_size: str | None = Query(default=None),
     trust_product_id: str | None = Query(default=None),
     data_date: str | None = Query(default=None),
     asset_code: str | None = Query(default=None),
@@ -3679,6 +4444,7 @@ def ingestion_repayment_records_page(
     source_file_name: str | None = Query(default=None),
     source_sheet_name: str | None = Query(default=None),
 ):
+    page_no, page_sz = query_utils.parse_pagination(page, page_size)
     filters = ingestion_upload.build_record_filters(
         trust_product_id=trust_product_id,
         data_date=data_date,
@@ -3690,7 +4456,7 @@ def ingestion_repayment_records_page(
     )
     with engine.connect() as conn:
         data = ingestion_upload.fetch_paginated_records(
-            conn, "repayment", page, page_size, filters,
+            conn, "repayment", page_no, page_sz, filters,
         )
         products = [
             {"id": r.id, "name": r.name}
@@ -3706,8 +4472,8 @@ def ingestion_repayment_records_page(
 @app.get("/ingestion/monitor-records/data")
 def ingestion_monitor_records_data(
     current_user: Annotated[dict, Depends(get_current_user)],
-    page: int = 1,
-    page_size: int = 50,
+    page: str | None = Query(default=None),
+    page_size: str | None = Query(default=None),
     trust_product_id: str | None = Query(default=None),
     data_date: str | None = Query(default=None),
     asset_code: str | None = Query(default=None),
@@ -3717,6 +4483,7 @@ def ingestion_monitor_records_data(
     source_sheet_name: str | None = Query(default=None),
     include_history: str | None = Query(default=None),
 ):
+    page_no, page_sz = query_utils.parse_pagination(page, page_size)
     filters = ingestion_upload.build_record_filters(
         trust_product_id=trust_product_id,
         data_date=data_date,
@@ -3729,15 +4496,15 @@ def ingestion_monitor_records_data(
     )
     with engine.connect() as conn:
         return ingestion_upload.fetch_paginated_records(
-            conn, "monitor", page, page_size, filters,
+            conn, "monitor", page_no, page_sz, filters,
         )
 
 
 @app.get("/ingestion/monitor-records", response_class=HTMLResponse)
 def ingestion_monitor_records_page(
     page_user: Annotated[dict, Depends(get_page_user)],
-    page: int = 1,
-    page_size: int = 50,
+    page: str | None = Query(default=None),
+    page_size: str | None = Query(default=None),
     trust_product_id: str | None = Query(default=None),
     data_date: str | None = Query(default=None),
     asset_code: str | None = Query(default=None),
@@ -3747,6 +4514,7 @@ def ingestion_monitor_records_page(
     source_sheet_name: str | None = Query(default=None),
     include_history: str | None = Query(default=None),
 ):
+    page_no, page_sz = query_utils.parse_pagination(page, page_size)
     filters = ingestion_upload.build_record_filters(
         trust_product_id=trust_product_id,
         data_date=data_date,
@@ -3759,7 +4527,7 @@ def ingestion_monitor_records_page(
     )
     with engine.connect() as conn:
         data = ingestion_upload.fetch_paginated_records(
-            conn, "monitor", page, page_size, filters,
+            conn, "monitor", page_no, page_sz, filters,
         )
         products = [
             {"id": r.id, "name": r.name}

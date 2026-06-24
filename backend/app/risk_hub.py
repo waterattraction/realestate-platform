@@ -7,6 +7,7 @@ PERFORMING_MAX_DAYS = 30
 OVERDUE_ASSET_MIN_DAYS = 31
 
 RISK_LEVEL_LABELS = {
+    "ES": "提前结清",
     "A": "高风险",
     "B": "中高风险",
     "C": "中风险",
@@ -14,11 +15,64 @@ RISK_LEVEL_LABELS = {
 }
 
 RISK_LEVEL_COLORS = {
+    "ES": "#38bdf8",
     "A": "#f87171",
     "B": "#fb923c",
     "C": "#fbbf24",
     "D": "#34d399",
 }
+
+
+def is_es_closed(remaining_amount: float) -> bool:
+    return remaining_amount <= RECONCILIATION_TOLERANCE
+
+
+def _nullable_int(value) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
+def _settlement_date(last_payment_date, max_payment_date) -> str | None:
+    if max_payment_date:
+        return str(max_payment_date)
+    if last_payment_date:
+        return str(last_payment_date)
+    return None
+
+
+def resolve_lifecycle_risk_level(remaining_amount: float, stored_risk_level: str | None) -> str:
+    if is_es_closed(remaining_amount):
+        return "ES"
+    return stored_risk_level or "D"
+
+
+def monitor_record_api_fields(row) -> dict:
+    """API 字段：保留 overdue_days=NULL（ES），另提供 overdue_days_safe 供计算兼容。"""
+    remaining = float(row.remaining_amount)
+    is_es = is_es_closed(remaining)
+    od_raw = row.overdue_days if hasattr(row, "overdue_days") else None
+    if hasattr(row, "overdue_days_safe") and row.overdue_days_safe is not None:
+        overdue_days_safe = int(row.overdue_days_safe)
+    else:
+        overdue_days_safe = 0 if od_raw is None else int(od_raw)
+    overdue_days = None if is_es else _nullable_int(od_raw)
+    last_pd = getattr(row, "last_payment_date", None)
+    max_pd = getattr(row, "max_payment_date", None)
+    settlement = _settlement_date(last_pd, max_pd)
+    stored_rl = getattr(row, "risk_level", None)
+    lifecycle = resolve_lifecycle_risk_level(remaining, stored_rl)
+    return {
+        "remaining_amount": remaining,
+        "overdue_days": overdue_days,
+        "overdue_days_safe": overdue_days_safe,
+        "risk_level": lifecycle,
+        "stored_risk_level": stored_rl,
+        "status": "closed" if is_es else "active",
+        "is_es": is_es,
+        "last_payment_date": settlement if is_es else (str(last_pd) if last_pd else None),
+        "settlement_date": settlement if is_es else None,
+    }
 
 ALERT_STATUS_LABELS = {
     "open": "待处理",
@@ -62,19 +116,22 @@ scored AS (
         m.overdue_days,
         (
             CASE
-                WHEN m.overdue_days > 90 THEN 50
-                WHEN m.overdue_days > 60 THEN 35
-                WHEN m.overdue_days > 30 THEN 20
+                WHEN m.remaining_amount <= :tolerance THEN 0
+                WHEN COALESCE(m.overdue_days, 0) > 90 THEN 50
+                WHEN COALESCE(m.overdue_days, 0) > 60 THEN 35
+                WHEN COALESCE(m.overdue_days, 0) > 30 THEN 20
                 ELSE 5
             END
             + CASE
+                WHEN m.remaining_amount <= :tolerance THEN 0
                 WHEN ABS((m.initial_transfer_amount - m.repaid_amount) - m.remaining_amount)
                      > :tolerance THEN 30
                 WHEN ABS(m.repaid_amount - COALESCE(rs.total_repaid, 0)) > :tolerance THEN 30
                 ELSE 0
             END
             + CASE
-                WHEN m.overdue_days > 30 AND (
+                WHEN m.remaining_amount <= :tolerance THEN 0
+                WHEN COALESCE(m.overdue_days, 0) > 30 AND (
                     m.last_payment_date IS NULL
                     OR (m.data_date - m.last_payment_date) > 45
                 ) THEN 20
@@ -225,7 +282,9 @@ def sync_risk_alerts(conn, trust_product_id: int | None = None) -> dict:
                 SELECT m.trust_product_id, m.trust_asset_id, m.data_date, m.risk_level,
                        'delinquency_m3_plus' AS risk_type,
                        '逾期天数 > 90（M3+）' AS trigger_rule
-                FROM monitor m WHERE m.overdue_days > 90
+                FROM monitor m
+                WHERE m.remaining_amount > :tolerance
+                  AND COALESCE(m.overdue_days, 0) > 90
                 UNION ALL
                 SELECT m.trust_product_id, m.trust_asset_id, m.data_date, m.risk_level,
                        'reconciliation_failure',
@@ -233,13 +292,18 @@ def sync_risk_alerts(conn, trust_product_id: int | None = None) -> dict:
                 FROM monitor m
                 LEFT JOIN repayment_sum rs
                     ON rs.trust_asset_id = m.trust_asset_id AND rs.data_date = m.data_date
-                WHERE ABS((m.initial_transfer_amount - m.repaid_amount) - m.remaining_amount) > :tolerance
+                WHERE m.remaining_amount > :tolerance
+                  AND (
+                      ABS((m.initial_transfer_amount - m.repaid_amount) - m.remaining_amount) > :tolerance
                    OR ABS(m.repaid_amount - COALESCE(rs.total_repaid, 0)) > :tolerance
+                  )
                 UNION ALL
                 SELECT m.trust_product_id, m.trust_asset_id, m.data_date, m.risk_level,
                        'high_risk_score',
                        'risk_score >= 80'
-                FROM monitor m WHERE m.risk_score >= 80
+                FROM monitor m
+                WHERE m.remaining_amount > :tolerance
+                  AND m.risk_score >= 80
             )
             SELECT * FROM triggers
         """),
@@ -431,7 +495,10 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
                     WHERE m.remaining_amount > :tolerance
                       AND COALESCE(m.overdue_days, 0) > 90
                 ) AS m3_plus_count,
-                ROUND(AVG(m.risk_score)::numeric, 1) AS avg_risk_score
+                ROUND(
+                    AVG(m.risk_score) FILTER (WHERE m.remaining_amount > :tolerance)::numeric,
+                    1
+                ) AS avg_risk_score
             FROM trust_asset_monitor_records m
             WHERE {monitor_filter}
             GROUP BY m.data_date
@@ -467,6 +534,10 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
                 m.risk_score,
                 m.risk_level,
                 m.overdue_days,
+                COALESCE(m.overdue_days, 0) AS overdue_days_safe,
+                m.remaining_amount,
+                m.last_payment_date,
+                m.max_payment_date,
                 m.data_date,
                 f.id AS case_id,
                 f.status AS case_status,
@@ -485,13 +556,16 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
                 ON f.trust_asset_id = m.trust_asset_id
                AND f.status IN ('open', 'in_progress')
             WHERE {monitor_filter}
-            ORDER BY m.risk_score DESC NULLS LAST, m.overdue_days DESC, ta.asset_code
+            ORDER BY m.risk_score DESC NULLS LAST,
+                     COALESCE(m.overdue_days, 0) DESC,
+                     ta.asset_code
         """),
         params,
     )
 
     queue = []
     for r in queue_rows:
+        lifecycle = monitor_record_api_fields(r)
         queue.append({
             "trust_asset_id": r.trust_asset_id,
             "asset_code": r.asset_code,
@@ -501,14 +575,13 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
             "trust_product_id": r.trust_product_id,
             "trust_product_name": r.trust_product_name,
             "risk_score": int(r.risk_score) if r.risk_score is not None else None,
-            "risk_level": r.risk_level,
-            "overdue_days": int(r.overdue_days),
             "data_date": str(r.data_date),
             "case_id": r.case_id,
             "case_status": r.case_status,
             "sla_status": r.sla_status,
             "case_priority": r.case_priority,
             "alert_count": int(r.alert_count),
+            **lifecycle,
         })
 
     selected_id = trust_asset_id
@@ -562,10 +635,13 @@ def fetch_risk_assets(conn, trust_product_id: int | None = None, risk_level: str
             tp.name AS trust_product_name,
             m.data_date,
             m.overdue_days,
+            COALESCE(m.overdue_days, 0) AS overdue_days_safe,
             m.risk_score,
             m.risk_level,
             m.repaid_amount,
             m.remaining_amount,
+            m.last_payment_date,
+            m.max_payment_date,
             f.sla_status,
             f.case_priority
         FROM trust_asset_monitor_records m
@@ -584,6 +660,7 @@ def fetch_risk_assets(conn, trust_product_id: int | None = None, risk_level: str
     data_date = None
     for row in conn.execute(text(sql), params):
         data_date = str(row.data_date)
+        lifecycle = monitor_record_api_fields(row)
         items.append({
             "trust_asset_id": row.trust_asset_id,
             "asset_code": row.asset_code,
@@ -591,13 +668,11 @@ def fetch_risk_assets(conn, trust_product_id: int | None = None, risk_level: str
             "trust_product_id": row.trust_product_id,
             "trust_product_name": row.trust_product_name,
             "data_date": data_date,
-            "overdue_days": int(row.overdue_days),
             "risk_score": int(row.risk_score) if row.risk_score is not None else None,
-            "risk_level": row.risk_level,
             "repaid_amount": float(row.repaid_amount),
-            "remaining_amount": float(row.remaining_amount),
             "sla_status": row.sla_status,
             "case_priority": row.case_priority,
+            **lifecycle,
         })
 
     return {"data_date": data_date, "items": items}
@@ -617,6 +692,7 @@ def _risk_triggers_for_asset(conn, trust_asset_id: int, data_date: str) -> list:
             )
             SELECT
                 m.overdue_days,
+                m.remaining_amount,
                 m.last_payment_date,
                 m.max_payment_date,
                 m.risk_score,
@@ -631,16 +707,19 @@ def _risk_triggers_for_asset(conn, trust_asset_id: int, data_date: str) -> list:
     if rows is None:
         return []
 
+    if is_es_closed(float(rows.remaining_amount)):
+        return []
+
+    od = 0 if rows.overdue_days is None else int(rows.overdue_days)
     triggers = []
-    if int(rows.overdue_days) > 0:
-        triggers.append(f"逾期 {rows.overdue_days} 天")
+    if od > 0:
+        triggers.append(f"逾期 {od} 天")
     if float(rows.balance_diff) > RECONCILIATION_TOLERANCE:
         triggers.append("余额等式不一致")
     if float(rows.cross_diff) > RECONCILIATION_TOLERANCE:
         triggers.append("跨表已还金额不一致")
-    if rows.last_payment_date and rows.max_payment_date:
-        if int(rows.overdue_days) > 30:
-            triggers.append("回款中断 / 波动偏高")
+    if rows.last_payment_date and rows.max_payment_date and od > 30:
+        triggers.append("回款中断 / 波动偏高")
     if rows.risk_score and int(rows.risk_score) >= 80:
         triggers.append("综合风险评分 ≥ 80")
     return triggers
@@ -699,19 +778,23 @@ def fetch_risk_asset_detail(conn, trust_asset_id: int):
                 WHERE trust_asset_id = :trust_asset_id AND data_date = :data_date
             )
             SELECT
+                m.remaining_amount,
                 CASE
-                    WHEN m.overdue_days > 90 THEN 50
-                    WHEN m.overdue_days > 60 THEN 35
-                    WHEN m.overdue_days > 30 THEN 20
+                    WHEN m.remaining_amount <= :tolerance THEN 0
+                    WHEN COALESCE(m.overdue_days, 0) > 90 THEN 50
+                    WHEN COALESCE(m.overdue_days, 0) > 60 THEN 35
+                    WHEN COALESCE(m.overdue_days, 0) > 30 THEN 20
                     ELSE 5
                 END AS overdue_component,
                 CASE
+                    WHEN m.remaining_amount <= :tolerance THEN 0
                     WHEN ABS((m.initial_transfer_amount - m.repaid_amount) - m.remaining_amount) > :tolerance
                       OR ABS(m.repaid_amount - rs.total_repaid) > :tolerance THEN 30
                     ELSE 0
                 END AS reconciliation_component,
                 CASE
-                    WHEN m.overdue_days > 30 AND (
+                    WHEN m.remaining_amount <= :tolerance THEN 0
+                    WHEN COALESCE(m.overdue_days, 0) > 30 AND (
                         m.last_payment_date IS NULL
                         OR (m.data_date - m.last_payment_date) > 45
                     ) THEN 20
@@ -723,6 +806,7 @@ def fetch_risk_asset_detail(conn, trust_asset_id: int):
     ).fetchone()
 
     active_case = next((c for c in cases if c["status"] in ("open", "in_progress")), None)
+    lifecycle = monitor_record_api_fields(row)
 
     return {
         "trust_asset_id": row.trust_asset_id,
@@ -733,13 +817,9 @@ def fetch_risk_asset_detail(conn, trust_asset_id: int):
         "trust_product_id": row.trust_product_id,
         "trust_product_name": row.trust_product_name,
         "data_date": data_date,
-        "overdue_days": int(row.overdue_days),
         "risk_score": int(row.risk_score) if row.risk_score is not None else None,
-        "risk_level": row.risk_level,
         "initial_transfer_amount": float(row.initial_transfer_amount),
         "repaid_amount": float(row.repaid_amount),
-        "remaining_amount": float(row.remaining_amount),
-        "last_payment_date": str(row.last_payment_date) if row.last_payment_date else None,
         "max_payment_date": str(row.max_payment_date) if row.max_payment_date else None,
         "source_file_name": row.source_file_name,
         "source_sheet_name": row.source_sheet_name,
@@ -752,6 +832,7 @@ def fetch_risk_asset_detail(conn, trust_asset_id: int):
         "alerts": alerts,
         "case": active_case,
         "cases": cases,
+        **lifecycle,
     }
 
 
