@@ -15,6 +15,8 @@ from app import auth_html
 from app import ingestion_html
 from app import ingestion_pipeline
 from app import ingestion_upload
+from app import issuance_html
+from app import issuance_upload
 from app import query_utils
 from app import risk_hub
 from app.ui_css import TABLE_SCROLL_CSS
@@ -3689,6 +3691,15 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                 <div class="card-value" style="font-size:1.25rem;">Excel</div>
                 <div class="card-label" style="margin-top:0.5rem;margin-bottom:0;">还款明细 / 监控快照 →</div>
             </a>
+            <a href="/issuance/upload" class="card card-link">
+                <div class="card-label">发行资产明细</div>
+                <div class="card-value" style="font-size:1.25rem;">Excel</div>
+                <div class="card-label" style="margin-top:0.5rem;margin-bottom:0;">信托产品发行导入 →</div>
+            </a>
+            <a href="/issuance/records" class="card card-link">
+                <div class="card-label">发行资产明细</div>
+                <div class="card-value" style="font-size:1.25rem;">查看</div>
+            </a>
             <a href="/ingestion/repayment-records" class="card card-link">
                 <div class="card-label">还款明细</div>
                 <div class="card-value" style="font-size:1.25rem;">查看</div>
@@ -4537,4 +4548,135 @@ def ingestion_monitor_records_page(
         "资产监控快照", "/ingestion/monitor-records/data", filters, data, products,
         page_user["username"],
         record_type="monitor",
+    ))
+
+
+@app.get("/issuance/upload", response_class=HTMLResponse)
+def issuance_upload_page(page_user: Annotated[dict, Depends(get_page_user)]):
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
+        products = [{"id": r.id, "name": r.name} for r in rows]
+    return HTMLResponse(content=issuance_html.render_upload_page(products, page_user["username"]))
+
+
+@app.post("/issuance/preview")
+async def issuance_preview(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: int = Form(...),
+    issue_date: str = Form(...),
+    files: list[UploadFile] = File(...),
+):
+    parsed_issue = query_utils.parse_optional_date(issue_date)
+    if not parsed_issue:
+        raise HTTPException(status_code=400, detail="issue_date 无效")
+    issue = date.fromisoformat(parsed_issue[:10])
+    batch_uuid = str(uuid.uuid4())
+    saved = await issuance_upload.save_batch_files(batch_uuid, files)
+    with engine.connect() as conn:
+        return issuance_upload.run_preview(conn, trust_product_id, issue, batch_uuid, saved)
+
+
+@app.post("/issuance/import")
+def issuance_import(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    batch_uuid = body.get("batch_uuid") or body.get("file_id")
+    trust_product_id = body.get("trust_product_id")
+    issue_date_raw = body.get("issue_date")
+    if not batch_uuid or trust_product_id is None or not issue_date_raw:
+        raise HTTPException(
+            status_code=400,
+            detail="batch_uuid/file_id, trust_product_id and issue_date required",
+        )
+    parsed_issue = query_utils.parse_optional_date(str(issue_date_raw))
+    if not parsed_issue:
+        raise HTTPException(status_code=400, detail="issue_date 无效")
+    issue = date.fromisoformat(parsed_issue[:10])
+    with engine.connect() as conn:
+        return issuance_upload.run_import(
+            conn,
+            batch_uuid=batch_uuid,
+            trust_product_id=int(trust_product_id),
+            issue_date=issue,
+            user_id=current_user["id"],
+            selected_sheet_keys=body.get("selected_sheet_keys"),
+            confirm_sheet_keys=body.get("confirm_sheet_keys"),
+        )
+
+
+@app.get("/issuance/records/data")
+def issuance_records_data(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    page: str | None = Query(default=None),
+    page_size: str | None = Query(default=None),
+    trust_product_id: str | None = Query(default=None),
+    trust_product_name: str | None = Query(default=None),
+    from_trust_product_id: str | None = Query(default=None),
+    from_trust_product_name: str | None = Query(default=None),
+    issue_date: str | None = Query(default=None),
+    custody_asset_code: str | None = Query(default=None),
+    business_asset_key: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+    source_file_name: str | None = Query(default=None),
+    source_sheet_name: str | None = Query(default=None),
+    migration_type: str | None = Query(default=None),
+):
+    page_no, page_sz = query_utils.parse_pagination(page, page_size)
+    filters = issuance_upload.build_record_filters(
+        trust_product_id=trust_product_id,
+        trust_product_name=trust_product_name,
+        from_trust_product_id=from_trust_product_id,
+        from_trust_product_name=from_trust_product_name,
+        issue_date=issue_date,
+        custody_asset_code=custody_asset_code,
+        business_asset_key=business_asset_key,
+        city=city,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+        migration_type=migration_type,
+    )
+    with engine.connect() as conn:
+        return issuance_upload.fetch_paginated_records(conn, page_no, page_sz, filters)
+
+
+@app.get("/issuance/records", response_class=HTMLResponse)
+def issuance_records_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
+    page: str | None = Query(default=None),
+    page_size: str | None = Query(default=None),
+    trust_product_id: str | None = Query(default=None),
+    trust_product_name: str | None = Query(default=None),
+    from_trust_product_id: str | None = Query(default=None),
+    from_trust_product_name: str | None = Query(default=None),
+    issue_date: str | None = Query(default=None),
+    custody_asset_code: str | None = Query(default=None),
+    business_asset_key: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+    source_file_name: str | None = Query(default=None),
+    source_sheet_name: str | None = Query(default=None),
+    migration_type: str | None = Query(default=None),
+):
+    page_no, page_sz = query_utils.parse_pagination(page, page_size)
+    filters = issuance_upload.build_record_filters(
+        trust_product_id=trust_product_id,
+        trust_product_name=trust_product_name,
+        from_trust_product_id=from_trust_product_id,
+        from_trust_product_name=from_trust_product_name,
+        issue_date=issue_date,
+        custody_asset_code=custody_asset_code,
+        business_asset_key=business_asset_key,
+        city=city,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+        migration_type=migration_type,
+    )
+    with engine.connect() as conn:
+        data = issuance_upload.fetch_paginated_records(conn, page_no, page_sz, filters)
+        products = [
+            {"id": r.id, "name": r.name}
+            for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
+        ]
+    return HTMLResponse(content=issuance_html.render_records_page(
+        filters, data, products, page_user["username"],
     ))
