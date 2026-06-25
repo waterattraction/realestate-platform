@@ -1,5 +1,9 @@
 # Domain Model（领域模型）
 
+> **M3.0 Baseline（Frozen）：** [`m3_asset_domain_architecture_baseline_v1.1.md`](./m3_asset_domain_architecture_baseline_v1.1.md)  
+> **M3.1 Identity（Approved）：** [`m3.1_asset_identity_alias_design.md`](./m3.1_asset_identity_alias_design.md)  
+> **M3.2 Workbench（Frozen）：** [`m3.2_asset_workbench_design.md`](./m3.2_asset_workbench_design.md) — Application Layer Baseline
+
 本文描述平台核心 **Canonical Object** 及其关系，与 [`docs/canonical/object_dictionary.md`](../canonical/object_dictionary.md) 对齐。
 
 > 只读文档；实现以 `db/` 与 `backend/app/` 为准。

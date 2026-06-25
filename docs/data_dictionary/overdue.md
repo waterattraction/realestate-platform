@@ -1,4 +1,6 @@
-# 逾期跟进台账（`trust_overdue_followups`）
+# 逾期跟进台账（`trust_overdue_followups`）— 遗留
+
+> **状态：遗留只读。** V2.2 起运营跟进写入 `trust_overdue_followup_cases` + `trust_overdue_followup_entries`。本表由 `risk_hub` 等历史路径只读引用；新功能禁止写入。
 
 ## 基本信息
 

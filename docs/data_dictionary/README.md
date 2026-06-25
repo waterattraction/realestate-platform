@@ -25,11 +25,14 @@
 | [data_mapping_config.md](data_mapping_config.md) | `data_mapping_config` | 导入配置 |
 | [trust_product_aliases.md](trust_product_aliases.md) | `trust_product_aliases` | 发行 |
 | [trust_asset_trust_marks.md](trust_asset_trust_marks.md) | `trust_asset_trust_marks` | 托管标记 |
-| [overdue.md](overdue.md) | `trust_overdue_followups` | 逾期 |
+| [overdue.md](overdue.md) | `trust_overdue_followups` | 逾期（遗留台账） |
+| [overdue_followup_cases.md](overdue_followup_cases.md) | `trust_overdue_followup_cases` | 逾期跟进案件 |
+| [overdue_followup_entries.md](overdue_followup_entries.md) | `trust_overdue_followup_entries` | 逾期跟进记录 |
+| [overdue_followup_attachments.md](overdue_followup_attachments.md) | `trust_overdue_followup_attachments` | 跟进附件 |
 | [risk.md](risk.md) | `risk_alerts` | 风险 |
 | [users.md](users.md) | `users` | 用户 |
 
-**覆盖率**：20/20 manifest 表（由 `scripts/schema_diff.py` 校验）。
+**覆盖率**：manifest 表 + 增量跟进三表（见 `schema_diff` / `doc_health` 校验）。
 
 ## 填写规范
 

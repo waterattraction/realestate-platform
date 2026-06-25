@@ -1,0 +1,229 @@
+---
+description: M3.4 Asset Domain API Baseline — API Layer Frozen Rules
+globs: backend/**/*.py
+alwaysApply: true
+---
+
+# M3.4 Asset Domain API Baseline（FROZEN）
+
+M3.4 是 Asset Domain API 唯一入口规范层。
+
+所有 API / BI / AI 必须遵循 **Application Service（M3.2）+ Projection（M3.3）** 架构。
+
+**SSOT：**
+- M3.0：[`m3_asset_domain_architecture_baseline_v1.1.md`](../docs/architecture/m3_asset_domain_architecture_baseline_v1.1.md)（Frozen）
+- M3.1：[`m3.1_asset_identity_alias_design.md`](../docs/architecture/m3.1_asset_identity_alias_design.md)（Identity / Alias）
+- M3.2：[`m3.2_asset_workbench_design.md`](../docs/architecture/m3.2_asset_workbench_design.md)（Application Service · Frozen）
+- M3.3：[`m3.3_projection_timeline_design.md`](../docs/architecture/m3.3_projection_timeline_design.md)（Projection DTO · Frozen · ADR-PRJ-009）
+- M3.4：[`m3.4_asset_domain_api_baseline.md`](../docs/architecture/m3.4_asset_domain_api_baseline.md)（API Layer · Frozen）
+
+---
+
+# 核心强约束（不可违反）
+
+## 1. API 不可访问 DB（Hard Rule）
+
+**禁止：**
+
+- 任何 SQL / `sqlalchemy.text()`
+- ORM query 事实表
+- Join 业务表（monitor、repayment、issuance、risk、overdue、alias 等）
+
+**允许：**
+
+- `ApplicationService.fetch_*()`
+- 直接返回 M3.3 Projection DTO
+
+## 2. API 不可解析 Identity
+
+**禁止：**
+
+- alias lookup
+- `custody_asset_code` 推导
+- `source_asset_code` 作为入口
+- `trust_asset_id` join 反查 Identity
+
+**允许：**
+
+- `identity_id`
+- Canonical 三元组透传：`trust_product_id` + `issue_date` + `canonical_custody_asset_code`
+
+Identity 规则由 **M3.1** 冻结；解析在 M3.2 `fetch_asset_identity()` 内完成。
+
+## 3. API 不可构造 DTO
+
+**禁止：**
+
+- 自定义 Response Model（与 M3.3 语义冲突）
+- JSON 手工拼装 / 字段重组
+- Projection merge
+
+**允许：**
+
+- 直接序列化 M3.3 Projection DTO
+
+## 4. API 不可计算业务逻辑
+
+**禁止：**
+
+- 风险 / 回款 / 逾期计算
+- 状态判断、汇总统计
+
+**允许：**
+
+- 使用 Projection Layer 已计算结果
+
+## 5. API 不可跨表 Join
+
+**禁止：**
+
+- monitor + repayment
+- risk + followup
+- issuance + monitor
+- alias + asset
+
+所有 Join 仅在 **M3.3 Builder `collect()`** 内完成。
+
+---
+
+# 唯一路径（必须遵守）
+
+```
+API → ApplicationService (M3.2) → Projection (M3.3) → DB
+```
+
+Presentation（含 FastAPI 路由）**不可**跳过 M3.2 直触 M3.3 Builder 或 DB。
+
+---
+
+# 标准 API Contract
+
+仅允许返回以下 DTO（M3.3 Unified Projection DTO）：
+
+| DTO | Service |
+|-----|---------|
+| `AssetSnapshotDTO` | `fetch_snapshot()` |
+| `AssetTimelineDTO` | `fetch_timeline()` |
+| `AssetOperationsDTO` | `fetch_operations()` |
+| `AssetWorkbenchHeader`（Header） | `fetch_workbench_header()` |
+| `AttachmentList` | `fetch_attachments()` |
+| `AssetIdentityDTO` | `fetch_asset_identity()` |
+
+禁止 `WorkbenchDTO`、`AgentDTO`、`BIDTO` 等平行读模型。
+
+---
+
+# Identity 输入规范
+
+**允许：**
+
+- `identity_id`
+- `trust_product_id` + `issue_date` + `canonical_custody_asset_code`
+
+**禁止：**
+
+- alias 输入
+- `source_asset_code` 单独入口
+- 裸 DB 表 id（除 `identity_id`）
+
+---
+
+# Service 调用规范
+
+API 只能调用 M3.2 Application Service：
+
+- `fetch_asset_identity()`
+- `fetch_workbench_header()`
+- `fetch_snapshot()`
+- `fetch_timeline()`
+- `fetch_operations()`
+- `fetch_attachments()`
+- `fetch_ai_summary()`（只读，M3.5 共用）
+
+禁止在路由/Controller 内新增平行 `fetch_asset_*` 绕过上述方法。
+
+---
+
+# Projection 强约束（M3.3 Frozen）
+
+API **不允许：**
+
+- 修改 `snapshot_version` / `projection_version` / `health`
+- merge timeline
+- `rebuild_projection()` 或触发 Builder
+- override DTO 字段语义
+
+响应须透传 `built_at`、`projection_version`、`builder_version`、`health`。
+
+---
+
+# BI / AI 访问规则
+
+**只能：** 调 ApplicationService；读 Projection DTO。
+
+**禁止：** SQL；fact table access；alias resolution；自建聚合。
+
+`health=failed` 时不得返回编造的业务数值。
+
+---
+
+# 禁止设计模式
+
+API 层禁止：
+
+- repository pattern（直读 DB）
+- service bypass
+- query builder
+- per-endpoint DTO 逻辑
+
+---
+
+# Event & Timeline
+
+- API **不生成** Timeline 事件
+- events **仅来自** M3.3 Projection 管道
+- API **只消费** `AssetTimelineDTO`；须透传 `correlation_id`
+
+写操作只写事实表；事件由 M3.3 追加。
+
+---
+
+# 标准接口模式
+
+```python
+def get_asset_snapshot(identity_id: int, sector: str, params: dict):
+    return application_service.fetch_snapshot(identity_id, sector, params)
+```
+
+错误示例（禁止）：
+
+```python
+# ❌ 禁止
+rows = db.execute(text("SELECT ... FROM trust_asset_monitor_records ..."))
+return {"monitor": compute(rows)}
+```
+
+---
+
+# M3.0–M3.3 摘要（变更须升对应基线版本）
+
+| 层 | 规则 |
+|----|------|
+| Identity | Canonical = `trust_product_id + issue_date + canonical_custody_asset_code`（M3.0） |
+| Aggregate Root | 仅 `AssetIdentity`（M3.1 `identity_id`） |
+| Application | Workbench 布局与 Service 职责见 M3.2 Frozen |
+| Projection | Registry + Contract + Builder 生命周期见 M3.3 Frozen |
+| 数据修复 | [Production Data Repair Standard](../docs/engineering/production_data_repair_standard.md) |
+
+## 开发前检查
+
+1. 路由是否只调 `fetch_*`？是否有 SQL / Join？
+2. 响应是否为 M3.3 DTO？是否自建 Response Model？
+3. Identity 输入是否仅 `identity_id` 或三元组？
+4. 是否违反 M3.0 Principle 10（Domain First）？
+
+## 治理链
+
+```
+M3.0 Frozen → M3.1 Approved → M3.2 Frozen → M3.3 Frozen → M3.4 Frozen → M3.5 AI
+```

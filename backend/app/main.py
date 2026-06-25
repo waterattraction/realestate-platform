@@ -13,6 +13,10 @@ from sqlalchemy import create_engine, text
 
 from app import auth
 from app import auth_html
+from app.api import asset_workbench
+from app.api import overdue_ops
+from app.api import overdue_workbench
+from app.api import followups
 from app import ingestion_html
 from app import ingestion_pipeline
 from app import ingestion_upload
@@ -20,6 +24,24 @@ from app import issuance_html
 from app import issuance_upload
 from app import query_utils
 from app import risk_hub
+from app.overdue import buckets as delinquency_buckets
+from app.overdue.buckets import (
+    DELINQUENCY_BUCKET_COLORS,
+    DELINQUENCY_BUCKET_LABELS,
+    M1_MAX_DAYS as PERFORMING_MAX_DAYS,
+    OVERDUE_ASSET_MIN_DAYS,
+    RECONCILIATION_TOLERANCE_DEFAULT,
+    calc_delinquency_bucket as calc_risk_level,
+    delinquency_bucket,
+    is_overdue_asset,
+    sql_es_filter as sql_es_asset_filter,
+    sql_exposure_asset_filter,
+    sql_m1_filter as sql_m1_asset_filter,
+    sql_m2_filter as sql_m2_asset_filter,
+    sql_m3_filter as sql_m3_asset_filter,
+    sql_m3_plus_filter as sql_m3_plus_asset_filter,
+    sql_overdue_asset_filter,
+)
 from app.ui_css import TABLE_SCROLL_CSS
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -27,6 +49,11 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 
 app = FastAPI(title="Real Estate Securitization Platform")
+
+app.include_router(asset_workbench.router)
+app.include_router(overdue_ops.router)
+app.include_router(overdue_workbench.router)
+app.include_router(followups.router)
 
 get_current_user = auth.make_current_user_dependency(engine)
 get_page_user = auth.make_page_user_dependency(engine)
@@ -97,86 +124,7 @@ CUSTODY_LIST_HEADERS = [
     "剩余还款金额",
 ]
 
-DELINQUENCY_BUCKET_LABELS = {
-    "ES": "ES（提前结清）",
-    "M1": "M1（正常·Performing）",
-    "M2": "M2 (31-60天)",
-    "M3": "M3 (61-90天)",
-    "M3_PLUS": "M3+ (90天以上)",
-}
-
-DELINQUENCY_BUCKET_COLORS = {
-    "ES": "#38bdf8",
-    "M1": "#34d399",
-    "M2": "#fbbf24",
-    "M3": "#fbbf24",
-    "M3_PLUS": "#f87171",
-}
-
-RECONCILIATION_TOLERANCE = 0.01
-PERFORMING_MAX_DAYS = 30  # M1 上限（含 overdue_days=0 的正常在贷）
-OVERDUE_ASSET_MIN_DAYS = 31  # M2+ 起点；仅 M2/M3/M3+ 计入逾期资产
-
-
-def _coalesce_overdue_days(overdue_days_expr: str) -> str:
-    return f"COALESCE({overdue_days_expr}, 0)"
-
-
-def sql_es_asset_filter(
-    remaining_amount_expr: str,
-    *,
-    tolerance_param: str = ":tolerance",
-) -> str:
-    return f"({remaining_amount_expr} <= {tolerance_param})"
-
-
-def sql_m1_asset_filter(
-    overdue_days_expr: str,
-    remaining_amount_expr: str,
-    *,
-    tolerance_param: str = ":tolerance",
-) -> str:
-    od = _coalesce_overdue_days(overdue_days_expr)
-    return (
-        f"({remaining_amount_expr} > {tolerance_param} "
-        f"AND {od} <= {PERFORMING_MAX_DAYS})"
-    )
-
-
-def sql_m2_asset_filter(
-    overdue_days_expr: str,
-    remaining_amount_expr: str,
-    *,
-    tolerance_param: str = ":tolerance",
-) -> str:
-    od = _coalesce_overdue_days(overdue_days_expr)
-    return (
-        f"({remaining_amount_expr} > {tolerance_param} "
-        f"AND {od} BETWEEN 31 AND 60)"
-    )
-
-
-def sql_m3_asset_filter(
-    overdue_days_expr: str,
-    remaining_amount_expr: str,
-    *,
-    tolerance_param: str = ":tolerance",
-) -> str:
-    od = _coalesce_overdue_days(overdue_days_expr)
-    return (
-        f"({remaining_amount_expr} > {tolerance_param} "
-        f"AND {od} BETWEEN 61 AND 90)"
-    )
-
-
-def sql_m3_plus_asset_filter(
-    overdue_days_expr: str,
-    remaining_amount_expr: str,
-    *,
-    tolerance_param: str = ":tolerance",
-) -> str:
-    od = _coalesce_overdue_days(overdue_days_expr)
-    return f"({remaining_amount_expr} > {tolerance_param} AND {od} > 90)"
+RECONCILIATION_TOLERANCE = RECONCILIATION_TOLERANCE_DEFAULT
 
 
 def fmt_money(value: float) -> str:
@@ -203,84 +151,6 @@ def fmt_rate(value: float | None) -> str:
 def fmt_status(status: str) -> str:
     label = STATUS_LABELS.get(status, status)
     return f'<span class="badge">{escape(label)}</span>'
-
-
-def is_overdue_asset(
-    overdue_days: int | None,
-    remaining_amount: float,
-    *,
-    tolerance: float = RECONCILIATION_TOLERANCE,
-) -> bool:
-    """真实逾期资产：有余额且逾期天数达 M2+（≥31天）。"""
-    if remaining_amount <= tolerance:
-        return False
-    od = 0 if overdue_days is None else int(overdue_days)
-    return od >= OVERDUE_ASSET_MIN_DAYS
-
-
-def sql_overdue_asset_filter(
-    overdue_days_expr: str,
-    remaining_amount_expr: str,
-    *,
-    tolerance_param: str = ":tolerance",
-) -> str:
-    """SQL 片段：仅匹配 M2/M3/M3+ 逾期资产（排除 ES、M1）。"""
-    od = _coalesce_overdue_days(overdue_days_expr)
-    return (
-        f"({remaining_amount_expr} > {tolerance_param} "
-        f"AND {od} >= {OVERDUE_ASSET_MIN_DAYS})"
-    )
-
-
-def sql_exposure_asset_filter(
-    overdue_days_expr: str,
-    remaining_amount_expr: str,
-    *,
-    tolerance_param: str = ":tolerance",
-) -> str:
-    """SQL 片段：全量监控房源（ES + M1 + M2 + M3 + M3+，互斥完备）。"""
-    return (
-        f"({sql_es_asset_filter(remaining_amount_expr, tolerance_param=tolerance_param)} "
-        f"OR {sql_m1_asset_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)} "
-        f"OR {sql_m2_asset_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)} "
-        f"OR {sql_m3_asset_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)} "
-        f"OR {sql_m3_plus_asset_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)})"
-    )
-
-
-def calc_risk_level(
-    overdue_days: int,
-    remaining_amount: float,
-    *,
-    tolerance: float = RECONCILIATION_TOLERANCE,
-) -> str:
-    """ES / M1 / M2 / M3 / M3+ 分层；ES=结清，M1=正常(含0天)，M2+=逾期。"""
-    if remaining_amount <= tolerance:
-        return "ES"
-    od = max(0, int(overdue_days))
-    if od <= PERFORMING_MAX_DAYS:
-        return "M1"
-    if od <= 60:
-        return "M2"
-    if od <= 90:
-        return "M3"
-    return "M3_PLUS"
-
-
-def delinquency_bucket(
-    overdue_days: int,
-    remaining_amount: float | None = None,
-) -> str | None:
-    if remaining_amount is not None:
-        return calc_risk_level(overdue_days, remaining_amount)
-    od = max(0, int(overdue_days))
-    if od <= PERFORMING_MAX_DAYS:
-        return "M1"
-    if od <= 60:
-        return "M2"
-    if od <= 90:
-        return "M3"
-    return "M3_PLUS"
 
 
 def build_overdue_kpi_metrics(
@@ -420,13 +290,10 @@ def _custody_has_follow_up_sql() -> str:
     return """
         EXISTS (
             SELECT 1
-            FROM monitor_enriched d2
-            INNER JOIN trust_overdue_followups f
-                ON f.trust_asset_id = d2.trust_asset_id
-               AND f.status IN ('open', 'in_progress')
-            WHERE d2.trust_product_id = mc.trust_product_id
-              AND d2.data_date = mc.data_date
-              AND d2.custody_asset_code = mc.custody_asset_code
+            FROM trust_overdue_followup_cases c
+            WHERE c.trust_product_id = mc.trust_product_id
+              AND c.custody_asset_code = mc.custody_asset_code
+              AND c.status IN ('open', 'in_progress')
         )
     """
 
@@ -434,12 +301,11 @@ def _custody_has_follow_up_sql() -> str:
 def _custody_followup_count_sql() -> str:
     return """
         (
-            SELECT COUNT(DISTINCT f.id)
-            FROM monitor_enriched d2
-            INNER JOIN trust_overdue_followups f ON f.trust_asset_id = d2.trust_asset_id
-            WHERE d2.trust_product_id = mc.trust_product_id
-              AND d2.data_date = mc.data_date
-              AND d2.custody_asset_code = mc.custody_asset_code
+            SELECT COUNT(e.id)
+            FROM trust_overdue_followup_entries e
+            INNER JOIN trust_overdue_followup_cases c ON c.id = e.case_id
+            WHERE c.trust_product_id = mc.trust_product_id
+              AND c.custody_asset_code = mc.custody_asset_code
         )
     """
 
@@ -803,7 +669,7 @@ def fetch_overdue_overview(
 
     followup_sql = """
         SELECT COUNT(*) AS cnt
-        FROM trust_overdue_followups
+        FROM trust_overdue_followup_cases
         WHERE status IN ('open', 'in_progress')
     """
     followup_params: dict = {}
@@ -837,14 +703,7 @@ def fetch_overdue_overview(
             INNER JOIN trust_products tp ON tp.id = mc.trust_product_id
             {_custody_marks_join_sql()}
             ORDER BY
-                CASE
-                    WHEN mc.remaining_amount <= :tolerance THEN 4
-                    WHEN COALESCE(mc.overdue_days, 0) > 90 THEN 0
-                    WHEN COALESCE(mc.overdue_days, 0) > 60 THEN 1
-                    WHEN COALESCE(mc.overdue_days, 0) > 30 THEN 2
-                    WHEN mc.remaining_amount > :tolerance THEN 3
-                    ELSE 5
-                END,
+                {delinquency_buckets.sql_custody_list_sort_priority("mc.overdue_days", "mc.remaining_amount")},
                 COALESCE(mc.overdue_days, 0) DESC,
                 mc.max_payment_date DESC NULLS LAST,
                 mc.custody_asset_code
@@ -1307,335 +1166,6 @@ def fetch_overdue_followups(conn, trust_product_id: int | None = None, status: s
     return items
 
 
-def _recon_checks_for_asset(
-    initial: float, repaid: float, remaining: float, detail_total: float
-) -> dict:
-    """与 /overdue/reconciliation 一致的核对口径（托管维度累计还款明细）。"""
-    balance_remainder = remaining - initial + repaid
-    cross_diff = repaid - detail_total
-    return {
-        "balance_equation": {
-            "passed": abs(balance_remainder) <= RECONCILIATION_TOLERANCE,
-            "left_amount": remaining,
-            "right_amount": initial - repaid,
-            "diff_amount": balance_remainder,
-        },
-        "cross_sheet_repayment": {
-            "passed": abs(cross_diff) <= RECONCILIATION_TOLERANCE,
-            "left_amount": repaid,
-            "right_amount": detail_total,
-            "diff_amount": cross_diff,
-        },
-    }
-
-
-def _followup_status_options(current: str | None) -> str:
-    options = ""
-    for value, label in FOLLOWUP_STATUS_LABELS.items():
-        selected = " selected" if value == current else ""
-        options += f'<option value="{value}"{selected}>{escape(label)}</option>'
-    return options
-
-
-def fmt_workbench_risk_rating(level: str | None) -> str:
-    if level == "ES":
-        return fmt_risk_badge("ES")
-    if not level:
-        return '<span class="badge unrated-badge">未评分</span>'
-    return fmt_risk_badge(level)
-
-
-def fetch_overdue_workbench(
-    conn,
-    trust_product_id: int | None = None,
-    trust_asset_id: int | None = None,
-    data_date: str | None = None,
-    custody_asset_code: str | None = None,
-):
-    monitor_filter, params = _latest_monitor_filter(trust_product_id, data_date)
-
-    date_row = conn.execute(
-        text(f"SELECT m.data_date FROM trust_asset_monitor_records m WHERE {monitor_filter} LIMIT 1"),
-        params,
-    ).fetchone()
-    if date_row is None:
-        return {
-            "data_date": data_date,
-            "queue": [],
-            "selected_asset_id": None,
-            "detail": None,
-            "custody_asset_code": custody_asset_code,
-        }
-
-    resolved_data_date = date_row.data_date
-    query_params = dict(params)
-    if "data_date" not in query_params:
-        query_params["data_date"] = resolved_data_date
-    query_params["tolerance"] = RECONCILIATION_TOLERANCE
-
-    recon_filter = monitor_filter
-    if "data_date" not in params:
-        if trust_product_id is not None:
-            recon_filter = "m.trust_product_id = :trust_product_id AND m.data_date = :data_date"
-        else:
-            recon_filter = "m.data_date = :data_date"
-
-    if custody_asset_code:
-        asset_scope_filter = (
-            "COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code) = :custody_asset_code"
-        )
-        query_params["custody_asset_code"] = custody_asset_code
-    else:
-        asset_scope_filter = sql_overdue_asset_filter("m.overdue_days", "m.remaining_amount")
-
-    rows = conn.execute(
-        text(f"""
-            WITH monitor AS (
-                SELECT
-                    m.trust_asset_id,
-                    m.asset_code,
-                    COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code) AS custody_asset_code,
-                    COALESCE(m.source_asset_code, ta.source_asset_code, m.asset_code) AS source_asset_code,
-                    m.trust_product_id,
-                    m.data_date,
-                    m.overdue_days,
-                    m.risk_score,
-                    m.risk_level,
-                    m.initial_transfer_amount,
-                    m.repaid_amount,
-                    m.remaining_amount,
-                    m.last_payment_date,
-                    m.max_payment_date,
-                    ta.asset_name,
-                    tp.name AS trust_product_name
-                FROM trust_asset_monitor_records m
-                INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
-                INNER JOIN trust_products tp ON tp.id = m.trust_product_id
-                WHERE {recon_filter}
-                  AND {asset_scope_filter}
-            ),
-            repayment_custody AS (
-                SELECT
-                    r.trust_product_id,
-                    COALESCE(r.custody_asset_code, r.asset_code) AS custody_asset_code,
-                    COALESCE(SUM(r.actual_repayment_amount), 0) AS total_repaid
-                FROM trust_repayment_detail_records r
-                WHERE 1=1
-                  {"AND r.trust_product_id = :trust_product_id" if trust_product_id is not None else ""}
-                GROUP BY r.trust_product_id, COALESCE(r.custody_asset_code, r.asset_code)
-            )
-            SELECT
-                mon.*,
-                COALESCE(rc.total_repaid, 0) AS detail_total_repaid,
-                f.id AS followup_id,
-                f.status AS followup_status,
-                f.owner_name AS followup_owner,
-                f.overdue_reason AS followup_reason,
-                f.follow_up_plan AS followup_plan,
-                f.trust_feedback AS followup_feedback,
-                f.last_follow_up_at AS followup_last_at
-            FROM monitor mon
-            LEFT JOIN repayment_custody rc
-                ON rc.trust_product_id = mon.trust_product_id
-               AND rc.custody_asset_code = mon.custody_asset_code
-            LEFT JOIN LATERAL (
-                SELECT id, status, owner_name, overdue_reason, follow_up_plan,
-                       trust_feedback, last_follow_up_at
-                FROM trust_overdue_followups
-                WHERE trust_asset_id = mon.trust_asset_id
-                  AND status IN ('open', 'in_progress')
-                ORDER BY id DESC
-                LIMIT 1
-            ) f ON TRUE
-            ORDER BY mon.risk_score DESC NULLS LAST, mon.overdue_days DESC, mon.asset_code
-        """),
-        query_params,
-    )
-
-    queue = []
-    for r in rows:
-        remaining = float(r.remaining_amount)
-        is_es = is_es_closed(remaining)
-        od_val = None if is_es or r.overdue_days is None else int(r.overdue_days)
-        checks = _recon_checks_for_asset(
-            float(r.initial_transfer_amount),
-            float(r.repaid_amount),
-            remaining,
-            float(r.detail_total_repaid),
-        )
-        queue.append({
-            "trust_asset_id": r.trust_asset_id,
-            "asset_code": r.asset_code,
-            "custody_asset_code": r.custody_asset_code,
-            "source_asset_code": r.source_asset_code,
-            "asset_name": r.asset_name,
-            "trust_product_id": r.trust_product_id,
-            "trust_product_name": r.trust_product_name,
-            "data_date": str(r.data_date),
-            "overdue_days": od_val,
-            "risk_score": int(r.risk_score) if r.risk_score is not None else None,
-            "risk_level": "ES" if is_es else r.risk_level,
-            "delinquency_bucket": "ES" if is_es else calc_risk_level(
-                int(r.overdue_days or 0), remaining,
-            ),
-            "last_payment_date": str(r.last_payment_date) if r.last_payment_date else None,
-            "checks": checks,
-            "followup_id": r.followup_id,
-            "followup_status": r.followup_status,
-            "followup_owner": r.followup_owner,
-            "followup_reason": r.followup_reason,
-            "followup_plan": r.followup_plan,
-            "followup_feedback": r.followup_feedback,
-            "followup_last_at": (
-                str(r.followup_last_at) if r.followup_last_at else None
-            ),
-            "has_follow_up": r.followup_id is not None,
-        })
-
-    selected_id = trust_asset_id
-    if selected_id is None and custody_asset_code and queue:
-        selected_id = queue[0]["trust_asset_id"]
-    elif selected_id is None and queue:
-        selected_id = queue[0]["trust_asset_id"]
-
-    detail = None
-    if selected_id is not None:
-        detail = next((q for q in queue if q["trust_asset_id"] == selected_id), None)
-        if detail:
-            custody_code = detail["custody_asset_code"]
-            custody_asset_ids = {
-                q["trust_asset_id"]
-                for q in queue
-                if q["custody_asset_code"] == custody_code
-            }
-            all_followups = fetch_overdue_followups(
-                conn, trust_product_id=trust_product_id
-            )
-            asset_history = [
-                f for f in all_followups if f["trust_asset_id"] == selected_id
-            ]
-            custody_history = [
-                f for f in all_followups if f["trust_asset_id"] in custody_asset_ids
-            ]
-            asset_history.sort(key=lambda h: h.get("created_at") or "", reverse=True)
-            custody_history.sort(key=lambda h: h.get("created_at") or "", reverse=True)
-            detail = {
-                **detail,
-                "followup_history": asset_history,
-                "custody_followup_history": custody_history,
-            }
-
-    return {
-        "data_date": str(resolved_data_date),
-        "queue": queue,
-        "selected_asset_id": selected_id,
-        "detail": detail,
-        "custody_asset_code": custody_asset_code,
-    }
-
-
-def create_overdue_followup_record(
-    conn,
-    trust_asset_id: int,
-    overdue_reason: str | None,
-    follow_up_plan: str | None,
-    owner_name: str | None,
-    trust_feedback: str | None,
-) -> int:
-    row = conn.execute(
-        text("""
-            SELECT trust_product_id, data_date, risk_score, risk_level
-            FROM trust_asset_monitor_records
-            WHERE trust_asset_id = :trust_asset_id
-            ORDER BY data_date DESC
-            LIMIT 1
-        """),
-        {"trust_asset_id": trust_asset_id},
-    ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Asset monitor record not found")
-
-    existing = conn.execute(
-        text("""
-            SELECT id FROM trust_overdue_followups
-            WHERE trust_asset_id = :trust_asset_id AND status IN ('open', 'in_progress')
-            LIMIT 1
-        """),
-        {"trust_asset_id": trust_asset_id},
-    ).fetchone()
-    if existing:
-        raise HTTPException(status_code=400, detail="Active follow-up already exists for this asset")
-
-    result = conn.execute(
-        text("""
-            INSERT INTO trust_overdue_followups (
-                trust_product_id, trust_asset_id, data_date, trigger_source,
-                overdue_reason, follow_up_plan, status, owner_name,
-                trust_feedback, risk_score, risk_level, last_follow_up_at
-            ) VALUES (
-                :trust_product_id, :trust_asset_id, :data_date, 'system',
-                :overdue_reason, :follow_up_plan, 'open', :owner_name,
-                :trust_feedback, :risk_score, :risk_level, NOW()
-            )
-            RETURNING id
-        """),
-        {
-            "trust_product_id": row.trust_product_id,
-            "trust_asset_id": trust_asset_id,
-            "data_date": row.data_date,
-            "overdue_reason": overdue_reason or None,
-            "follow_up_plan": follow_up_plan or None,
-            "owner_name": owner_name or None,
-            "trust_feedback": trust_feedback or None,
-            "risk_score": row.risk_score,
-            "risk_level": row.risk_level,
-        },
-    ).fetchone()
-    conn.commit()
-    return int(result.id)
-
-
-def update_overdue_followup_record(
-    conn,
-    followup_id: int,
-    status: str | None = None,
-    owner_name: str | None = None,
-    overdue_reason: str | None = None,
-    follow_up_plan: str | None = None,
-    trust_feedback: str | None = None,
-) -> None:
-    row = conn.execute(
-        text("SELECT id FROM trust_overdue_followups WHERE id = :id"),
-        {"id": followup_id},
-    ).fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Follow-up not found")
-
-    sets = ["last_follow_up_at = NOW()"]
-    params: dict = {"id": followup_id}
-    if status is not None:
-        sets.append("status = :status")
-        params["status"] = status
-    if owner_name is not None:
-        sets.append("owner_name = :owner_name")
-        params["owner_name"] = owner_name or None
-    if overdue_reason is not None:
-        sets.append("overdue_reason = :overdue_reason")
-        params["overdue_reason"] = overdue_reason or None
-    if follow_up_plan is not None:
-        sets.append("follow_up_plan = :follow_up_plan")
-        params["follow_up_plan"] = follow_up_plan or None
-    if trust_feedback is not None:
-        sets.append("trust_feedback = :trust_feedback")
-        params["trust_feedback"] = trust_feedback or None
-
-    conn.execute(
-        text(f"UPDATE trust_overdue_followups SET {', '.join(sets)} WHERE id = :id"),
-        params,
-    )
-    conn.commit()
-
-
 def fmt_asset_identity(item: dict) -> str:
     custody = item.get("custody_asset_code") or "—"
     source = item.get("source_asset_code") or item.get("asset_code") or "—"
@@ -1656,353 +1186,6 @@ def fmt_asset_identity_block(item: dict) -> str:
   """
 
 
-def fmt_check_result(passed: bool, label: str = "") -> str:
-    if passed:
-        return f'<span class="badge ok-badge">{escape(label)}通过</span>'
-    return f'<span class="badge fail-badge">{escape(label)}异常</span>'
-
-
-def render_overdue_workbench_html(
-    data: dict,
-    trust_product_id: int | None = None,
-    custody_asset_code: str | None = None,
-    new_followup: bool = False,
-):
-    queue = data["queue"]
-    detail = data.get("detail")
-    selected_id = data.get("selected_asset_id")
-    data_date = data.get("data_date") or "—"
-    resolved_custody = custody_asset_code or data.get("custody_asset_code")
-
-    def workbench_qs(trust_asset_id: int | None = None) -> str:
-        parts = []
-        if trust_product_id is not None:
-            parts.append(f"trust_product_id={trust_product_id}")
-        if resolved_custody:
-            parts.append(f"custody_asset_code={quote(resolved_custody)}")
-        if trust_asset_id is not None:
-            parts.append(f"trust_asset_id={trust_asset_id}")
-        return "?" + "&".join(parts) if parts else ""
-
-    product_hidden = (
-        f'<input type="hidden" name="trust_product_id" value="{trust_product_id}">'
-        if trust_product_id is not None
-        else ""
-    )
-    custody_hidden = (
-        f'<input type="hidden" name="custody_asset_code" value="{escape(resolved_custody)}">'
-        if resolved_custody
-        else ""
-    )
-
-    queue_items = ""
-    for item in queue:
-        active = "active" if item["trust_asset_id"] == selected_id else ""
-        recon_flag = "" if item["checks"]["cross_sheet_repayment"]["passed"] else " ⚠"
-        od_label = (
-            f"提前结清 {item.get('last_payment_date') or '—'}"
-            if item.get("delinquency_bucket") == "ES"
-            else f"逾期 {item['overdue_days']}天"
-        )
-        queue_items += f"""
-            <a class="queue-item {active}"
-               href="/overdue/workbench{workbench_qs(item['trust_asset_id'])}">
-                <div class="queue-top">
-                    <span class="queue-code">{fmt_asset_identity(item)}{recon_flag}</span>
-                    {fmt_risk_badge(item['risk_level']) if item.get('risk_level') else fmt_delinquency_badge(item['delinquency_bucket'])}
-                </div>
-                <div class="queue-meta">
-                    <span>{od_label}</span>
-                    <span>评分 {item['risk_score'] if item['risk_score'] is not None else '—'}</span>
-                    <span>{'已跟进' if item['has_follow_up'] else '未跟进'}</span>
-                </div>
-            </a>
-        """
-    if not queue_items:
-        empty_msg = "暂无房源" if resolved_custody else "暂无逾期房源"
-        queue_items = f'<div class="empty">{empty_msg}</div>'
-
-    panel_title = "托管房源"
-    if resolved_custody:
-        panel_title = f"托管房源 · {escape(resolved_custody)}"
-
-    detail_html = '<div class="empty">请从左侧选择房源</div>'
-    if detail:
-        checks = detail["checks"]
-        bal = checks["balance_equation"]
-        cross = checks["cross_sheet_repayment"]
-        owner_val = escape(detail.get("followup_owner") or "")
-        reason_val = escape(detail.get("followup_reason") or "")
-        plan_val = escape(detail.get("followup_plan") or "")
-        feedback_val = escape(detail.get("followup_feedback") or "")
-        current_status = detail.get("followup_status") or "open"
-
-        followup_section = ""
-        show_create = new_followup or not detail.get("followup_id")
-        if detail.get("followup_id") and not new_followup:
-            fid = detail["followup_id"]
-            followup_section = f"""
-                <div class="panel-section">
-                    <h3>当前跟进台账</h3>
-                    <p><span class="lbl">状态</span>
-                       {escape(FOLLOWUP_STATUS_LABELS.get(detail['followup_status'], detail['followup_status'] or '—'))}</p>
-                    <p><span class="lbl">负责人</span>{escape(detail.get('followup_owner') or '—')}</p>
-                    <p><span class="lbl">逾期原因</span>{escape(detail.get('followup_reason') or '—')}</p>
-                    <p><span class="lbl">跟进方案</span>{escape(detail.get('followup_plan') or '—')}</p>
-                    <p><span class="lbl">信托反馈</span>{escape(detail.get('followup_feedback') or '—')}</p>
-                    <p><span class="lbl">最近跟进</span>{escape(detail.get('followup_last_at') or '—')}</p>
-                    <form class="followup-form" method="post"
-                          action="/overdue/workbench/followups/{fid}/update{workbench_qs()}">
-                        <input type="hidden" name="trust_asset_id" value="{detail['trust_asset_id']}">
-                        {product_hidden}
-                        {custody_hidden}
-                        <label>状态
-                            <select name="status">{_followup_status_options(current_status)}</select>
-                        </label>
-                        <label>负责人 <input name="owner_name" value="{owner_val}"></label>
-                        <label>逾期原因<textarea name="overdue_reason" rows="2">{reason_val}</textarea></label>
-                        <label>跟进方案<textarea name="follow_up_plan" rows="2">{plan_val}</textarea></label>
-                        <label>信托反馈<textarea name="trust_feedback" rows="2">{feedback_val}</textarea></label>
-                        <button type="submit" class="btn">更新</button>
-                    </form>
-                    <form class="inline-form" method="post"
-                          action="/overdue/workbench/followups/{fid}/resolve{workbench_qs()}">
-                        <input type="hidden" name="trust_asset_id" value="{detail['trust_asset_id']}">
-                        {product_hidden}
-                        {custody_hidden}
-                        <button type="submit" class="btn primary">标记已解决</button>
-                    </form>
-                </div>
-            """
-        elif show_create:
-            followup_section = f"""
-                <div class="panel-section" id="new-followup-form">
-                    <h3>创建跟进台账</h3>
-                    <form class="followup-form" method="post" action="/overdue/workbench/followups{workbench_qs()}">
-                        <input type="hidden" name="trust_asset_id" value="{detail['trust_asset_id']}">
-                        {product_hidden}
-                        {custody_hidden}
-                        <label>逾期原因<textarea name="overdue_reason" rows="2"></textarea></label>
-                        <label>跟进方案<textarea name="follow_up_plan" rows="2"></textarea></label>
-                        <label>负责人<input name="owner_name"></label>
-                        <label>信托反馈<textarea name="trust_feedback" rows="2"></textarea></label>
-                        <button type="submit" class="btn primary">创建跟进</button>
-                    </form>
-                </div>
-            """
-
-        def _history_rows(items: list, row_class: str) -> str:
-            rows = ""
-            for h in items:
-                rows += f"""
-                <tr class="{row_class}">
-                    <td>{escape(h.get('asset_code') or '—')}</td>
-                    <td>{escape(FOLLOWUP_STATUS_LABELS.get(h.get('status'), h.get('status') or '—'))}</td>
-                    <td>{escape(h.get('owner_name') or '—')}</td>
-                    <td>{escape(h.get('overdue_reason') or '—')}</td>
-                    <td>{escape(h.get('last_follow_up_at') or h.get('created_at') or '—')}</td>
-                </tr>
-            """
-            return rows
-
-        asset_history = detail.get("followup_history") or []
-        custody_history = detail.get("custody_followup_history") or []
-        show_custody_toggle = len(custody_history) > len(asset_history)
-        history_rows = _history_rows(asset_history, "history-row history-asset")
-        if show_custody_toggle:
-            history_rows += _history_rows(custody_history, "history-row history-custody")
-        history_section = ""
-        if history_rows:
-            toggle_html = ""
-            if show_custody_toggle:
-                toggle_html = """
-                    <label class="history-toggle">
-                        <input type="checkbox" id="custody-history-toggle">
-                        查看托管房源全部历史
-                    </label>
-                """
-            history_section = f"""
-                <div class="panel-section" id="followup-history-section">
-                    <h3>跟进历史</h3>
-                    {toggle_html}
-                    <div class="table-wrap">
-                    <table>
-                        <thead><tr><th>房源</th><th>状态</th><th>负责人</th><th>原因</th><th>时间</th></tr></thead>
-                        <tbody>{history_rows}</tbody>
-                    </table>
-                    </div>
-                </div>
-            """
-
-        od_display = (
-            escape(detail.get("last_payment_date") or "—")
-            if detail.get("delinquency_bucket") == "ES"
-            else str(detail.get("overdue_days") if detail.get("overdue_days") is not None else "—")
-        )
-        od_label = "提前结清日期" if detail.get("delinquency_bucket") == "ES" else "逾期天数"
-
-        detail_html = f"""
-            <div class="panel-section">
-                <h3>{escape(detail.get('asset_name') or '房源详情')}</h3>
-                {fmt_asset_identity_block(detail)}
-                <p class="muted">{escape(detail['trust_product_name'])} · 数据日期 {escape(detail['data_date'])}</p>
-            </div>
-            <div class="panel-section kpi-row">
-                <div class="kpi"><span class="lbl">{od_label}</span><span class="val warn">{od_display}</span></div>
-                <div class="kpi"><span class="lbl">风控评级</span>{fmt_workbench_risk_rating(detail.get('risk_level'))}</div>
-                <div class="kpi"><span class="lbl">M级（逾期分层）</span>{fmt_delinquency_badge(detail['delinquency_bucket'])}</div>
-                <div class="kpi"><span class="lbl">最后回款</span><span class="val">{escape(detail.get('last_payment_date') or '—')}</span></div>
-            </div>
-            <div class="panel-section">
-                <h3>金额核对</h3>
-                <p class="muted">核对基准：{escape(RECONCILIATION_BASIS_LABEL)}</p>
-                <div class="table-wrap">
-                <table>
-                    <thead><tr><th>核对项</th><th>结果</th><th>左侧</th><th>右侧</th><th>差额</th></tr></thead>
-                    <tbody>
-                        <tr>
-                            <td>余额等式</td>
-                            <td>{fmt_check_result(bal['passed'])}</td>
-                            <td class="num">{fmt_money(bal['left_amount'])}<br><span class="muted tiny">剩余还款金额</span></td>
-                            <td class="num">{fmt_money(bal['right_amount'])}<br><span class="muted tiny">初始受让−已还</span></td>
-                            <td class="num {'warn' if not bal['passed'] else ''}">{fmt_money(bal['diff_amount'])}</td>
-                        </tr>
-                        <tr>
-                            <td>跨表已还</td>
-                            <td>{fmt_check_result(cross['passed'])}</td>
-                            <td class="num">{fmt_money(cross['left_amount'])}<br><span class="muted tiny">监控已还</span></td>
-                            <td class="num">{fmt_money(cross['right_amount'])}<br><span class="muted tiny">还款明细累计</span></td>
-                            <td class="num {'warn' if not cross['passed'] else ''}">{fmt_money(cross['diff_amount'])}</td>
-                        </tr>
-                    </tbody>
-                </table>
-                </div>
-            </div>
-            {followup_section}
-            {history_section}
-            <div class="panel-section">
-                <h3>API</h3>
-                <p class="muted">
-                    <a href="/overdue/checks">/overdue/checks</a> ·
-                    <a href="/overdue/reconciliation">/overdue/reconciliation</a> ·
-                    <a href="/overdue/followups">/overdue/followups</a>
-                </p>
-            </div>
-        """
-
-    json_qs = workbench_qs()
-    page_scripts = """
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        var el = document.getElementById('new-followup-form');
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        var toggle = document.getElementById('custody-history-toggle');
-        if (!toggle) return;
-        function applyHistoryFilter() {
-            var showAll = toggle.checked;
-            document.querySelectorAll('.history-row.history-asset').forEach(function(row) {
-                row.style.display = showAll ? 'none' : '';
-            });
-            document.querySelectorAll('.history-row.history-custody').forEach(function(row) {
-                row.style.display = showAll ? '' : 'none';
-            });
-        }
-        toggle.addEventListener('change', applyHistoryFilter);
-        applyHistoryFilter();
-    });
-    </script>"""
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>逾期工作台 · 房地产资产证券化平台</title>
-    <style>
-        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
-            min-height: 100vh; color: #e2e8f0; padding: 1.5rem 1rem;
-        }}
-        a {{ color: #38bdf8; text-decoration: none; }}
-        .container {{ max-width: 1200px; margin: 0 auto; }}
-        .breadcrumb {{ font-size: 0.85rem; color: #94a3b8; margin-bottom: 1rem; }}
-        header h1 {{ font-size: 1.5rem; color: #f8fafc; }}
-        header p {{ color: #94a3b8; margin-top: 0.35rem; font-size: 0.9rem; }}
-        .workbench {{ display: grid; grid-template-columns: 340px 1fr; gap: 1rem; margin-top: 1.25rem; min-height: 520px; }}
-        @media (max-width: 900px) {{ .workbench {{ grid-template-columns: 1fr; }} }}
-        .panel {{ background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; overflow: hidden; }}
-        .panel-hd {{ padding: 0.85rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.08); font-weight: 600; }}
-        .panel-body {{ padding: 1rem; }}
-        .queue-item {{ display: block; padding: 0.85rem 1rem; border-bottom: 1px solid rgba(255,255,255,0.06); color: inherit; text-decoration: none; }}
-        .queue-item:hover, .queue-item.active {{ background: rgba(56,189,248,0.08); }}
-        .queue-top {{ display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }}
-        .queue-code {{ font-weight: 600; color: #f8fafc; font-size: 0.9rem; }}
-        .queue-meta {{ font-size: 0.78rem; color: #94a3b8; margin-top: 0.35rem; display: flex; gap: 0.65rem; flex-wrap: wrap; }}
-        .panel-section {{ margin-bottom: 1.25rem; }}
-        .panel-section h3 {{ font-size: 0.95rem; color: #f8fafc; margin-bottom: 0.6rem; }}
-        .kpi-row {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.75rem; }}
-        .kpi .lbl {{ display: block; font-size: 0.75rem; color: #94a3b8; }}
-        .kpi .val {{ font-size: 1.25rem; font-weight: 700; color: #f8fafc; }}
-        .kpi .val.warn {{ color: #f87171; }}
-        {TABLE_SCROLL_CSS}
-        td.num {{ color: #38bdf8; font-weight: 600; }}
-        td.num.warn {{ color: #f87171; }}
-        .badge {{ display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.72rem; border: 1px solid rgba(255,255,255,0.15); }}
-        .ok-badge {{ background: #34d39922; color: #34d399; border-color: #34d39955; }}
-        .fail-badge {{ background: #f8717122; color: #f87171; border-color: #f8717155; }}
-        .unrated-badge {{ background: rgba(148,163,184,0.15); color: #94a3b8; border-color: rgba(148,163,184,0.35); }}
-        .history-row.history-custody {{ display: none; }}
-        .history-toggle {{ display: block; margin-bottom: 0.65rem; font-size: 0.85rem; color: #94a3b8; }}
-        .history-toggle input {{ width: auto; margin-right: 0.35rem; vertical-align: middle; }}
-        .tiny {{ font-size: 0.72rem; font-weight: 400; }}
-        .followup-form {{ margin-top: 0.75rem; }}
-        .empty {{ color: #64748b; text-align: center; padding: 1.5rem; }}
-        .muted {{ color: #94a3b8; font-size: 0.85rem; }}
-        .lbl {{ color: #64748b; font-size: 0.8rem; }}
-        form label {{ display: block; margin-bottom: 0.65rem; font-size: 0.85rem; color: #94a3b8; }}
-        input, select, textarea {{
-            width: 100%; margin-top: 0.25rem; padding: 0.45rem 0.6rem;
-            border-radius: 6px; border: 1px solid rgba(255,255,255,0.15);
-            background: rgba(0,0,0,0.2); color: #e2e8f0; font-size: 0.85rem;
-        }}
-        .inline-form {{ display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: flex-end; margin-top: 0.75rem; }}
-        .inline-form label {{ flex: 1; min-width: 140px; margin-bottom: 0; }}
-        .btn {{
-            display: inline-block; padding: 0.45rem 0.85rem; border-radius: 8px;
-            border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.06);
-            color: #e2e8f0; font-size: 0.85rem; cursor: pointer;
-        }}
-        .btn.primary {{ background: rgba(56,189,248,0.25); border-color: rgba(56,189,248,0.5); }}
-        footer {{ margin-top: 1.5rem; text-align: center; font-size: 0.8rem; color: #64748b; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <nav class="breadcrumb">
-            <a href="/">首页</a> / <a href="/overdue">逾期管理</a> / 工作台
-        </nav>
-        <header>
-            <h1>逾期工作台</h1>
-            <p>数据日期 {escape(data_date)} · 共 {len(queue)} 户
-               {f"· 托管 {escape(resolved_custody)}" if resolved_custody else ""} ·
-               <a href="/overdue/workbench/data{json_qs}">JSON</a></p>
-        </header>
-        <div class="workbench">
-            <div class="panel">
-                <div class="panel-hd">{panel_title}</div>
-                <div>{queue_items}</div>
-            </div>
-            <div class="panel">
-                <div class="panel-hd">房源详情</div>
-                <div class="panel-body">{detail_html}</div>
-            </div>
-        </div>
-        <footer>Real Estate Securitization Platform</footer>
-    </div>
-    {page_scripts}
-</body>
-</html>"""
 
 
 def _render_custody_mark_select(field: str, value: str, options: list[str], item: dict) -> str:
@@ -2108,7 +1291,7 @@ def render_overdue_html(
         ("M3_PLUS", "M3+", buckets.get("M3_PLUS", [])),
         ("M3", "M3", buckets.get("M3", [])),
         ("M2", "M2", buckets.get("M2", [])),
-        ("M1", "M1（正常）", buckets.get("M1", [])),
+        ("M1", "M1", buckets.get("M1", [])),
         ("ES", "ES（提前结清）", buckets.get("ES", [])),
     ]
     active_bucket = (filters or {}).get("delinquency_bucket")
@@ -2401,7 +1584,7 @@ def render_overdue_html(
             <div class="card">
                 <div class="card-label">逾期资产（Overdue）</div>
                 <div class="card-value warn">{overview["overdue_total"]}</div>
-                <div class="card-hint">M2+M3+M3+，不含 ES / M1（正常）</div>
+                <div class="card-hint">M2+M3+M3+，不含 ES / M1</div>
             </div>
             <div class="card">
                 <div class="card-label">提前结清（ES）</div>
@@ -4389,19 +3572,6 @@ def overdue_dashboard(
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
-def _workbench_redirect(
-    trust_asset_id: int,
-    trust_product_id: int | None,
-    custody_asset_code: str | None = None,
-) -> RedirectResponse:
-    qs = f"?trust_asset_id={trust_asset_id}"
-    if trust_product_id is not None:
-        qs += f"&trust_product_id={trust_product_id}"
-    if custody_asset_code:
-        qs += f"&custody_asset_code={quote(custody_asset_code)}"
-    return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
-
-
 @app.get("/overdue/workbench/data")
 def overdue_workbench_data(
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -4410,14 +3580,14 @@ def overdue_workbench_data(
     data_date: str | None = None,
     custody_asset_code: str | None = None,
 ):
-    with engine.connect() as conn:
-        return fetch_overdue_workbench(
-            conn,
-            query_utils.parse_optional_int(trust_product_id),
-            query_utils.parse_optional_int(trust_asset_id),
-            query_utils.parse_optional_date(data_date),
-            custody_asset_code=query_utils.clean_optional_str(custody_asset_code),
-        )
+    from app.service.overdue_workbench import build_overdue_workbench_service
+
+    return build_overdue_workbench_service(engine).get_detail(
+        trust_product_id=query_utils.parse_optional_int(trust_product_id),
+        custody_asset_code=query_utils.clean_optional_str(custody_asset_code),
+        trust_asset_id=query_utils.parse_optional_int(trust_asset_id),
+        data_date=query_utils.parse_optional_date(data_date),
+    )
 
 
 @app.get("/overdue/workbench", response_class=HTMLResponse)
@@ -4429,81 +3599,25 @@ def overdue_workbench_page(
     custody_asset_code: str | None = None,
     new_followup: str | None = None,
 ):
+    from app.html.render import render_overdue_workbench_html
+    from app.service.overdue_workbench import build_overdue_workbench_service
+
     pid = query_utils.parse_optional_int(trust_product_id)
     aid = query_utils.parse_optional_int(trust_asset_id)
     custody = query_utils.clean_optional_str(custody_asset_code)
-    with engine.connect() as conn:
-        data = fetch_overdue_workbench(
-            conn,
-            pid,
-            aid,
-            query_utils.parse_optional_date(data_date),
-            custody_asset_code=custody,
-        )
+    dto = build_overdue_workbench_service(engine).get_detail(
+        trust_product_id=pid,
+        custody_asset_code=custody,
+        trust_asset_id=aid,
+        data_date=query_utils.parse_optional_date(data_date),
+    )
     html = render_overdue_workbench_html(
-        data,
+        dto,
         pid,
         custody_asset_code=custody,
         new_followup=bool(query_utils.parse_optional_int(new_followup)),
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
-
-
-@app.post("/overdue/workbench/followups")
-def overdue_workbench_create_followup(
-    current_user: Annotated[dict, Depends(get_current_user)],
-    trust_asset_id: int = Form(...),
-    trust_product_id: int | None = Form(None),
-    custody_asset_code: str | None = Form(None),
-    overdue_reason: str = Form(""),
-    follow_up_plan: str = Form(""),
-    owner_name: str = Form(""),
-    trust_feedback: str = Form(""),
-):
-    with engine.connect() as conn:
-        create_overdue_followup_record(
-            conn, trust_asset_id, overdue_reason, follow_up_plan, owner_name, trust_feedback
-        )
-    return _workbench_redirect(trust_asset_id, trust_product_id, custody_asset_code)
-
-
-@app.post("/overdue/workbench/followups/{followup_id}/update")
-def overdue_workbench_update_followup(
-    followup_id: int,
-    current_user: Annotated[dict, Depends(get_current_user)],
-    trust_asset_id: int = Form(...),
-    trust_product_id: int | None = Form(None),
-    custody_asset_code: str | None = Form(None),
-    status: str = Form("in_progress"),
-    owner_name: str = Form(""),
-    overdue_reason: str = Form(""),
-    follow_up_plan: str = Form(""),
-    trust_feedback: str = Form(""),
-):
-    with engine.connect() as conn:
-        update_overdue_followup_record(
-            conn,
-            followup_id,
-            status=status,
-            owner_name=owner_name,
-            overdue_reason=overdue_reason,
-            follow_up_plan=follow_up_plan,
-            trust_feedback=trust_feedback,
-        )
-    return _workbench_redirect(trust_asset_id, trust_product_id, custody_asset_code)
-
-
-@app.post("/overdue/workbench/followups/{followup_id}/resolve")
-def overdue_workbench_resolve_followup(
-    followup_id: int,
-    current_user: Annotated[dict, Depends(get_current_user)],
-    trust_asset_id: int = Form(...),
-    trust_product_id: int | None = Form(None),
-    custody_asset_code: str | None = Form(None),
-):
-    with engine.connect() as conn:
-        update_overdue_followup_record(conn, followup_id, status="resolved")
-    return _workbench_redirect(trust_asset_id, trust_product_id, custody_asset_code)
 
 
 @app.get("/risk/workbench/data")

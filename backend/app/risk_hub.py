@@ -2,9 +2,22 @@
 
 from sqlalchemy import text
 
-RECONCILIATION_TOLERANCE = 0.01
-PERFORMING_MAX_DAYS = 30
-OVERDUE_ASSET_MIN_DAYS = 31
+from app.overdue.buckets import (
+    M1_MAX_DAYS,
+    M2_MAX_DAYS,
+    M3_MAX_DAYS,
+    M3_MIN_DAYS,
+    M2_MIN_DAYS,
+    M3_PLUS_MIN_DAYS,
+    OVERDUE_ASSET_MIN_DAYS,
+    PERFORMING_MAX_DAYS,
+    RECONCILIATION_TOLERANCE_DEFAULT,
+    is_payment_gap_risk,
+    sql_risk_payment_gap_component,
+    sql_risk_score_overdue_component,
+)
+
+RECONCILIATION_TOLERANCE = RECONCILIATION_TOLERANCE_DEFAULT
 
 RISK_LEVEL_LABELS = {
     "ES": "提前结清",
@@ -89,7 +102,7 @@ SLA_STATUS_LABELS = {
 
 CASE_PRIORITY_MAP = {"A": "P0", "B": "P1", "C": "P2", "D": "P3"}
 
-RISK_SCORE_UPDATE_SQL = """
+RISK_SCORE_UPDATE_SQL = f"""
 WITH latest AS (
     SELECT trust_product_id, MAX(data_date) AS data_date
     FROM trust_asset_monitor_records
@@ -115,13 +128,7 @@ scored AS (
         m.data_date,
         m.overdue_days,
         (
-            CASE
-                WHEN m.remaining_amount <= :tolerance THEN 0
-                WHEN COALESCE(m.overdue_days, 0) > 90 THEN 50
-                WHEN COALESCE(m.overdue_days, 0) > 60 THEN 35
-                WHEN COALESCE(m.overdue_days, 0) > 30 THEN 20
-                ELSE 5
-            END
+            {sql_risk_score_overdue_component()}
             + CASE
                 WHEN m.remaining_amount <= :tolerance THEN 0
                 WHEN ABS((m.initial_transfer_amount - m.repaid_amount) - m.remaining_amount)
@@ -129,14 +136,7 @@ scored AS (
                 WHEN ABS(m.repaid_amount - COALESCE(rs.total_repaid, 0)) > :tolerance THEN 30
                 ELSE 0
             END
-            + CASE
-                WHEN m.remaining_amount <= :tolerance THEN 0
-                WHEN COALESCE(m.overdue_days, 0) > 30 AND (
-                    m.last_payment_date IS NULL
-                    OR (m.data_date - m.last_payment_date) > 45
-                ) THEN 20
-                ELSE 0
-            END
+            + {sql_risk_payment_gap_component()}
         ) AS risk_score
     FROM monitor m
     LEFT JOIN repayment_sum rs
@@ -250,7 +250,10 @@ def recalculate_risk_scores(conn, trust_product_id: int | None = None) -> dict:
 
 
 def sync_risk_alerts(conn, trust_product_id: int | None = None) -> dict:
-    params: dict = {"tolerance": RECONCILIATION_TOLERANCE}
+    params: dict = {
+        "tolerance": RECONCILIATION_TOLERANCE,
+        "m3_plus_min_days": M3_PLUS_MIN_DAYS,
+    }
     product_filter = ""
     if trust_product_id is not None:
         product_filter = "AND m.trust_product_id = :trust_product_id"
@@ -281,10 +284,10 @@ def sync_risk_alerts(conn, trust_product_id: int | None = None) -> dict:
             triggers AS (
                 SELECT m.trust_product_id, m.trust_asset_id, m.data_date, m.risk_level,
                        'delinquency_m3_plus' AS risk_type,
-                       '逾期天数 > 90（M3+）' AS trigger_rule
+                       '逾期天数 ≥92（M3+）' AS trigger_rule
                 FROM monitor m
                 WHERE m.remaining_amount > :tolerance
-                  AND COALESCE(m.overdue_days, 0) > 90
+                  AND COALESCE(m.overdue_days, 0) >= :m3_plus_min_days
                 UNION ALL
                 SELECT m.trust_product_id, m.trust_asset_id, m.data_date, m.risk_level,
                        'reconciliation_failure',
@@ -466,7 +469,15 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
     if "tolerance" not in params:
         params = {**params, "tolerance": RECONCILIATION_TOLERANCE}
     if "performing_max_days" not in params:
-        params = {**params, "performing_max_days": PERFORMING_MAX_DAYS}
+        params = {
+            **params,
+            "performing_max_days": PERFORMING_MAX_DAYS,
+            "m2_min_days": M2_MIN_DAYS,
+            "m2_max_days": M2_MAX_DAYS,
+            "m3_min_days": M3_MIN_DAYS,
+            "m3_max_days": M3_MAX_DAYS,
+            "m3_plus_min_days": M3_PLUS_MIN_DAYS,
+        }
 
     summary_row = conn.execute(
         text(f"""
@@ -485,15 +496,15 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
                 ) AS m1_count,
                 COUNT(*) FILTER (
                     WHERE m.remaining_amount > :tolerance
-                      AND COALESCE(m.overdue_days, 0) BETWEEN 31 AND 60
+                      AND COALESCE(m.overdue_days, 0) BETWEEN :m2_min_days AND :m2_max_days
                 ) AS m2_count,
                 COUNT(*) FILTER (
                     WHERE m.remaining_amount > :tolerance
-                      AND COALESCE(m.overdue_days, 0) BETWEEN 61 AND 90
+                      AND COALESCE(m.overdue_days, 0) BETWEEN :m3_min_days AND :m3_max_days
                 ) AS m3_count,
                 COUNT(*) FILTER (
                     WHERE m.remaining_amount > :tolerance
-                      AND COALESCE(m.overdue_days, 0) > 90
+                      AND COALESCE(m.overdue_days, 0) >= :m3_plus_min_days
                 ) AS m3_plus_count,
                 ROUND(
                     AVG(m.risk_score) FILTER (WHERE m.remaining_amount > :tolerance)::numeric,
@@ -718,7 +729,7 @@ def _risk_triggers_for_asset(conn, trust_asset_id: int, data_date: str) -> list:
         triggers.append("余额等式不一致")
     if float(rows.cross_diff) > RECONCILIATION_TOLERANCE:
         triggers.append("跨表已还金额不一致")
-    if rows.last_payment_date and rows.max_payment_date and od > 30:
+    if rows.last_payment_date and rows.max_payment_date and is_payment_gap_risk(od):
         triggers.append("回款中断 / 波动偏高")
     if rows.risk_score and int(rows.risk_score) >= 80:
         triggers.append("综合风险评分 ≥ 80")
@@ -767,7 +778,7 @@ def fetch_risk_asset_detail(conn, trust_asset_id: int):
     cases = fetch_risk_cases(conn, trust_asset_id=trust_asset_id)
 
     score_breakdown = conn.execute(
-        text("""
+        text(f"""
             WITH m AS (
                 SELECT * FROM trust_asset_monitor_records
                 WHERE trust_asset_id = :trust_asset_id AND data_date = :data_date
@@ -779,27 +790,14 @@ def fetch_risk_asset_detail(conn, trust_asset_id: int):
             )
             SELECT
                 m.remaining_amount,
-                CASE
-                    WHEN m.remaining_amount <= :tolerance THEN 0
-                    WHEN COALESCE(m.overdue_days, 0) > 90 THEN 50
-                    WHEN COALESCE(m.overdue_days, 0) > 60 THEN 35
-                    WHEN COALESCE(m.overdue_days, 0) > 30 THEN 20
-                    ELSE 5
-                END AS overdue_component,
+                {sql_risk_score_overdue_component()} AS overdue_component,
                 CASE
                     WHEN m.remaining_amount <= :tolerance THEN 0
                     WHEN ABS((m.initial_transfer_amount - m.repaid_amount) - m.remaining_amount) > :tolerance
                       OR ABS(m.repaid_amount - rs.total_repaid) > :tolerance THEN 30
                     ELSE 0
                 END AS reconciliation_component,
-                CASE
-                    WHEN m.remaining_amount <= :tolerance THEN 0
-                    WHEN COALESCE(m.overdue_days, 0) > 30 AND (
-                        m.last_payment_date IS NULL
-                        OR (m.data_date - m.last_payment_date) > 45
-                    ) THEN 20
-                    ELSE 0
-                END AS volatility_component
+                {sql_risk_payment_gap_component()} AS volatility_component
             FROM m, rs
         """),
         {"trust_asset_id": trust_asset_id, "data_date": data_date, "tolerance": RECONCILIATION_TOLERANCE},
