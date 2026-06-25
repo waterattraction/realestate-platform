@@ -10,7 +10,9 @@ USER_BAR_CSS = """
     justify-content: flex-end;
     align-items: center;
     gap: 1rem;
-    margin-bottom: 1rem;
+    max-width: 1200px;
+    margin: 0 auto 1rem;
+    padding: 0 0.25rem;
     font-size: 0.9rem;
     color: #94a3b8;
 }
@@ -28,15 +30,19 @@ USER_BAR_CSS = """
 """
 
 
-def render_user_bar(username: str) -> str:
-    return f"""
-<style>{USER_BAR_CSS}</style>
-<div class="auth-topbar">
+def user_bar_div(username: str) -> str:
+    return f"""<div class="auth-topbar">
     <span>当前用户：{escape(username)}</span>
     <form method="post" action="/logout">
         <button type="submit">退出登录</button>
     </form>
 </div>"""
+
+
+def render_user_bar(username: str) -> str:
+    return f"""
+<style>{USER_BAR_CSS}</style>
+{user_bar_div(username)}"""
 
 
 def inject_user_bar(html: str, username: str) -> str:

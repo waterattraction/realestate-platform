@@ -1452,8 +1452,8 @@ def render_overdue_html(
         header p {{ margin-top: 0.5rem; color: #94a3b8; font-size: 0.95rem; }}
         .grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 1rem;
+            grid-template-columns: repeat(6, minmax(0, 1fr));
+            gap: 0.75rem;
             margin-bottom: 2rem;
         }}
         .card {{
@@ -1559,6 +1559,12 @@ def render_overdue_html(
         .meta-warn {{ color: #fbbf24; }}
         header p strong {{ color: #e2e8f0; font-weight: 600; }}
         footer {{ margin-top: 2.5rem; text-align: center; font-size: 0.8rem; color: #64748b; }}
+        @media (max-width: 1100px) {{
+            .grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+        }}
+        @media (max-width: 640px) {{
+            .grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+        }}
     </style>
 </head>
 <body>
@@ -1579,7 +1585,7 @@ def render_overdue_html(
             <div class="card">
                 <div class="card-label">资产规模（Exposure）</div>
                 <div class="card-value">{overview["exposure_total"]}</div>
-                <div class="card-hint">ES+M1+M2+M3+M3+ 总风险暴露</div>
+                <div class="card-hint">ES+M1+M2+M3+M3+ 总风险暴露 · 托管房源 {overview["total_asset_count"]} 户</div>
             </div>
             <div class="card">
                 <div class="card-label">逾期资产（Overdue）</div>
@@ -1606,10 +1612,6 @@ def render_overdue_html(
             <div class="card">
                 <div class="card-label">跟进中台账</div>
                 <div class="card-value">{overview["active_followup_count"]}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">监控房源总数</div>
-                <div class="card-value ok">{overview["total_asset_count"]}</div>
             </div>
         </div>
 
@@ -2794,15 +2796,10 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background: linear-gradient(160deg, #0b1220 0%, #111827 45%, #1e293b 100%);
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
             min-height: 100vh;
             color: #e2e8f0;
             padding: 2rem 1rem 0.75rem;
-        }}
-        body > .auth-topbar {{
-            max-width: 1200px;
-            margin: 0 auto 1rem;
-            padding: 0 0.25rem;
         }}
         .container {{
             max-width: 1200px;
@@ -2879,18 +2876,18 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         .kpi-bar {{
             display: grid;
             grid-template-columns: repeat(4, 1fr);
-            gap: 0.45rem;
-            margin-bottom: 0.65rem;
+            gap: 0.6rem;
+            margin-bottom: 0.75rem;
         }}
         .kpi-item {{
             background: rgba(255, 255, 255, 0.04);
             border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 8px;
-            padding: 0.45rem 0.55rem;
+            border-radius: 10px;
+            padding: 0.6rem 0.65rem;
         }}
         .kpi-label {{
             display: block;
-            font-size: 0.68rem;
+            font-size: 0.75rem;
             color: #94a3b8;
             margin-bottom: 0.15rem;
             white-space: nowrap;
@@ -2899,7 +2896,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         }}
         .kpi-value {{
             display: block;
-            font-size: 1rem;
+            font-size: 1.25rem;
             font-weight: 700;
             color: #f8fafc;
             line-height: 1.15;
@@ -2907,8 +2904,9 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         .kpi-value.warn {{ color: #fb923c; }}
         .kpi-value.overdue {{ color: #f87171; }}
         .kpi-value.money {{
-            font-size: 0.82rem;
-            font-weight: 600;
+            font-size: 1.05rem;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
         }}
         .dash-section {{
             background: rgba(255, 255, 255, 0.04);
@@ -2988,12 +2986,13 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             display: flex;
             flex-wrap: wrap;
             gap: 0.65rem 1rem;
-            font-size: 0.72rem;
+            font-size: 0.8rem;
             color: #94a3b8;
         }}
         .mini-kpi-row strong {{
             color: #e2e8f0;
             font-weight: 600;
+            font-variant-numeric: tabular-nums;
         }}
         .risk-grid {{
             display: grid;
@@ -3023,7 +3022,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             margin-bottom: 0.35rem;
         }}
         .risk-card-label {{
-            font-size: 0.72rem;
+            font-size: 0.75rem;
             color: #94a3b8;
         }}
         .risk-card-icon {{
@@ -3044,7 +3043,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         .risk-icon-overdue {{ background: rgba(248, 113, 113, 0.15); color: #f87171; }}
         .risk-icon-monitor {{ background: rgba(56, 189, 248, 0.15); color: #38bdf8; }}
         .risk-card-value {{
-            font-size: 1.45rem;
+            font-size: 1.35rem;
             font-weight: 700;
             line-height: 1.1;
             color: #f8fafc;
@@ -3054,7 +3053,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         .risk-card-value.muted {{ color: #94a3b8; font-size: 1.2rem; }}
         .risk-card-foot {{
             margin-top: 0.3rem;
-            font-size: 0.68rem;
+            font-size: 0.72rem;
             color: #64748b;
         }}
         .page-footer {{
@@ -3077,6 +3076,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         .page-footer a:hover {{ color: #38bdf8; }}
         @media (min-width: 1100px) {{
             .kpi-bar {{ grid-template-columns: repeat(8, 1fr); }}
+            .kpi-value.money {{ font-size: 0.95rem; }}
         }}
         @media (max-width: 960px) {{
             .ops-dual {{ grid-template-columns: 1fr; }}

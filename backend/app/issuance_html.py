@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
-from app.ui_css import TABLE_SCROLL_CSS
+from app.ui_css import PAGE_CHROME_CSS, TABLE_SCROLL_CSS
 from app import issuance_cleanse as ic
 
 DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
@@ -15,7 +15,7 @@ DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 def _page_shell(title: str, body: str, username: str | None = None) -> str:
     from app import auth_html
 
-    user_bar = auth_html.render_user_bar(username) if username else ""
+    user_bar = auth_html.user_bar_div(username) if username else ""
     user_css = auth_html.USER_BAR_CSS if username else ""
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -25,16 +25,8 @@ def _page_shell(title: str, body: str, username: str | None = None) -> str:
     <title>{escape(title)}</title>
     <style>
         {user_css}
-        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
-            min-height: 100vh; color: #e2e8f0; padding: 2rem 1rem;
-        }}
-        .container {{ max-width: 1100px; margin: 0 auto; }}
-        a {{ color: #38bdf8; text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
-        h1 {{ font-size: 1.5rem; color: #f8fafc; margin: 1rem 0 0.5rem; }}
+        {PAGE_CHROME_CSS}
+        h1 {{ font-size: 1.5rem; color: #f8fafc; margin: 0 0 0.5rem; }}
         p.muted {{ color: #94a3b8; margin-bottom: 1rem; font-size: 0.9rem; }}
         .card {{
             background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
@@ -77,7 +69,8 @@ def _page_shell(title: str, body: str, username: str | None = None) -> str:
         pre {{ white-space: pre-wrap; font-size: 0.8rem; color: #cbd5e1; }}
     </style>
 </head>
-<body><div class="container">{user_bar}{body}</div>
+<body>{user_bar}
+<div class="container">{body}</div>
 <script>
 (function() {{
     var filterForm = document.getElementById('f');
@@ -107,7 +100,7 @@ def render_upload_page(trust_products: list[dict], username: str) -> str:
     )
     today = date.today().isoformat()
     body = f"""
-    <p class="muted"><a href="/">首页</a> / 发行资产明细导入</p>
+    <nav class="breadcrumb"><a href="/">首页</a> / 发行资产明细导入</nav>
     <h1>信托产品发行资产明细导入</h1>
     <p class="muted">选择信托产品与发行日期，上传 Excel 后预检再导入。业务时间维度仅为发行日期（issue_date）。</p>
     <div class="card">
@@ -460,7 +453,7 @@ def render_records_page(
 
     json_qs = f"{filter_qs}&page={page}" if filter_qs else f"page={page}"
     body = f"""
-    <p class="muted"><a href="/">首页</a> / <a href="/issuance/upload">发行导入</a> / 发行资产明细</p>
+    <nav class="breadcrumb"><a href="/">首页</a> / <a href="/issuance/upload">发行导入</a> / 发行资产明细</nav>
     <h1>发行资产明细</h1>
     <div class="card filters">
         <form id="f" method="get" class="filters" style="width:100%">
