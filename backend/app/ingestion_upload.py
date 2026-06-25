@@ -329,6 +329,67 @@ def _load_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
     return df.dropna(how="all")
 
 
+def _normalize_excel_asset_code(value) -> str | None:
+    """Excel 资产编号/托管编码：去空白、处理数值型 .0。"""
+    return cleanse.clean_custody_code(value)
+
+
+def _excel_custody_source_mismatch_rows(df: pd.DataFrame) -> list[dict]:
+    """检测 Excel 原始列：资产编号(房源) vs 托管房源编码 不一致行。"""
+    col_asset = cleanse.pick_column(df, *COL_ASSET_CODE)
+    col_custody = cleanse.pick_column(df, *COL_CUSTODY)
+    if not col_asset or not col_custody:
+        return []
+    mismatches: list[dict] = []
+    for idx, row in df.iterrows():
+        asset_no = _normalize_excel_asset_code(row[col_asset])
+        custody_no = _normalize_excel_asset_code(row[col_custody])
+        if asset_no and custody_no and asset_no != custody_no:
+            mismatches.append({
+                "excel_row": int(idx) + 2,
+                "asset_number": asset_no,
+                "custody_from_excel": custody_no,
+            })
+    return mismatches
+
+
+def _apply_asset_code_mismatch_precheck(result: dict[str, Any], mismatches: list[dict]) -> None:
+    """资产编号与托管编码不一致 → 预检 ERROR（needs_confirm，须二次确认后导入）。"""
+    if not mismatches:
+        return
+    count = len(mismatches)
+    samples = mismatches[:5]
+    sample_txt = "; ".join(
+        f"行{m['excel_row']}: 资产编号={m['asset_number']} 托管={m['custody_from_excel']}"
+        for m in samples
+    )
+    result["asset_code_mismatch_count"] = count
+    result["asset_code_mismatch_samples"] = samples
+    result["warnings"].insert(
+        0,
+        f"[ERROR] 资产编号(房源)与托管房源编码不一致 {count} 行；"
+        f"将以资产编号为权威字段。样例: {sample_txt}",
+    )
+    if result.get("action") in ("failed", "reject"):
+        return
+    result["action"] = "needs_confirm"
+    result["importable"] = True
+    mismatch_reason = (
+        f"<strong>编码不一致 {count} 行</strong>：将以「资产编号(房源)」为唯一权威字段；"
+        f"托管房源编码列不一致值将被忽略。须勾选确认后方可导入。"
+    )
+    prev = (result.get("reason") or "").strip()
+    result["reason"] = mismatch_reason + (f"<br><br>{prev}" if prev else "")
+
+
+def _finalize_asset_code_mismatch_precheck(
+    result: dict[str, Any], mismatches: list[dict]
+) -> dict[str, Any]:
+    if mismatches and result.get("action") not in ("failed", "reject"):
+        _apply_asset_code_mismatch_precheck(result, mismatches)
+    return result
+
+
 def _upsert_trust_asset(
     conn: Connection,
     trust_product_id: int,
@@ -339,16 +400,7 @@ def _upsert_trust_asset(
 ) -> int:
     source = source_asset_code or asset_code
     existing = None
-    if custody_asset_code:
-        existing = conn.execute(
-            text("""
-                SELECT id, asset_code FROM trust_assets
-                WHERE trust_product_id = :pid AND custody_asset_code = :custody
-                LIMIT 1
-            """),
-            {"pid": trust_product_id, "custody": custody_asset_code},
-        ).fetchone()
-    if existing is None and source:
+    if source:
         existing = conn.execute(
             text("""
                 SELECT id, asset_code FROM trust_assets
@@ -357,7 +409,7 @@ def _upsert_trust_asset(
             """),
             {"pid": trust_product_id, "source": source},
         ).fetchone()
-    if existing is None:
+    if existing is None and asset_code:
         existing = conn.execute(
             text("""
                 SELECT id, asset_code FROM trust_assets
@@ -366,6 +418,22 @@ def _upsert_trust_asset(
             """),
             {"pid": trust_product_id, "code": asset_code},
         ).fetchone()
+    if (
+        existing is None
+        and custody_asset_code
+        and source
+        and custody_asset_code == source
+    ):
+        existing = conn.execute(
+            text("""
+                SELECT id, asset_code FROM trust_assets
+                WHERE trust_product_id = :pid AND custody_asset_code = :custody
+                LIMIT 1
+            """),
+            {"pid": trust_product_id, "custody": custody_asset_code},
+        ).fetchone()
+
+    safe_custody = custody_asset_code if custody_asset_code and custody_asset_code == source else None
 
     if existing:
         conn.execute(
@@ -380,7 +448,7 @@ def _upsert_trust_asset(
             """),
             {
                 "id": existing.id,
-                "custody": custody_asset_code,
+                "custody": safe_custody,
                 "source": source,
                 "initial": initial_transfer_amount,
             },
@@ -398,7 +466,7 @@ def _upsert_trust_asset(
         {
             "pid": trust_product_id,
             "code": asset_code,
-            "custody": custody_asset_code,
+            "custody": safe_custody or source,
             "source": source,
             "initial": initial_transfer_amount,
         },
@@ -409,15 +477,17 @@ def _upsert_trust_asset(
 def _resolve_asset_fields(
     row: pd.Series, col_asset: str | None, col_custody: str | None
 ) -> tuple[str | None, str | None, str | None]:
-    """Excel 托管房源编码 → custody；资产编号(房源) → source；asset_code 兼容写入 source."""
-    custody = cleanse.clean_custody_code(row[col_custody]) if col_custody else None
-    source = cleanse.clean_asset_code(row[col_asset]) if col_asset else None
-    if not source and custody:
-        source = custody
-    if not custody and source:
-        custody = cleanse.derive_custody_from_source(source)
-    asset_code = source
-    return asset_code, custody, source
+    """资产编号(房源) 为唯一权威；托管列不一致时忽略，由预检 ERROR 提示用户确认。"""
+    source = _normalize_excel_asset_code(row[col_asset]) if col_asset else None
+    custody_from_excel = _normalize_excel_asset_code(row[col_custody]) if col_custody else None
+
+    if source:
+        return source, source, source
+
+    if custody_from_excel:
+        return custody_from_excel, custody_from_excel, custody_from_excel
+
+    return None, None, None
 
 
 def _repayment_date_for_row(
@@ -911,6 +981,7 @@ def precheck_repayment_sheet(
     sheet_name: str,
     df: pd.DataFrame,
 ) -> dict[str, Any]:
+    mismatches = _excel_custody_source_mismatch_rows(df)
     parsed = ingestion_date_rules.parse_sheet_repayment_date(sheet_name, product_name)
     sheet_fallback = parsed.parsed_date if parsed.ok else None
 
@@ -935,28 +1006,28 @@ def precheck_repayment_sheet(
 
     if not trust_product_id:
         result["reason"] = "trust_product_id 缺失，无法预检还款明细"
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     file_err = _require_source_file_name(file_name)
     if file_err:
         result["reason"] = file_err.replace("导入", "预检")
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     sheet_err = _require_repayment_sheet_name(sheet_name)
     if sheet_err:
         result["reason"] = sheet_err.replace("导入", "预检")
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     if not parsed.ok:
         result["reason"] = parsed.error or "Sheet 日期解析失败"
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     rows, parse_errors = _parse_repayment_rows(df, sheet_fallback)
     if parse_errors:
         result["warnings"].extend(parse_errors[:20])
     if not rows:
         result["reason"] = "无有效数据行" + (f"; {parse_errors[0]}" if parse_errors else "")
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     result["warnings"].extend(_repayment_period_no_warnings(df, rows))
 
@@ -965,7 +1036,7 @@ def precheck_repayment_sheet(
     if status == "reject":
         result["action"] = "reject"
         result["reason"] = msg
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     amount_sum = sum(r["actual_repayment_amount"] for r in rows)
     result["row_count"] = len(rows)
@@ -991,25 +1062,25 @@ def precheck_repayment_sheet(
             f"{file_name} / {sheet_name}<br>"
             f"不会删除其他文件数据"
         )
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     if db_cnt > 0:
         if db_cnt == len(rows) and cleanse.amounts_equal(db_sum, amount_sum):
             result["action"] = "skip"
             result["importable"] = False
             result["reason"] = "该 Sheet 已存在且数据一致"
-            return result
+            return _finalize_asset_code_mismatch_precheck(result, mismatches)
         result["action"] = "overwrite"
         result["importable"] = True
         result["reason"] = (
             f"该 Sheet 已存在（DB {db_cnt} 条），将删除旧记录并重新导入 {len(rows)} 条"
         )
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     result["action"] = "import"
     result["importable"] = True
     result["reason"] = "可导入（合法多笔还款）" if dup_warnings else "可导入"
-    return result
+    return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
 
 def precheck_monitor_sheet(
@@ -1020,6 +1091,7 @@ def precheck_monitor_sheet(
     sheet_name: str,
     df: pd.DataFrame,
 ) -> dict[str, Any]:
+    mismatches = _excel_custody_source_mismatch_rows(df)
     result: dict[str, Any] = {
         "file_name": file_name,
         "sheet_name": sheet_name,
@@ -1044,12 +1116,12 @@ def precheck_monitor_sheet(
 
     if not trust_product_id:
         result["reason"] = "trust_product_id 缺失，无法预检资产监控快照"
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     sheet_err = _require_monitor_sheet_name(sheet_name)
     if sheet_err:
         result["reason"] = sheet_err.replace("覆盖", "预检")
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     parsed = _parse_monitor_rows(
         df, file_name=file_name, sheet_name=sheet_name, product_name=product_name,
@@ -1071,10 +1143,10 @@ def precheck_monitor_sheet(
     rows = parsed.rows
     if not batch_date:
         result["reason"] = "data_date（统计日期）无法解析，无法预检资产监控快照"
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
     if not rows:
         result["reason"] = "无有效行"
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     result["warnings"].extend(_check_monitor_within_sheet_multi_rows(rows))
 
@@ -1100,13 +1172,13 @@ def precheck_monitor_sheet(
         result["action"] = "import"
         result["importable"] = True
         result["reason"] = "可导入"
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     if db_cnt == len(rows):
         result["action"] = "overwrite"
         result["importable"] = True
         result["reason"] = "记录数一致，允许覆盖更新"
-        return result
+        return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
     excel_cnt = len(rows)
     result["action"] = "needs_confirm"
@@ -1119,7 +1191,7 @@ def precheck_monitor_sheet(
         f"删除旧记录<br>"
         f"重新导入 {excel_cnt} 条记录"
     )
-    return result
+    return _finalize_asset_code_mismatch_precheck(result, mismatches)
 
 
 def recompute_monitor_payment_fields(
