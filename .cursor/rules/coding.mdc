@@ -47,7 +47,11 @@ conn.execute(text("SELECT * FROM projects WHERE id = :id"), {"id": project_id})
 
 ## PostgreSQL
 
-- Schema changes go in `schema.sql`; seed/test data in `seed.sql`
+- **所有新增 SQL 必须放在 `db/`**，禁止在项目根目录新增 `.sql`（根目录旧文件 3 天过渡后删除，见 `SQL_DEPRECATED.md`）
+- 新环境初始化：`./db/apply.sh baseline`（读取 `db/manifest.txt`）
+- 增量变更：`db/migrations/YYYYMMDD_描述.sql`，**必须**同步更新 `manifest.txt`，文件头含 migration 元数据
+- 一次性修复/清理：`db/ops/`，**不纳入 manifest**，人工执行
+- 数据库结构变更流程：**设计 → 评审 → Migration → 实施 → 验收**（编码前先完成 SQL 评审，见 `db/README.md`）
 - Use existing types: `BIGINT`, `NUMERIC(18,2)`, `VARCHAR`, `DATE`, `TIMESTAMPTZ`
 - Prefer `COALESCE`, `SUM`, `COUNT` in SQL over Python aggregation when straightforward
 - Add indexes only when a query pattern clearly needs them; avoid premature optimization

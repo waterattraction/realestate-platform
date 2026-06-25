@@ -117,5 +117,6 @@ sudo certbot renew --dry-run
 
 1. **修改数据库密码**：编辑 `docker-compose.yml` 中 `POSTGRES_PASSWORD` 与 `DATABASE_URL`，然后 `docker compose up -d`  
 2. **定期备份**：`docker exec realestate-postgres pg_dump -U admin realestate > backup.sql`  
-3. **监控 443**：阿里云云监控可配置端口探测告警  
-4. **后续可加**：FastAPI 登录鉴权、WAF（阿里云 Web 应用防火墙）
+3. **新环境初始化**：参见项目根目录 `db/README.md`，执行 `./db/apply.sh baseline`  
+4. **监控 443**：阿里云云监控可配置端口探测告警  
+5. **后续可加**：FastAPI 登录鉴权、WAF（阿里云 Web 应用防火墙）

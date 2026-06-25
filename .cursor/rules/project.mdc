@@ -15,7 +15,7 @@ Use these names consistently in UI copy, FastAPI `title`, HTML `<title>`, commen
 | Layer | Technology |
 |-------|------------|
 | API | FastAPI (`backend/app/main.py`) |
-| Database | PostgreSQL 16 (`schema.sql`, `seed.sql`) |
+| Database | PostgreSQL 16（`db/manifest.txt` + `db/baseline/`） |
 | Data access | SQLAlchemy — direct `text()` queries |
 | Runtime | Docker Compose (`postgres` + `backend`) |
 
@@ -26,7 +26,7 @@ Use these names consistently in UI copy, FastAPI `title`, HTML `<title>`, commen
 3. **不引入 Kafka**
 4. **不引入微服务**
 5. **优先直接 SQLAlchemy 查询** — 使用 `sqlalchemy.text()`，避免 ORM 模型层
-6. **保持现有数据库结构** — 表结构以 `schema.sql` 为准，不擅自改表除非明确要求
+6. **保持现有数据库结构** — 表结构以 `db/` 目录为准（见 `db/README.md`），不擅自改表除非明确要求
 7. **优先简单实现** — 能用一个 SQL + 一个路由解决，就不要加抽象层
 
 ## 核心实体
@@ -49,10 +49,11 @@ Use these names consistently in UI copy, FastAPI `title`, HTML `<title>`, commen
 backend/app/main.py   # FastAPI routes + SQL queries
 backend/Dockerfile
 backend/requirements.txt
-schema.sql            # PostgreSQL schema
-seed.sql              # Test data
+db/                   # SQL schema / migrations / ops（见 db/README.md）
 docker-compose.yml    # postgres (5432) + backend (8000)
 ```
+
+> 根目录 `schema.sql`、`seed.sql` 等旧 SQL 文件处于过渡期，已 deprecated，参见 `SQL_DEPRECATED.md`。
 
 ## API 现状
 
@@ -67,7 +68,7 @@ docker compose up -d --build backend
 curl http://localhost:8000/
 ```
 
-数据库初始化：手动执行 `schema.sql`，再执行 `seed.sql`。
+数据库初始化：参见 `db/README.md`，执行 `./db/apply.sh baseline`（或按 `db/manifest.txt` 顺序手动执行）。
 
 ## 变更约定
 
@@ -75,3 +76,4 @@ curl http://localhost:8000/
 - 金额 → `float`；日期/时间 → `str` 或 `None`
 - 不提交 secrets（`.env`、凭证）
 - 不擅自添加前端框架、ORM、测试、文档或 git commit，除非明确要求
+- **SQL 目录治理**：所有数据库 SQL 见 `db/README.md`；禁止根目录新增 `.sql`；migration 必须更新 `manifest.txt`

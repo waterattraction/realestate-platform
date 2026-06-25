@@ -1,0 +1,35 @@
+# ============================================================
+# 房地产资产证券化平台 — 新环境全量初始化清单
+# 用法：在项目根目录执行  ./db/apply.sh baseline
+# 说明：
+#   - 一行一个文件，相对于 db/ 目录
+#   - 以 # 开头的行为注释，执行时跳过
+#   - 不包含 ops/ 下的一次性脚本
+#   - 已有生产库请只执行未跑过的 migrations，勿重复 baseline
+# ============================================================
+
+# --- baseline：平台基础 ---
+baseline/001_schema.sql          # 项目/资产包/信托/投资人等核心表
+baseline/002_seed.sql            # 基础演示数据
+
+# --- modules：业务模块（按依赖顺序）---
+modules/overdue/schema.sql       # 逾期跟进表
+modules/overdue/seed.sql         # 逾期种子（依赖 trust_product_id=1）
+modules/risk/schema.sql          # 风险管理 V2
+modules/risk/seed.sql            # 风险种子（依赖 overdue seed）
+modules/ingestion/schema.sql     # 数据准入管道主表
+modules/users/schema.sql         # 用户与导入审计
+modules/ingestion/schema_upload_v2.sql   # 上传批次 V2
+modules/trust/seed_products.sql  # 信托产品种子（幂等）
+modules/ingestion/seed_mapping.sql       # 字段映射配置种子
+modules/issuance/schema.sql      # 发行资产明细
+modules/trust/schema_marks.sql   # 托管房源信托标记
+
+# --- migrations：增量变更（新库也需按序执行）---
+migrations/20250301_ingestion_audit_product_name.sql
+migrations/20250302_asset_code_semantics_v2.sql
+migrations/20250501_overdue_recalc_columns.sql
+migrations/20250612_repayment_import_scope_indexes.sql
+migrations/20250612_monitor_import_scope_indexes.sql
+migrations/20250620_issuance_migration_type.sql
+migrations/20260624_trust_product_aliases.sql

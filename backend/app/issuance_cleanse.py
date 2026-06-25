@@ -20,7 +20,12 @@ COL_ALIASES: dict[str, tuple[str, ...]] = {
         "应收账款合同金额",
     ),
     "receivable_transfer_amount": ("应收账款转让价款",),
-    "asset_transfer_discount_rate": ("资产转让折扣率(%)", "资产转让折扣率"),
+    "asset_transfer_discount_rate": (
+        "资产转让折扣率(%)",
+        "资产转让折扣率（数值）(%)",
+        "资产转让折扣率(数值)(%)",
+        "资产转让折扣率",
+    ),
     "min_institution_transferable_amount": ("MIN金额机构可转让最终",),
     "remaining_unpaid_amount_beike_not_withheld": ("剩余未还款金额--贝壳未代扣",),
     "rental_price": ("出房价格",),
@@ -37,9 +42,10 @@ COL_ALIASES: dict[str, tuple[str, ...]] = {
     "contract_name": ("合同名称",),
     "debtor_name": ("债务人姓名（业主名称）", "债务人姓名", "业主名称"),
     "property_address": ("房源地址",),
-    "city": ("所属城市",),
+    "city": ("所属城市", "所属区域", "城市"),
     "contractor_name": ("施工方名称",),
     "from_trust_product_name": (
+        "当前信托计划（已发行）",
         "原信托计划",
         "转出信托计划",
         "当前信托计划",
@@ -57,6 +63,7 @@ MIGRATION_TYPES: tuple[str, ...] = (
     "rollover",
     "repackage",
     "transfer",
+    "replenishment",
 )
 
 MIGRATION_TYPE_LABELS: dict[str, str] = {
@@ -64,6 +71,7 @@ MIGRATION_TYPE_LABELS: dict[str, str] = {
     "rollover": "续发",
     "repackage": "重新封包",
     "transfer": "转让",
+    "replenishment": "补录",
 }
 
 _MIGRATION_TYPE_ALIASES: dict[str, str] = {
@@ -167,6 +175,177 @@ def build_business_asset_key(
     trust_product_id: int, issue_date: date, custody_asset_code: str
 ) -> str:
     return f"{trust_product_id}:{issue_date.isoformat()}:{custody_asset_code}"
+
+
+CITY_VALUES: frozenset[str] = frozenset({"北京", "上海"})
+
+_CITY_EXCEL_ALIASES: dict[str, str] = {
+    "上海": "上海",
+    "上海市": "上海",
+    "北京": "北京",
+    "北京市": "北京",
+    "京北": "北京",
+    "京南": "北京",
+}
+
+BEIJING_ADDRESS_KEYWORDS: tuple[str, ...] = (
+    "北京",
+    "北京市",
+    "海淀",
+    "朝阳",
+    "丰台",
+    "西城",
+    "东城",
+    "石景山",
+    "通州",
+    "昌平",
+    "大兴",
+    "顺义",
+    "房山",
+    "门头沟",
+)
+
+SHANGHAI_ADDRESS_KEYWORDS: tuple[str, ...] = (
+    "上海",
+    "上海市",
+    "徐汇",
+    "静安",
+    "浦东",
+    "闵行",
+    "长宁",
+    "普陀",
+    "杨浦",
+    "虹口",
+    "黄浦",
+    "宝山",
+    "松江",
+    "嘉定",
+    "青浦",
+)
+
+
+def _map_city_excel_raw(raw: str) -> str | None:
+    text_val = raw.strip()
+    if not text_val:
+        return None
+    if text_val in _CITY_EXCEL_ALIASES:
+        return _CITY_EXCEL_ALIASES[text_val]
+    if text_val in CITY_VALUES:
+        return text_val
+    return None
+
+
+def infer_city_from_address(property_address: str | None) -> str | None:
+    if not property_address:
+        return None
+    addr = str(property_address).strip()
+    if not addr:
+        return None
+    for keyword in SHANGHAI_ADDRESS_KEYWORDS:
+        if keyword in addr:
+            return "上海"
+    for keyword in BEIJING_ADDRESS_KEYWORDS:
+        if keyword in addr:
+            return "北京"
+    return None
+
+
+def resolve_city(
+    *,
+    excel_column_present: bool,
+    excel_value: str | None,
+    property_address: str | None,
+    source_row_number: int,
+) -> tuple[str | None, list[str]]:
+    """城市：优先 Excel 所属城市/所属区域，其次房源地址推断."""
+    warnings: list[str] = []
+    raw = (excel_value or "").strip() if excel_column_present else ""
+
+    if excel_column_present and raw:
+        mapped = _map_city_excel_raw(raw)
+        if mapped:
+            return mapped, warnings
+
+    inferred = infer_city_from_address(property_address)
+    if inferred:
+        return inferred, warnings
+
+    if excel_column_present and raw:
+        warnings.append(
+            f"行{source_row_number}: 无法识别城市「{raw}」"
+        )
+    elif property_address:
+        warnings.append(f"行{source_row_number}: 无法从地址识别城市")
+    return None, warnings
+
+
+def city_distribution(rows: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        city = row.get("city")
+        if not city:
+            continue
+        counts[city] = counts.get(city, 0) + 1
+    return counts
+
+
+def city_blank_count(rows: list[dict]) -> int:
+    return sum(1 for row in rows if not row.get("city"))
+
+
+def asset_transfer_discount_rate_present_count(rows: list[dict]) -> int:
+    return sum(1 for row in rows if row.get("asset_transfer_discount_rate") is not None)
+
+
+def asset_transfer_discount_rate_blank_count(rows: list[dict]) -> int:
+    return sum(1 for row in rows if row.get("asset_transfer_discount_rate") is None)
+
+
+def find_unmapped_discount_rate_columns(
+    df: pd.DataFrame, mapped_col: str | None,
+) -> list[str]:
+    """Excel 中疑似折扣率列但未纳入 COL_ALIASES 映射."""
+    suspicious: list[str] = []
+    for col in df.columns:
+        col_str = str(col).strip()
+        if mapped_col and col_str == mapped_col:
+            continue
+        if "资产转让折扣率" in col_str:
+            suspicious.append(col_str)
+            continue
+        if "折扣率" in col_str and "%" in col_str:
+            suspicious.append(col_str)
+    return suspicious
+
+
+def tokenize_from_trust_product_raw(raw: str) -> list[str]:
+    """拆分 Excel 转出产品单元格（支持逗号、顿号分隔）."""
+    text_val = str(raw).strip()
+    if not text_val:
+        return []
+    normalized = text_val.replace("，", ",").replace("、", ",").replace(";", ",")
+    return [part.strip() for part in normalized.split(",") if part.strip()]
+
+
+def from_trust_product_distribution(rows: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        name = row.get("from_trust_product_name")
+        if not name or not row.get("from_trust_product_id"):
+            continue
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def from_trust_product_matched_count(rows: list[dict]) -> int:
+    return sum(1 for row in rows if row.get("from_trust_product_id"))
+
+
+def from_trust_product_unmatched_count(rows: list[dict]) -> int:
+    return sum(
+        1 for row in rows
+        if row.get("from_trust_product_excel_raw") and not row.get("from_trust_product_id")
+    )
 
 
 def migration_type_label(value: str | None) -> str:

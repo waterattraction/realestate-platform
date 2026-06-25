@@ -96,17 +96,55 @@ def classify_issuance_sheet(file_name: str, sheet_name: str, df: pd.DataFrame) -
     return "unknown"
 
 
-def _lookup_trust_product_by_name(conn: Connection, name: str | None) -> tuple[int | None, str | None]:
-    if not name or not str(name).strip():
-        return None, None
-    text_name = str(name).strip()
+def _lookup_trust_product_by_alias(
+    conn: Connection, alias: str,
+) -> tuple[int, str] | None:
     row = conn.execute(
-        text("SELECT id, name FROM trust_products WHERE name = :name LIMIT 1"),
-        {"name": text_name},
+        text("""
+            SELECT tp.id, tp.name
+            FROM trust_product_aliases a
+            JOIN trust_products tp ON tp.id = a.trust_product_id
+            WHERE a.alias_name = :alias
+            LIMIT 1
+        """),
+        {"alias": alias},
     ).fetchone()
     if row:
         return int(row.id), row.name
-    return None, text_name
+    return None
+
+
+def _lookup_trust_product_by_name(
+    conn: Connection, name: str,
+) -> tuple[int, str] | None:
+    row = conn.execute(
+        text("SELECT id, name FROM trust_products WHERE name = :name LIMIT 1"),
+        {"name": name},
+    ).fetchone()
+    if row:
+        return int(row.id), row.name
+    return None
+
+
+def _resolve_from_trust_product(
+    conn: Connection,
+    raw: str | None,
+    source_row_number: int,
+) -> tuple[int | None, str | None, list[str]]:
+    warnings: list[str] = []
+    if not raw:
+        return None, None, warnings
+    tokens = ic.tokenize_from_trust_product_raw(raw)
+    if not tokens:
+        return None, None, warnings
+    for token in tokens:
+        hit = _lookup_trust_product_by_alias(conn, token)
+        if hit is None:
+            hit = _lookup_trust_product_by_name(conn, token)
+        if hit:
+            return hit[0], hit[1], warnings
+    warnings.append(f"行{source_row_number}: 转出信托产品「{raw}」未匹配")
+    return None, None, warnings
 
 
 def _parse_row(
@@ -151,9 +189,10 @@ def _parse_row(
     from_name = str(from_raw).strip() if from_raw is not None and not pd.isna(from_raw) else None
     if from_name == "":
         from_name = None
-    from_pid, from_pname = _lookup_trust_product_by_name(conn, from_name)
-    if from_name and from_pid is None:
-        warnings.append(f"行{source_row_number}: 转出信托产品「{from_name}」未匹配到 trust_products")
+    from_pid, from_pname, from_warnings = _resolve_from_trust_product(
+        conn, from_name, source_row_number,
+    )
+    warnings.extend(from_warnings)
 
     mig_col = col_map.get("migration_type")
     mig_col_present = mig_col is not None
@@ -217,11 +256,30 @@ def _parse_row(
     if periods_col:
         periods = ic.to_int_value(row[periods_col])
 
+    property_address = opt_str("property_address")
+    city_col = col_map.get("city")
+    city_col_present = city_col is not None
+    city_excel_val: str | None = None
+    if city_col_present:
+        city_raw = row[city_col]
+        if city_raw is None or (isinstance(city_raw, float) and pd.isna(city_raw)):
+            city_excel_val = ""
+        else:
+            city_excel_val = str(city_raw).strip()
+    city, city_warnings = ic.resolve_city(
+        excel_column_present=city_col_present,
+        excel_value=city_excel_val,
+        property_address=property_address,
+        source_row_number=source_row_number,
+    )
+    warnings.extend(city_warnings)
+
     parsed = {
         "trust_product_id": trust_product_id,
         "trust_product_name": trust_product_name,
         "from_trust_product_id": from_pid,
         "from_trust_product_name": from_pname,
+        "from_trust_product_excel_raw": from_name,
         "migration_type": migration_type,
         "trust_asset_id": None,
         "issue_date": issue_date,
@@ -231,8 +289,8 @@ def _parse_row(
         "migration_reason": None,
         "contract_name": opt_str("contract_name"),
         "debtor_name": opt_str("debtor_name"),
-        "property_address": opt_str("property_address"),
-        "city": opt_str("city"),
+        "property_address": property_address,
+        "city": city,
         "contractor_name": opt_str("contractor_name"),
         "receivable_contract_amount": contract_amt,
         "asset_transfer_discount_rate": opt_rate("asset_transfer_discount_rate"),
@@ -439,6 +497,43 @@ def _within_sheet_checks(rows: list[dict]) -> tuple[int, int, list[str]]:
     return within_key_dupes, exact_dupes, warnings
 
 
+def _apply_from_trust_product_stats(result: dict[str, Any], rows: list[dict]) -> None:
+    matched = ic.from_trust_product_matched_count(rows)
+    unmatched = ic.from_trust_product_unmatched_count(rows)
+    distribution = ic.from_trust_product_distribution(rows)
+    result["from_trust_product_matched_count"] = matched
+    result["from_trust_product_unmatched_count"] = unmatched
+    result["from_trust_product_distribution"] = distribution
+    if unmatched > 0:
+        result["warnings"].append(f"转出信托产品未匹配 {unmatched} 行")
+
+
+def _apply_discount_rate_stats(
+    result: dict[str, Any], rows: list[dict], df: pd.DataFrame,
+) -> None:
+    mapped_col = ic.pick_column(df, "asset_transfer_discount_rate")
+    present = ic.asset_transfer_discount_rate_present_count(rows)
+    blank = ic.asset_transfer_discount_rate_blank_count(rows)
+    result["asset_transfer_discount_rate_present_count"] = present
+    result["asset_transfer_discount_rate_blank_count"] = blank
+    suspicious = ic.find_unmapped_discount_rate_columns(df, mapped_col)
+    if suspicious and mapped_col is None:
+        result["warnings"].append(
+            "发现疑似资产转让折扣率列，但未成功映射，请检查列名别名配置。"
+        )
+    if mapped_col and blank > 0:
+        result["warnings"].append(f"资产转让折扣率为空 {blank} 行")
+
+
+def _apply_city_stats(result: dict[str, Any], rows: list[dict]) -> None:
+    blank = ic.city_blank_count(rows)
+    distribution = ic.city_distribution(rows)
+    result["city_blank_count"] = blank
+    result["city_distribution"] = distribution
+    if blank > 0:
+        result["warnings"].append(f"无法识别城市 {blank} 行")
+
+
 def precheck_issuance_sheet(
     conn: Connection,
     trust_product_id: int,
@@ -468,6 +563,13 @@ def precheck_issuance_sheet(
         "errors": [],
         "conflict_samples": [],
         "importable": False,
+        "city_blank_count": 0,
+        "city_distribution": {},
+        "from_trust_product_matched_count": 0,
+        "from_trust_product_unmatched_count": 0,
+        "from_trust_product_distribution": {},
+        "asset_transfer_discount_rate_present_count": 0,
+        "asset_transfer_discount_rate_blank_count": 0,
     }
 
     if not trust_product_id:
@@ -516,6 +618,9 @@ def precheck_issuance_sheet(
     within_key_dupes, exact_dupes, ws_warnings = _within_sheet_checks(rows)
     result["within_sheet_duplicate_count"] = within_key_dupes
     result["warnings"].extend(ws_warnings)
+    _apply_from_trust_product_stats(result, rows)
+    _apply_discount_rate_stats(result, rows, df)
+    _apply_city_stats(result, rows)
     result["warning_count"] = len(result["warnings"])
 
     amount_sum = sum(r["receivable_transfer_amount"] for r in rows)
@@ -650,6 +755,7 @@ def import_issuance_sheet(
     """)
     for row in rows:
         params = dict(row)
+        params.pop("from_trust_product_excel_raw", None)
         params["issue_date"] = issue_date
         conn.execute(insert_sql, params)
     conn.commit()

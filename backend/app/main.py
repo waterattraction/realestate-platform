@@ -1,7 +1,8 @@
 import os
 import uuid
 import json
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from html import escape
 from typing import Annotated
 from urllib.parse import quote
@@ -3553,12 +3554,14 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             exposure_total = 0
             high_risk_count = 0
 
-    project_count = int(row.project_count)
-    asset_pool_count = int(row.asset_pool_count)
-    trust_product_count = int(row.trust_product_count)
-    investor_count = int(row.investor_count)
-    total_raised_amount = float(row.total_raised_amount)
-    total_project_budget = float(row.total_project_budget)
+    _project_count = int(row.project_count)
+    _asset_pool_count = int(row.asset_pool_count)
+    _trust_product_count = int(row.trust_product_count)
+    _investor_count = int(row.investor_count)
+    _total_raised_amount = float(row.total_raised_amount)
+    _total_project_budget = float(row.total_project_budget)
+    data_updated_at = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+    exposure_display = fmt_money(float(exposure_total))
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -3574,152 +3577,477 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
+            background: linear-gradient(160deg, #0b1220 0%, #111827 45%, #1e293b 100%);
             min-height: 100vh;
             color: #e2e8f0;
-            padding: 2rem 1rem;
+            padding: 1.25rem 1rem 2rem;
+        }}
+        body > .auth-topbar {{
+            max-width: 1200px;
+            margin: 0 auto 0.5rem;
+            padding: 0 0.25rem;
         }}
         .container {{
-            max-width: 960px;
+            max-width: 1200px;
             margin: 0 auto;
         }}
-        header {{
-            margin-bottom: 2.5rem;
-            text-align: center;
+        .page-header {{
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-bottom: 1.75rem;
+            padding-bottom: 1.25rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         }}
-        header h1 {{
-            font-size: 1.75rem;
-            font-weight: 700;
-            letter-spacing: 0.02em;
-            color: #f8fafc;
+        .brand {{
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
         }}
-        header p {{
-            margin-top: 0.5rem;
-            font-size: 0.95rem;
-            color: #94a3b8;
+        .brand-icon {{
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #0ea5e9, #2563eb);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
         }}
-        .grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 1.25rem;
+        .brand-icon svg {{
+            width: 26px;
+            height: 26px;
+            fill: #fff;
         }}
-        .card {{
-            background: rgba(255, 255, 255, 0.06);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            padding: 1.5rem;
-            backdrop-filter: blur(8px);
-            transition: transform 0.2s, border-color 0.2s;
-        }}
-        .card:hover {{
-            transform: translateY(-2px);
-            border-color: rgba(56, 189, 248, 0.4);
-        }}
-        .card-label {{
-            font-size: 0.875rem;
-            color: #94a3b8;
-            margin-bottom: 0.75rem;
-        }}
-        .card-value {{
-            font-size: 2rem;
+        .brand h1 {{
+            font-size: 1.35rem;
             font-weight: 700;
             color: #f8fafc;
-            line-height: 1.2;
+            line-height: 1.25;
         }}
-        .card-value.money {{
+        .brand p {{
+            margin-top: 0.2rem;
+            font-size: 0.82rem;
+            color: #94a3b8;
+        }}
+        .header-meta {{
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            font-size: 0.85rem;
+            color: #94a3b8;
+        }}
+        .header-meta .update-time {{
+            white-space: nowrap;
+        }}
+        .btn-refresh {{
+            cursor: pointer;
+            font: inherit;
+            padding: 0.4rem 0.7rem;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: rgba(15, 23, 42, 0.7);
+            color: #e2e8f0;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+        }}
+        .btn-refresh:hover {{
+            border-color: #38bdf8;
             color: #38bdf8;
-            font-size: 1.75rem;
         }}
-        .card-value.budget {{
-            color: #34d399;
+        .dash-section {{
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            padding: 1.25rem 1.35rem 1.35rem;
+            margin-bottom: 1.25rem;
         }}
-        a.card-link {{
-            display: block;
+        .section-title {{
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            margin-bottom: 1rem;
+        }}
+        .section-num {{
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            background: rgba(56, 189, 248, 0.15);
+            color: #38bdf8;
+            font-size: 0.8rem;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }}
+        .section-title h2 {{
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #f1f5f9;
+        }}
+        .section-body {{
+            display: grid;
+            grid-template-columns: minmax(220px, 34%) 1fr;
+            gap: 1.25rem;
+            align-items: stretch;
+        }}
+        .section-ops {{
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }}
+        a.op-btn {{
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            padding: 0.95rem 1rem;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(15, 23, 42, 0.55);
             color: inherit;
             text-decoration: none;
+            transition: transform 0.15s, border-color 0.15s, background 0.15s;
         }}
-        a.card-link:hover {{
+        a.op-btn:hover {{
+            transform: translateY(-1px);
+            border-color: rgba(255, 255, 255, 0.2);
             text-decoration: none;
         }}
-        .card-value.overdue {{
-            color: #f87171;
+        .op-icon {{
+            width: 42px;
+            height: 42px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
         }}
-        .card-value.risk {{
-            color: #fb923c;
+        .op-icon svg {{
+            width: 22px;
+            height: 22px;
+            fill: currentColor;
         }}
-        footer {{
-            margin-top: 2.5rem;
+        .op-blue .op-icon {{ background: rgba(14, 165, 233, 0.18); color: #38bdf8; }}
+        .op-green .op-icon {{ background: rgba(34, 197, 94, 0.18); color: #4ade80; }}
+        .op-orange .op-icon {{ background: rgba(249, 115, 22, 0.18); color: #fb923c; }}
+        .op-purple .op-icon {{ background: rgba(168, 85, 247, 0.18); color: #c084fc; }}
+        .op-text strong {{
+            display: block;
+            font-size: 0.95rem;
+            color: #f8fafc;
+            margin-bottom: 0.15rem;
+        }}
+        .op-text span {{
+            font-size: 0.78rem;
+            color: #94a3b8;
+        }}
+        .section-metrics {{
+            border: 1px dashed rgba(255, 255, 255, 0.12);
+            border-radius: 12px;
+            background: rgba(15, 23, 42, 0.35);
+            min-height: 180px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .metrics-empty {{
             text-align: center;
+            padding: 1.5rem;
+            color: #64748b;
+        }}
+        .metrics-empty .empty-icon {{
+            width: 52px;
+            height: 52px;
+            margin: 0 auto 0.75rem;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.04);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #475569;
+        }}
+        .metrics-empty .empty-icon svg {{
+            width: 28px;
+            height: 28px;
+            fill: currentColor;
+        }}
+        .metrics-empty p {{
+            font-size: 0.9rem;
+            color: #94a3b8;
+        }}
+        .metrics-empty .hint {{
+            margin-top: 0.35rem;
             font-size: 0.8rem;
             color: #64748b;
+        }}
+        .risk-grid {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1rem;
+        }}
+        a.risk-card {{
+            display: block;
+            padding: 1.1rem 1.15rem;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(15, 23, 42, 0.55);
+            color: inherit;
+            text-decoration: none;
+            transition: transform 0.15s, border-color 0.15s;
+            position: relative;
+        }}
+        a.risk-card:hover {{
+            transform: translateY(-2px);
+            border-color: rgba(56, 189, 248, 0.35);
+            text-decoration: none;
+        }}
+        .risk-card-blank {{
+            visibility: hidden;
+            border: none;
+            background: transparent;
+            pointer-events: none;
+        }}
+        .risk-card-head {{
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 0.5rem;
+            margin-bottom: 0.65rem;
+        }}
+        .risk-card-label {{
+            font-size: 0.82rem;
+            color: #94a3b8;
+        }}
+        .risk-card-icon {{
+            width: 34px;
+            height: 34px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }}
+        .risk-card-icon svg {{
+            width: 18px;
+            height: 18px;
+            fill: currentColor;
+        }}
+        .risk-icon-warn {{ background: rgba(251, 146, 60, 0.15); color: #fb923c; }}
+        .risk-icon-overdue {{ background: rgba(248, 113, 113, 0.15); color: #f87171; }}
+        .risk-icon-monitor {{ background: rgba(56, 189, 248, 0.15); color: #38bdf8; }}
+        .risk-icon-shield {{ background: rgba(52, 211, 153, 0.15); color: #34d399; }}
+        .risk-card-value {{
+            font-size: 2rem;
+            font-weight: 700;
+            line-height: 1.1;
+            color: #f8fafc;
+        }}
+        .risk-card-value.warn {{ color: #fb923c; }}
+        .risk-card-value.overdue {{ color: #f87171; }}
+        .risk-card-value.ok {{ color: #34d399; }}
+        .risk-card-value.muted {{ color: #64748b; font-size: 1.5rem; }}
+        .risk-card-foot {{
+            margin-top: 0.55rem;
+            font-size: 0.78rem;
+            color: #64748b;
+        }}
+        .page-footer {{
+            margin-top: 1.5rem;
+            padding-top: 1.25rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            font-size: 0.8rem;
+            color: #64748b;
+        }}
+        .page-footer a {{
+            color: #94a3b8;
+            text-decoration: none;
+            margin-left: 1rem;
+        }}
+        .page-footer a:hover {{
+            color: #38bdf8;
+        }}
+        @media (max-width: 960px) {{
+            .section-body {{
+                grid-template-columns: 1fr;
+            }}
+            .risk-grid {{
+                grid-template-columns: repeat(2, 1fr);
+            }}
+        }}
+        @media (max-width: 560px) {{
+            .risk-grid {{
+                grid-template-columns: 1fr;
+            }}
+            .page-header {{
+                flex-direction: column;
+                align-items: flex-start;
+            }}
         }}
     </style>
 </head>
 <body>
     <div class="container">
-        <header>
-            <h1>房地产资产证券化平台</h1>
-            <p>数据概览 · Real Estate Securitization Platform</p>
+        <header class="page-header">
+            <div class="brand">
+                <div class="brand-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M12 3L2 20h20L12 3zm0 4.5l6.2 10.5H5.8L12 7.5z"/></svg>
+                </div>
+                <div>
+                    <h1>房地产资产证券化平台</h1>
+                    <p>Real Estate Securitization Platform</p>
+                </div>
+            </div>
+            <div class="header-meta">
+                <span class="update-time">数据更新：{data_updated_at}</span>
+                <button type="button" class="btn-refresh" onclick="location.reload()" title="刷新">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                    刷新
+                </button>
+            </div>
         </header>
-        <div class="grid">
-            <div class="card">
-                <div class="card-label">项目数量</div>
-                <div class="card-value">{project_count}</div>
+
+        <section class="dash-section" aria-labelledby="sec-issuance">
+            <div class="section-title">
+                <span class="section-num">1</span>
+                <h2 id="sec-issuance">发行数据</h2>
             </div>
-            <div class="card">
-                <div class="card-label">资产包数量</div>
-                <div class="card-value">{asset_pool_count}</div>
+            <div class="section-body">
+                <div class="section-ops">
+                    <a href="/issuance/upload" class="op-btn op-blue">
+                        <span class="op-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
+                        </span>
+                        <span class="op-text">
+                            <strong>数据导入</strong>
+                            <span>支持 Excel 格式文件导入</span>
+                        </span>
+                    </a>
+                    <a href="/issuance/records" class="op-btn op-green">
+                        <span class="op-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
+                        </span>
+                        <span class="op-text">
+                            <strong>发行数据查看</strong>
+                            <span>查看历史发行数据明细</span>
+                        </span>
+                    </a>
+                </div>
+                <div class="section-metrics">
+                    <div class="metrics-empty">
+                        <div class="empty-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M20 6h-8l-2-2H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2zm0 12H4V8h16v10z"/></svg>
+                        </div>
+                        <p>暂无数据</p>
+                        <p class="hint">数据导入后将展示关键指标</p>
+                    </div>
+                </div>
             </div>
-            <div class="card">
-                <div class="card-label">信托产品数量</div>
-                <div class="card-value">{trust_product_count}</div>
+        </section>
+
+        <section class="dash-section" aria-labelledby="sec-ingestion">
+            <div class="section-title">
+                <span class="section-num">2</span>
+                <h2 id="sec-ingestion">资产情况更新</h2>
             </div>
-            <div class="card">
-                <div class="card-label">投资人数量</div>
-                <div class="card-value">{investor_count}</div>
+            <div class="section-body">
+                <div class="section-ops">
+                    <a href="/ingestion/upload" class="op-btn op-blue">
+                        <span class="op-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
+                        </span>
+                        <span class="op-text">
+                            <strong>Excel 导入</strong>
+                            <span>支持 Excel 格式文件导入</span>
+                        </span>
+                    </a>
+                    <a href="/ingestion/repayment-records" class="op-btn op-orange">
+                        <span class="op-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
+                        </span>
+                        <span class="op-text">
+                            <strong>还款明细查看</strong>
+                            <span>查看还款明细数据详情</span>
+                        </span>
+                    </a>
+                    <a href="/ingestion/monitor-records" class="op-btn op-purple">
+                        <span class="op-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                        </span>
+                        <span class="op-text">
+                            <strong>监控快照查看</strong>
+                            <span>查看监控快照数据详情</span>
+                        </span>
+                    </a>
+                </div>
+                <div class="section-metrics">
+                    <div class="metrics-empty">
+                        <div class="empty-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M20 6h-8l-2-2H4a2 2 0 00-2 2v12a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2zm0 12H4V8h16v10z"/></svg>
+                        </div>
+                        <p>暂无数据</p>
+                        <p class="hint">数据导入后将展示关键指标</p>
+                    </div>
+                </div>
             </div>
-            <div class="card">
-                <div class="card-label">已募集总金额</div>
-                <div class="card-value money">{fmt_money(total_raised_amount)}</div>
+        </section>
+
+        <section class="dash-section" aria-labelledby="sec-risk">
+            <div class="section-title">
+                <span class="section-num">3</span>
+                <h2 id="sec-risk">风险管理</h2>
             </div>
-            <div class="card">
-                <div class="card-label">项目总预算</div>
-                <div class="card-value money budget">{fmt_money(total_project_budget)}</div>
+            <div class="risk-grid">
+                <a href="/risk/workbench" class="risk-card">
+                    <div class="risk-card-head">
+                        <span class="risk-card-label">风险预警</span>
+                        <span class="risk-card-icon risk-icon-warn" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>
+                        </span>
+                    </div>
+                    <div class="risk-card-value warn">{high_risk_count}</div>
+                    <div class="risk-card-foot">A 类高风险资产 →</div>
+                </a>
+                <a href="/overdue" class="risk-card">
+                    <div class="risk-card-head">
+                        <span class="risk-card-label">逾期资产（M2+）</span>
+                        <span class="risk-card-icon risk-icon-overdue" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67V7z"/></svg>
+                        </span>
+                    </div>
+                    <div class="risk-card-value overdue">{overdue_total}</div>
+                    <div class="risk-card-foot">暴露规模 {exposure_display} →</div>
+                </a>
+                <a href="/ingestion/monitor-records" class="risk-card">
+                    <div class="risk-card-head">
+                        <span class="risk-card-label">监控中资产</span>
+                        <span class="risk-card-icon risk-icon-monitor" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                        </span>
+                    </div>
+                    <div class="risk-card-value muted">—</div>
+                    <div class="risk-card-foot">密切关注中 →</div>
+                </a>
+                <div class="risk-card risk-card-blank" aria-hidden="true"></div>
             </div>
-            <a href="/ingestion/upload" class="card card-link">
-                <div class="card-label">数据导入 V2</div>
-                <div class="card-value" style="font-size:1.25rem;">Excel</div>
-                <div class="card-label" style="margin-top:0.5rem;margin-bottom:0;">还款明细 / 监控快照 →</div>
-            </a>
-            <a href="/issuance/upload" class="card card-link">
-                <div class="card-label">发行资产明细</div>
-                <div class="card-value" style="font-size:1.25rem;">Excel</div>
-                <div class="card-label" style="margin-top:0.5rem;margin-bottom:0;">信托产品发行导入 →</div>
-            </a>
-            <a href="/issuance/records" class="card card-link">
-                <div class="card-label">发行资产明细</div>
-                <div class="card-value" style="font-size:1.25rem;">查看</div>
-            </a>
-            <a href="/ingestion/repayment-records" class="card card-link">
-                <div class="card-label">还款明细</div>
-                <div class="card-value" style="font-size:1.25rem;">查看</div>
-            </a>
-            <a href="/ingestion/monitor-records" class="card card-link">
-                <div class="card-label">监控快照</div>
-                <div class="card-value" style="font-size:1.25rem;">查看</div>
-            </a>
-            <a href="/risk/workbench" class="card card-link">
-                <div class="card-label">风控中台</div>
-                <div class="card-value risk">{high_risk_count}</div>
-                <div class="card-label" style="margin-top:0.5rem;margin-bottom:0;">A 类高风险资产 →</div>
-            </a>
-            <a href="/overdue" class="card card-link">
-                <div class="card-label">逾期资产（M2+）</div>
-                <div class="card-value overdue">{overdue_total}</div>
-                <div class="card-label" style="margin-top:0.5rem;margin-bottom:0;">暴露规模 {exposure_total} →</div>
-            </a>
-        </div>
-        <footer>Real Estate Securitization Platform</footer>
+        </section>
+
+        <footer class="page-footer">
+            <span>房地产资产证券化平台 © {datetime.now().year}</span>
+            <span>
+                <a href="#">关于我们</a>
+                <a href="#">帮助中心</a>
+                <a href="#">联系我们</a>
+            </span>
+        </footer>
     </div>
 </body>
 </html>"""
