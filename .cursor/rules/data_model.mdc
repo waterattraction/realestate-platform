@@ -4,9 +4,9 @@ globs: backend/**/*.py,db/**/*.sql,docs/**/*
 alwaysApply: false
 ---
 
-# 数据建模规则（M2）
+# 数据建模规则（M2 + M2.5）
 
-在新增**数据库字段、表、Excel 列映射、导入逻辑、API 字段**之前，必须先完成数据标准评审。
+在新增**数据库字段、表、Excel 列映射、导入逻辑、API 字段、BI 指标、AI Agent 输出字段**之前，必须先完成数据标准评审。
 
 ## 强制流程
 
@@ -16,18 +16,36 @@ alwaysApply: false
 
 **禁止**跳过评审直接改表结构或在代码中扩散未登记字段名/别名。
 
+## Canonical 检查（M2.5，优先）
+
+新增字段、Excel alias、API 字段、BI 指标、AI Agent 输出字段前，**必须先检查** [`docs/canonical/`](../docs/canonical/README.md)：
+
+1. [`docs/canonical/field_dictionary.md`](../docs/canonical/field_dictionary.md)
+2. [`docs/canonical/alias_dictionary.md`](../docs/canonical/alias_dictionary.md)
+3. [`docs/canonical/object_dictionary.md`](../docs/canonical/object_dictionary.md)
+4. [`docs/canonical/enumerations.md`](../docs/canonical/enumerations.md)
+5. [`docs/data_dictionary/`](../docs/data_dictionary/)
+6. [`docs/excel/`](../docs/excel/)
+7. [`docs/standards/`](../docs/standards/)
+
+**若 canonical 中已有字段**：必须复用 canonical 字段名，**不得新增同义字段**。
+
+**若 canonical 中尚无**：**先补 canonical**，再改代码 / migration。
+
 ## 编码前检查清单
 
-1. 是否已有**同义字段**？查 [`docs/glossary.md`](../docs/glossary.md)、[`docs/standards/identifiers.md`](../docs/standards/identifiers.md)
-2. 是否已有 **Excel alias**？查 [`docs/excel/`](../docs/excel/)
-3. 是否已有 **identifier 定义**？查 `docs/standards/identifiers.md`
-4. 是否已有 **data dictionary** 条目？查 [`docs/data_dictionary/`](../docs/data_dictionary/)
-5. 是否影响 **发行 / 监控 / 还款 / 逾期 / 风险** 链路？查 `docs/architecture/data_lineage.md`（下一批；暂查模块字典上下游节）
-6. 是否需要新增 **migration**？→ `db/migrations/YYYYMMDD_*.sql`
-7. 是否需要更新 **`db/manifest.txt`**？
-8. 是否需要更新 **`docs/excel/`**？
-9. 是否需要更新 **`docs/data_dictionary/`**？
-10. 是否需要更新 **`docs/standards/identifiers.md`**？
+1. 是否已有 **Canonical Field / Alias**？查 `docs/canonical/`（上节顺序）
+2. 是否已有**同义字段**？查 [`docs/glossary.md`](../docs/glossary.md)、[`docs/standards/identifiers.md`](../docs/standards/identifiers.md)
+3. 是否已有 **Excel alias**？查 [`docs/excel/`](../docs/excel/)
+4. 是否已有 **identifier 定义**？查 `docs/standards/identifiers.md`
+5. 是否已有 **data dictionary** 条目？查 [`docs/data_dictionary/`](../docs/data_dictionary/)
+6. 是否影响 **发行 / 监控 / 还款 / 逾期 / 风险** 链路？查 `docs/architecture/data_lineage.md`（下一批；暂查模块字典上下游节）
+7. 是否需要新增 **migration**？→ `db/migrations/YYYYMMDD_*.sql`
+8. 是否需要更新 **`db/manifest.txt`**？
+9. 是否需要更新 **`docs/canonical/`**？
+10. 是否需要更新 **`docs/excel/`**？
+11. 是否需要更新 **`docs/data_dictionary/`**？
+12. 是否需要更新 **`docs/standards/identifiers.md`**？
 
 ## 术语强制
 
@@ -50,10 +68,12 @@ alwaysApply: false
 
 | 变更类型 | 必须更新 |
 |----------|----------|
-| 新表/新列 | `docs/data_dictionary/` + migration + manifest（如适用） |
-| 新 Excel 列 | `docs/excel/` + `docs/glossary.md` |
+| 新 Canonical 字段/别名/枚举 | `docs/canonical/` **优先** |
+| 新表/新列 | `docs/canonical/` + `docs/data_dictionary/` + migration + manifest（如适用） |
+| 新 Excel 列 | `docs/canonical/alias_dictionary.md` + `docs/excel/` + `docs/glossary.md` |
+| 新 API / BI / AI 字段 | `docs/canonical/field_dictionary.md` |
 | 新标识符 | `docs/standards/identifiers.md` |
-| 新对象关系 | `docs/architecture/`（P4 后） |
+| 新对象关系 | `docs/canonical/object_dictionary.md` + `docs/architecture/`（P4 后） |
 
 ## SQL 治理（M1 衔接）
 
