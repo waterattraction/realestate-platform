@@ -32,21 +32,38 @@
 
 ## 4. 可选列
 
-见第 9 节字段映射总表。
+见第 9 节字段映射总表（与 `issuance_cleanse.COL_ALIASES` 完全一致）。
 
 ## 5. 核心别名列（跨模块统一）
 
-| 语义字段 | 别名（优先级从高到低） |
-|----------|------------------------|
+| Canonical Field | Excel Alias（代码顺序） |
+|-----------------|-------------------------|
 | `custody_asset_code` | 房源编码、房源编号、托管房源编码、托管房源号 |
-| `source_asset_code` | （发行模块不使用；见还款/监控） | 
+| `receivable_contract_amount` | 实际成交价（应收账款合同金额）、应收账款合同金额 |
+| `receivable_transfer_amount` | 应收账款转让价款 |
 | `asset_transfer_discount_rate` | 资产转让折扣率(%)、资产转让折扣率（数值）(%)、资产转让折扣率(数值)(%)、资产转让折扣率 |
+| `min_institution_transferable_amount` | MIN金额机构可转让最终 |
+| `remaining_unpaid_amount_beike_not_withheld` | 剩余未还款金额--贝壳未代扣 |
+| `rental_price` | 出房价格 |
 | `total_rent_withholding_amount` | 总租金代扣金额、租金代扣金额 |
+| `rent_withheld_amount_before_pooling` | 已租金代扣金额合计-封包前 |
+| `withholding_periods_at_pooling` | 代扣支付期数-封包日（计算） |
+| `initial_expected_withholding_cycle` | 预计代扣支付周期-最初 |
+| `renovation_payment_method` | 装修付款形式 |
+| `rent_withholding_ratio` | 租金代扣比例(%)、租金代扣比例 |
+| `calculated_rent_withholding_per_period` | 每期租金代扣金额（计算） |
 | `first_rent_withholding_date` | 首次付款日期、首次租金代扣日期 |
+| `signing_date` | 签约日期 |
+| `rental_contract_end_date` | 出房合同结束日 |
+| `contract_name` | 合同名称 |
+| `debtor_name` | 债务人姓名（业主名称）、债务人姓名、业主名称 |
+| `property_address` | 房源地址 |
 | `city` | 所属城市、所属区域、城市 |
+| `contractor_name` | 施工方名称 |
 | `from_trust_product_name` | 当前信托计划（已发行）、原信托计划、转出信托计划、当前信托计划、拟转入计划（未发行） |
+| `migration_type` | 迁移类型、资产迁移类型、migration_type |
 
-完整别名见 `issuance_cleanse.COL_ALIASES`。
+`source_asset_code` 发行模块不使用（见还款/监控）。完整 canonical 别名见 `docs/canonical/alias_dictionary.md`。
 
 ## 6. 数据类型与清洗
 
@@ -89,19 +106,36 @@
 
 ## 9. 字段映射总表
 
-| Excel 列名 / 语义 | 别名 | DB 字段 | 类型 | 必填 | 清洗规则 | 失败规则 |
-|-------------------|------|---------|------|:----:|----------|----------|
-| 房源编码 | 房源编号、托管房源编码、托管房源号 | `custody_asset_code` | 字符串 | 是 | `clean_custody_code` | 空→行失败 |
-| 实际成交价（应收账款合同金额） | 应收账款合同金额 | `receivable_contract_amount` | 金额 | 是 | `to_optional_amount` | 无效→行失败 |
-| 应收账款转让价款 | — | `receivable_transfer_amount` | 金额 | 是 | 同上 | 同上 |
-| 资产转让折扣率（数值）(%) | 见第 5 节 | `asset_transfer_discount_rate` | 比例 | 否 | `to_rate_value` | — |
-| 总租金代扣金额 | 租金代扣金额 | `total_rent_withholding_amount` | 金额 | 否 | `to_numeric` | 错误值→空 |
-| 首次付款日期 | 首次租金代扣日期 | `first_rent_withholding_date` | 日期 | 否 | `to_optional_date` | — |
-| 所属城市 | 所属区域、城市 | `city` | 字符串 | 否 | `resolve_city` | 空→warning |
-| 当前信托计划（已发行） | 原信托计划、转出信托计划… | `from_trust_product_name` | 字符串 | 否 | alias 解析 | 未匹配→warning |
-| 迁移类型 | 资产迁移类型 | `migration_type` | 枚举 | 否 | `resolve_migration_type` | 未知→warning+transfer |
+与 `backend/app/issuance_cleanse.py` → `COL_ALIASES` 一致。
 
-（其余列见 `issuance_cleanse.COL_ALIASES`，TODO 补全逐列行）
+| Canonical Field | Excel Alias | DB 字段 | 类型 | 必填 | 清洗规则 | Warning / Failed |
+|-----------------|-------------|---------|------|:----:|----------|------------------|
+| `custody_asset_code` | 房源编码、房源编号、托管房源编码、托管房源号 | `custody_asset_code` | 字符串 | 是 | `clean_custody_code` | 空→**failed** |
+| `receivable_contract_amount` | 实际成交价（应收账款合同金额）、应收账款合同金额 | `receivable_contract_amount` | 金额 | 是 | `to_optional_amount(required=True)` | 无效→**failed** |
+| `receivable_transfer_amount` | 应收账款转让价款 | `receivable_transfer_amount` | 金额 | 是 | 同上 | 无效→**failed** |
+| `asset_transfer_discount_rate` | 资产转让折扣率(%)、资产转让折扣率（数值）(%)、资产转让折扣率(数值)(%)、资产转让折扣率 | `asset_transfer_discount_rate` | 比例 | 否 | `to_rate_value` | 空→**warning** |
+| `min_institution_transferable_amount` | MIN金额机构可转让最终 | `min_institution_transferable_amount` | 金额 | 否 | `to_numeric_value` | Excel错误→空+warning |
+| `remaining_unpaid_amount_beike_not_withheld` | 剩余未还款金额--贝壳未代扣 | `remaining_unpaid_amount_beike_not_withheld` | 金额 | 否 | `to_numeric_value` | 同上 |
+| `rental_price` | 出房价格 | `rental_price` | 金额 | 否 | `to_numeric_value` | 同上 |
+| `total_rent_withholding_amount` | 总租金代扣金额、租金代扣金额 | `total_rent_withholding_amount` | 金额 | 否 | `to_numeric_value` | 同上 |
+| `rent_withheld_amount_before_pooling` | 已租金代扣金额合计-封包前 | `rent_withheld_amount_before_pooling` | 金额 | 否 | `to_numeric_value` | 同上 |
+| `withholding_periods_at_pooling` | 代扣支付期数-封包日（计算） | `withholding_periods_at_pooling` | 整数 | 否 | `to_int_value` | 无效→空 |
+| `initial_expected_withholding_cycle` | 预计代扣支付周期-最初 | `initial_expected_withholding_cycle` | 字符串 | 否 | trim | — |
+| `renovation_payment_method` | 装修付款形式 | `renovation_payment_method` | 字符串 | 否 | trim | — |
+| `rent_withholding_ratio` | 租金代扣比例(%)、租金代扣比例 | `rent_withholding_ratio` | 比例 | 否 | `to_rate_value` | — |
+| `calculated_rent_withholding_per_period` | 每期租金代扣金额（计算） | `calculated_rent_withholding_per_period` | 金额 | 否 | `to_numeric_value` | — |
+| `first_rent_withholding_date` | 首次付款日期、首次租金代扣日期 | `first_rent_withholding_date` | 日期 | 否 | `to_optional_date` | — |
+| `signing_date` | 签约日期 | `signing_date` | 日期 | 否 | `to_optional_date` | — |
+| `rental_contract_end_date` | 出房合同结束日 | `rental_contract_end_date` | 日期 | 否 | `to_optional_date` | — |
+| `contract_name` | 合同名称 | `contract_name` | 字符串 | 否 | trim | — |
+| `debtor_name` | 债务人姓名（业主名称）、债务人姓名、业主名称 | `debtor_name` | 字符串 | 否 | trim | — |
+| `property_address` | 房源地址 | `property_address` | 字符串 | 否 | trim | — |
+| `city` | 所属城市、所属区域、城市 | `city` | 字符串 | 否 | `resolve_city` | 无法识别→**warning** |
+| `contractor_name` | 施工方名称 | `contractor_name` | 字符串 | 否 | trim | — |
+| `from_trust_product_name` | 当前信托计划（已发行）、原信托计划、转出信托计划、当前信托计划、拟转入计划（未发行） | `from_trust_product_name` | 字符串 | 否 | alias→`trust_product_aliases` / `trust_products.name` | 未匹配→**warning** |
+| `migration_type` | 迁移类型、资产迁移类型、migration_type | `migration_type` | 枚举 | 否 | `resolve_migration_type` | 未知→**warning**+按 transfer 处理 |
+
+**导入参数（非 Excel 列）：** `trust_product_id`、`issue_date` — 缺失则整批 **failed**。
 
 ## 10. 示例值
 

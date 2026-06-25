@@ -1,6 +1,6 @@
-# Documentation Automation Scripts (M2.6)
+# Documentation Automation Scripts (M2.6 / M2.7)
 
-轻量文档校验与草案生成工具。**默认只读**，不修改任何文件；`--write` 预留但当前未实现。
+轻量文档校验与覆盖率检查工具。**默认只读**，不修改任何文件；`--write` 预留但未实现。
 
 ## 前置
 
@@ -11,49 +11,70 @@ python3 scripts/<script>.py
 
 依赖：Python 3.10+ 标准库（无第三方包）。
 
-## 脚本
+## 脚本用途
 
 | 脚本 | 用途 |
 |------|------|
-| `gen_data_dictionary_stub.py` | 从 `db/**/*.sql` 解析 `CREATE TABLE`，对比 `docs/data_dictionary/*.md` 缺失表/列 |
-| `gen_excel_aliases_stub.py` | 从 `issuance_cleanse.py` / `ingestion_cleanse.py` 提取 `COL_ALIASES`，检查 `docs/excel/*.md` |
-| `validate_canonical.py` | `identifiers.md` 关键字段是否出现在 `field_dictionary.md`；alias 是否映射到已有 canonical field |
-| `validate_glossary.py` | `glossary.md` 中 canonical 字段是否在 `field_dictionary.md` 或 `identifiers.md` |
-| `schema_diff.py` | `db/manifest.txt` SQL 与 `data_dictionary` 字段覆盖差异 |
+| `validate_canonical.py` | `identifiers.md` ↔ `field_dictionary.md`；`alias_dictionary.md` 映射校验 |
+| `validate_glossary.py` | `glossary.md` 术语是否在 canonical / identifiers 中 |
+| `schema_diff.py` | `db/manifest.txt` 表/列 vs `data_dictionary/` |
+| `gen_data_dictionary_stub.py` | 同上（data dictionary 桩检查别名） |
+| `gen_excel_aliases_stub.py` | `COL_ALIASES` vs `docs/excel/*.md` |
+| `doc_health.py` | **总览**：汇总上述检查 + Documentation Health Summary |
 
-## 示例
+内部模块：`_common.py`（解析）、`_health.py`（检查逻辑与输出格式）。
 
-```bash
-# 检查 canonical 一致性（期望 exit 0）
-python3 scripts/validate_canonical.py
+## 输出格式
 
-# 检查 glossary 覆盖
-python3 scripts/validate_glossary.py
-
-# SQL vs data_dictionary 差异（预期有缺失项，exit 1）
-python3 scripts/schema_diff.py
-
-# data_dictionary 桩检查
-python3 scripts/gen_data_dictionary_stub.py
-
-# Excel 别名提取与文档对照
-python3 scripts/gen_excel_aliases_stub.py
+```
+PASS    <检查项>              <说明>
+WARNING <检查项>              <说明>
+FAIL    <检查项>              <说明>
+         - <缺失项>
 ```
 
-## 退出码
+## Exit Code 规则（M2.7）
 
-| 码 | 含义 |
-|----|------|
-| 0 | 无问题 |
-| 1 | 发现差异/缺失（信息性报告） |
-| 2 | 运行错误 |
+| 情况 | 默认 exit | `--strict` exit |
+|------|-----------|-----------------|
+| 全部 PASS | **0** | **0** |
+| 文档覆盖率不足（WARNING） | **0** | **1** |
+| SQL 解析失败 / manifest 缺失 / 路径错误 | **1** | **1** |
+| canonical alias 指向不存在字段 | **1** | **1** |
+| 脚本运行异常 | **1** | **1** |
 
-## 与 M2 文档关系
+`--strict` 用于未来 CI：任何 WARNING 也失败。
 
-校验顺序与 [`.cursor/rules/data_model.mdc`](../.cursor/rules/data_model.mdc) 一致：`canonical/` → `data_dictionary/` → `excel/` → `standards/`。
+## M2.7 文档健康检查流程
+
+新增字段、表、Excel 别名后：
+
+1. 更新 `docs/canonical/`、`docs/data_dictionary/`、`docs/excel/`（见 `data_model.mdc`）
+2. 运行 `python3 scripts/doc_health.py`
+3. 发布前可选：`python3 scripts/doc_health.py --strict`
+
+目标覆盖率：**Data Dictionary 100%**、**Canonical 100%**、**Glossary 100%**、**Excel Alias 100%**。
+
+## 推荐命令
+
+```bash
+python3 scripts/validate_canonical.py
+python3 scripts/validate_glossary.py
+python3 scripts/schema_diff.py
+python3 scripts/gen_data_dictionary_stub.py
+python3 scripts/gen_excel_aliases_stub.py
+python3 scripts/doc_health.py
+```
+
+Strict 模式（CI）：
+
+```bash
+python3 scripts/doc_health.py --strict
+```
 
 ## 变更记录
 
 | 日期 | 变更 |
 |------|------|
-| 2026-06 | M2.6 初版脚本 |
+| 2026-06 | M2.6 初版 |
+| 2026-06 | M2.7 统一输出、exit code、`doc_health.py` |

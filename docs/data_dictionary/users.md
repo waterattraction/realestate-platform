@@ -46,7 +46,7 @@
 
 ## 下游使用模块
 
-全站认证；`ingestion_pipeline_runs.created_by`、`issuance_import_runs.created_by`
+全站认证；`ingestion_pipeline_runs.created_by`、`issuance_import_runs.created_by`（见 [ingestion_pipeline_runs.md](ingestion_pipeline_runs.md)）
 
 ## 数据质量规则
 
@@ -54,7 +54,7 @@
 
 ## 注意事项
 
-- 关联表 `ingestion_pipeline_runs` 记录 `/ingestion` 导入审计（TODO 可单独字典页）。
+- 导入审计表见 `ingestion_pipeline_runs.md`、`issuance_import_runs.md`。
 
 ## 变更记录
 

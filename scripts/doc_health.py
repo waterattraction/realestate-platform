@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate or check data_dictionary field stubs from db/**/*.sql (dry-run by default)."""
+"""Unified documentation health check with coverage summary."""
 
 from __future__ import annotations
 
@@ -9,22 +9,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _health import check_data_dictionary, print_lines
+from _health import print_lines, print_summary, run_full_health
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--write",
+        "--strict",
         action="store_true",
-        help="Write stub rows (not implemented; always dry-run)",
+        help="Exit 1 on documentation coverage warnings (for CI)",
     )
-    parser.add_argument("--strict", action="store_true", help="Exit 1 on coverage warnings")
     args = parser.parse_args()
-    if args.write:
-        print("WARN: --write not implemented; running dry-run only.", file=sys.stderr)
-    report = check_data_dictionary()
+
+    report = run_full_health(strict=args.strict)
     print_lines(report.lines)
+    print_summary(report.summary)
     return report.exit_code(strict=args.strict)
 
 

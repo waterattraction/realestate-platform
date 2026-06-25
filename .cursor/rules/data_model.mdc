@@ -79,6 +79,17 @@ alwaysApply: false
 
 遵循 [`db/README.md`](../db/README.md)：禁止根目录新增 `.sql`；migration 须更新 manifest；ops 不进 manifest。
 
+## 文档健康检查（M2.7）
+
+同步 `docs/` 后运行：
+
+```bash
+python3 scripts/doc_health.py
+python3 scripts/doc_health.py --strict   # CI
+```
+
+详见 [`scripts/README.md`](../scripts/README.md)。
+
 ## 实施前输出
 
 开始编码前，用简短段落说明：变更类型、影响模块、回滚方案、需更新的文档列表。不确定处写 `TODO`，勿编造业务语义。
