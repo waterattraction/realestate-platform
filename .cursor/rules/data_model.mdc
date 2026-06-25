@@ -1,0 +1,64 @@
+---
+description: M2 数据建模规则 — 新增字段/表/Excel 映射前必检
+globs: backend/**/*.py,db/**/*.sql,docs/**/*
+alwaysApply: false
+---
+
+# 数据建模规则（M2）
+
+在新增**数据库字段、表、Excel 列映射、导入逻辑、API 字段**之前，必须先完成数据标准评审。
+
+## 强制流程
+
+```
+设计 → 评审 → Migration（db/migrations/）→ 实施 → 验收 → 同步文档
+```
+
+**禁止**跳过评审直接改表结构或在代码中扩散未登记字段名/别名。
+
+## 编码前检查清单
+
+1. 是否已有**同义字段**？查 [`docs/glossary.md`](../docs/glossary.md)、[`docs/standards/identifiers.md`](../docs/standards/identifiers.md)
+2. 是否已有 **Excel alias**？查 [`docs/excel/`](../docs/excel/)
+3. 是否已有 **identifier 定义**？查 `docs/standards/identifiers.md`
+4. 是否已有 **data dictionary** 条目？查 [`docs/data_dictionary/`](../docs/data_dictionary/)
+5. 是否影响 **发行 / 监控 / 还款 / 逾期 / 风险** 链路？查 `docs/architecture/data_lineage.md`（下一批；暂查模块字典上下游节）
+6. 是否需要新增 **migration**？→ `db/migrations/YYYYMMDD_*.sql`
+7. 是否需要更新 **`db/manifest.txt`**？
+8. 是否需要更新 **`docs/excel/`**？
+9. 是否需要更新 **`docs/data_dictionary/`**？
+10. 是否需要更新 **`docs/standards/identifiers.md`**？
+
+## 术语强制
+
+| 语义 | Canonical 名 | 禁止 |
+|------|-------------|------|
+| 托管房源主体号 | `custody_asset_code` | 新逻辑用 `asset_code` |
+| 资产分笔号 | `source_asset_code` | 与 custody 混用 |
+| 历史资产编号 | `asset_code` | **禁止新功能依赖** |
+| 发行冲突键 | `business_asset_key` | UNIQUE / 主键 |
+
+## 时间维度
+
+| 模块 | 字段 | 禁止 |
+|------|------|------|
+| 发行 | `issue_date` | `data_date` |
+| 监控/逾期/风险 | `data_date` | 与 `issue_date` 混用 |
+| 还款 | `repayment_date`（业务日） | 用 `data_date` 做新核对 |
+
+## 文档同步义务
+
+| 变更类型 | 必须更新 |
+|----------|----------|
+| 新表/新列 | `docs/data_dictionary/` + migration + manifest（如适用） |
+| 新 Excel 列 | `docs/excel/` + `docs/glossary.md` |
+| 新标识符 | `docs/standards/identifiers.md` |
+| 新对象关系 | `docs/architecture/`（P4 后） |
+
+## SQL 治理（M1 衔接）
+
+遵循 [`db/README.md`](../db/README.md)：禁止根目录新增 `.sql`；migration 须更新 manifest；ops 不进 manifest。
+
+## 实施前输出
+
+开始编码前，用简短段落说明：变更类型、影响模块、回滚方案、需更新的文档列表。不确定处写 `TODO`，勿编造业务语义。

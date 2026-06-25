@@ -77,3 +77,4 @@ curl http://localhost:8000/
 - 不提交 secrets（`.env`、凭证）
 - 不擅自添加前端框架、ORM、测试、文档或 git commit，除非明确要求
 - **SQL 目录治理**：所有数据库 SQL 见 `db/README.md`；禁止根目录新增 `.sql`；migration 必须更新 `manifest.txt`
+- **数据标准化（M2）**：字段/Excel/标识符见 `docs/README.md` 与 `.cursor/rules/data_model.mdc`
