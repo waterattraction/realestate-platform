@@ -47,7 +47,7 @@ M3.0 / M3.1 身份；M3.2 Application Service；M3.3 Projection DTO；**M3.4** H
 | [`glossary.md`](glossary.md) | 核心术语对照 | ✅ |
 | [`data_dictionary/`](data_dictionary/README.md) | 表级数据字典（物理层，20/20 表） | ✅ |
 | [`excel/`](excel/) | Excel 导入标准 | ✅ |
-| [`standards/`](standards/) | 标识符、数据质量、命名 | ✅ |
+| [`standards/`](standards/) | 标识符、数据质量、命名、**[UI 布局](standards/ui_layout.md)** | ✅ |
 | [`architecture/`](architecture/) | 领域模型、血缘、**M3 Asset Domain Baseline** | ✅ |
 | [`api/`](api/canonical_data_model.md) | Canonical API Data Model | ✅ |
 | [`_templates/`](_templates/) | 文档模板 | ✅ |
@@ -59,7 +59,7 @@ M3.0 / M3.1 身份；M3.2 Application Service；M3.3 Projection DTO；**M3.4** H
 | 语义层 | `canonical/` | 全系统统一叫什么？别名归谁？ |
 | 物理层 | `data_dictionary/` | 表有哪些列？ |
 | 导入层 | `excel/` | Sheet 如何清洗？ |
-| 规范层 | `standards/` | 编码与命名规则 |
+| 规范层 | `standards/` | 编码、命名、**[UI 布局](standards/ui_layout.md)** |
 | 架构层 | `architecture/` | M2 对象关系；**M3 Asset Domain Baseline（Frozen）** |
 | API 层 | `api/` | 对外对象模型 |
 | 实现层 | `db/` | DDL 真相源 |
