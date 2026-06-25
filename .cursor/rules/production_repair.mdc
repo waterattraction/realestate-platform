@@ -1,0 +1,59 @@
+---
+description: 生产数据修复强制流程 — 禁止未审阅的 UPDATE/DELETE/COMMIT
+globs: db/ops/**/*.sql,db/ops/**/*.md,scripts/ops/**/*.py,docs/engineering/**
+alwaysApply: false
+---
+
+# 生产数据修复（Production Data Repair）
+
+适用：资产、资产包、信托产品、还款、监控、风险、投资人、募集等**生产库**数据修正。
+
+完整规范：[`docs/engineering/production_data_repair_standard.md`](docs/engineering/production_data_repair_standard.md)
+
+参考实现：[`db/ops/fixes/product3_repay_0612_custody/`](db/ops/fixes/product3_repay_0612_custody/)
+
+## 禁止事项
+
+- **禁止**在生产库执行未审阅的 ad-hoc `UPDATE` / `DELETE` / `COMMIT`
+- **禁止**生成可直接执行的最终修复 SQL 而不含 Dry Run 与 Verify 设计
+- **禁止**每个 Repair 自建 `*_fix_log` 表（使用统一 `repair_log`）
+- **禁止**跳过备份与回滚方案
+- **禁止**在程序防复发未合入时先改历史数据（除非纯历史、程序已无需变更）
+
+## 强制流程
+
+```
+Proposal → Check → Dry Run → Approval → Apply → Verify → Regression → Acceptance
+```
+
+| 门禁 | 要求 |
+|------|------|
+| Apply 前 | Check 通过 + Dry Run 产物已人工审阅 + 书面 Approval |
+| 合入/执行前 | 必须有 `verify` 与回滚（`rollback` 子命令或 `rollback.sql`） |
+| 新 Repair | 从 [`db/ops/templates/`](db/ops/templates/) 生成，目录 `db/ops/fixes/<repair_name>/` |
+| 编排脚本 | 继承 [`RepairJob`](scripts/ops/framework/base.py)，勿重写生命周期脚手架 |
+
+## 目录与命名
+
+```
+db/ops/fixes/<repair_name>/
+  README.md
+  ACCEPTANCE.md
+  repair.py      # 继承 RepairJob
+  repair.sql
+  check.sql
+  rollback.sql
+```
+
+- 备份表：`_ops_backup_<repair_name>`（历史案例可保留 legacy 名）
+- 审计：`repair_log`（DDL：`db/ops/schema/repair_log.sql`）
+
+## AI 辅助开发时
+
+1. 先输出 **Proposal**（范围、权威字段、不改字段、风险等级 P0~P3）
+2. 实现 `check` + `dry_run`（只读），**不要**默认执行 `apply`
+3. 提供 `verify` 与 `rollback` 设计
+4. 若涉及导入/计算逻辑，同时给出**单元测试**
+5. 运行 `python3 scripts/checks/check_repair_package.py` 确保包结构完整
+
+**没有 Dry Run 和 Verify 方案，不得生成最终执行方案或建议用户直接 COMMIT。**
