@@ -20,12 +20,14 @@ _get_user = auth.make_current_user_dependency(_engine)
 def get_overdue_workbench_detail(
     _user: Annotated[dict, Depends(_get_user)],
     trust_product_id: str | None = None,
+    asset_code: str | None = None,
     custody_asset_code: str | None = None,
     trust_asset_id: str | None = None,
     data_date: str | None = None,
 ) -> dict:
     return _service.get_detail(
         trust_product_id=query_utils.parse_optional_int(trust_product_id),
+        asset_code=query_utils.clean_optional_str(asset_code),
         custody_asset_code=query_utils.clean_optional_str(custody_asset_code),
         trust_asset_id=query_utils.parse_optional_int(trust_asset_id),
         data_date=query_utils.parse_optional_date(data_date),

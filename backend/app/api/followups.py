@@ -24,7 +24,8 @@ _get_user = auth.make_current_user_dependency(_engine)
 async def create_followup_entry(
     current_user: Annotated[dict, Depends(_get_user)],
     trust_product_id: int = Form(...),
-    custody_asset_code: str = Form(...),
+    asset_code: str = Form(""),
+    custody_asset_code: str = Form(""),
     data_date: str = Form(...),
     status: str = Form("in_progress"),
     owner_name: str = Form(""),
@@ -36,11 +37,24 @@ async def create_followup_entry(
     redirect_to_workbench: str | None = Form(None),
     files: list[UploadFile] = File(default=[]),
 ):
-    custody = query_utils.clean_optional_str(custody_asset_code) or ""
+    ac = query_utils.clean_optional_str(asset_code) or ""
+    if not ac and custody_asset_code:
+        from app.service.overdue_workbench import build_overdue_workbench_service
+
+        svc = build_overdue_workbench_service(_engine)
+        resolved = svc.resolve_asset_code(
+            trust_product_id,
+            query_utils.clean_optional_str(custody_asset_code) or "",
+            data_date,
+        )
+        ac = resolved or ""
+    if not ac:
+        raise HTTPException(status_code=400, detail="asset_code is required")
+
     try:
         result = _repo.insert_entry_and_update_case(
             trust_product_id=trust_product_id,
-            custody_asset_code=custody,
+            asset_code=ac,
             data_date=data_date,
             status=status or "in_progress",
             owner_name=owner_name or None,
@@ -62,7 +76,7 @@ async def create_followup_entry(
         result["attachments"] = attachments
 
     if redirect_to_workbench:
-        qs = f"?trust_product_id={trust_product_id}&custody_asset_code={quote(custody)}"
+        qs = f"?trust_product_id={trust_product_id}&asset_code={quote(ac)}"
         return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
 
     return result

@@ -86,3 +86,55 @@ class RepaymentRepo:
                 },
             ).fetchone()
         return float(row.total) if row else 0.0
+
+    def fetch_by_product_asset_code(
+        self, trust_product_id: int, asset_code: str, limit: int = 500
+    ) -> list[dict]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        id,
+                        trust_product_id,
+                        trust_asset_id,
+                        asset_code,
+                        custody_asset_code,
+                        source_asset_code,
+                        data_date,
+                        period_no,
+                        actual_repayment_amount,
+                        repayment_date,
+                        synced_at
+                    FROM trust_repayment_detail_records
+                    WHERE trust_product_id = :trust_product_id
+                      AND asset_code = :asset_code
+                    ORDER BY repayment_date DESC NULLS LAST, id DESC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "trust_product_id": trust_product_id,
+                    "asset_code": asset_code,
+                    "limit": limit,
+                },
+            ).fetchall()
+        return rows_to_dicts(rows)
+
+    def sum_by_product_asset_code(self, trust_product_id: int, asset_code: str) -> float:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT COALESCE(SUM(actual_repayment_amount), 0) AS total
+                    FROM trust_repayment_detail_records
+                    WHERE trust_product_id = :trust_product_id
+                      AND asset_code = :asset_code
+                    """
+                ),
+                {
+                    "trust_product_id": trust_product_id,
+                    "asset_code": asset_code,
+                },
+            ).fetchone()
+        return float(row.total) if row else 0.0

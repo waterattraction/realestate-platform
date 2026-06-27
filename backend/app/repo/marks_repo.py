@@ -3,6 +3,7 @@ from sqlalchemy.engine import Engine
 
 from app.repo._serialize import row_to_dict
 
+
 TRUST_MARKER_DEFAULT = "未标记"
 INTERNAL_STATUS_DEFAULT = "待跟进"
 
@@ -14,7 +15,7 @@ class MarksRepo:
     def fetch_mark(
         self,
         trust_product_id: int,
-        custody_asset_code: str,
+        asset_code: str,
         data_date: str,
     ) -> dict:
         with self._engine.connect() as conn:
@@ -24,6 +25,7 @@ class MarksRepo:
                     SELECT
                         id,
                         trust_product_id,
+                        asset_code,
                         custody_asset_code,
                         data_date,
                         trust_marker,
@@ -33,21 +35,21 @@ class MarksRepo:
                         updated_at
                     FROM trust_asset_trust_marks
                     WHERE trust_product_id = :trust_product_id
-                      AND custody_asset_code = :custody_asset_code
+                      AND asset_code = :asset_code
                       AND data_date = :data_date
                     LIMIT 1
                     """
                 ),
                 {
                     "trust_product_id": trust_product_id,
-                    "custody_asset_code": custody_asset_code,
+                    "asset_code": asset_code,
                     "data_date": data_date,
                 },
             ).fetchone()
         if row is None:
             return {
                 "trust_product_id": trust_product_id,
-                "custody_asset_code": custody_asset_code,
+                "asset_code": asset_code,
                 "data_date": data_date,
                 "trust_marker": TRUST_MARKER_DEFAULT,
                 "internal_status": INTERNAL_STATUS_DEFAULT,
@@ -57,3 +59,78 @@ class MarksRepo:
         data["trust_marker"] = data.get("trust_marker") or TRUST_MARKER_DEFAULT
         data["internal_status"] = data.get("internal_status") or INTERNAL_STATUS_DEFAULT
         return data
+
+    def upsert_mark(
+        self,
+        *,
+        trust_product_id: int,
+        asset_code: str,
+        data_date: str,
+        trust_marker: str | None = None,
+        internal_status: str | None = None,
+        updated_by: str | None = None,
+    ) -> dict:
+        existing = self.fetch_mark(trust_product_id, asset_code, data_date)
+        if existing.get("id"):
+            new_marker = trust_marker if trust_marker is not None else existing["trust_marker"]
+            new_status = (
+                internal_status if internal_status is not None else existing["internal_status"]
+            )
+            with self._engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE trust_asset_trust_marks
+                        SET trust_marker = :trust_marker,
+                            internal_status = :internal_status,
+                            updated_by = :updated_by,
+                            updated_at = NOW()
+                        WHERE id = :id
+                        """
+                    ),
+                    {
+                        "id": existing["id"],
+                        "trust_marker": new_marker,
+                        "internal_status": new_status,
+                        "updated_by": updated_by,
+                    },
+                )
+            return {
+                **existing,
+                "trust_marker": new_marker,
+                "internal_status": new_status,
+            }
+
+        new_marker = trust_marker or TRUST_MARKER_DEFAULT
+        new_status = internal_status or INTERNAL_STATUS_DEFAULT
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    INSERT INTO trust_asset_trust_marks (
+                        trust_product_id, asset_code, custody_asset_code, data_date,
+                        trust_marker, internal_status, created_by, updated_by
+                    ) VALUES (
+                        :trust_product_id, :asset_code, :asset_code, :data_date,
+                        :trust_marker, :internal_status, :updated_by, :updated_by
+                    )
+                    RETURNING id
+                    """
+                ),
+                {
+                    "trust_product_id": trust_product_id,
+                    "asset_code": asset_code,
+                    "data_date": data_date,
+                    "trust_marker": new_marker,
+                    "internal_status": new_status,
+                    "updated_by": updated_by,
+                },
+            ).fetchone()
+        return {
+            "id": int(row.id),
+            "trust_product_id": trust_product_id,
+            "asset_code": asset_code,
+            "data_date": data_date,
+            "trust_marker": new_marker,
+            "internal_status": new_status,
+        }

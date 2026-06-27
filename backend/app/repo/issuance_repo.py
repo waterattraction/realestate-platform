@@ -49,6 +49,25 @@ class IssuanceRepo:
     ) -> list[dict]:
         return self.fetch_by_product_custodies(trust_product_id, [custody_asset_code])
 
+    def fetch_for_asset_code(
+        self,
+        trust_product_id: int,
+        asset_code: str,
+        custody_asset_codes: list[str] | None = None,
+    ) -> list[dict]:
+        """Issuance rows for workbench display keyed by monitor asset_code.
+
+        Matches issuance.custody_asset_code against the primary asset_code and
+        any monitor split custody codes (deduped). Import data is unchanged.
+        """
+        lookup_keys = list(
+            dict.fromkeys(
+                [asset_code]
+                + [c for c in (custody_asset_codes or []) if c]
+            )
+        )
+        return self.fetch_by_product_custodies(trust_product_id, lookup_keys)
+
     def fetch_by_product_custodies(
         self, trust_product_id: int, custody_asset_codes: list[str]
     ) -> list[dict]:

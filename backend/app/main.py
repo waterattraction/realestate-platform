@@ -294,7 +294,7 @@ def _custody_has_follow_up_sql() -> str:
             SELECT 1
             FROM trust_overdue_followup_cases c
             WHERE c.trust_product_id = mc.trust_product_id
-              AND c.custody_asset_code = mc.custody_asset_code
+              AND c.asset_code = mc.asset_code
               AND c.status IN ('open', 'in_progress')
         )
     """
@@ -307,7 +307,7 @@ def _custody_followup_count_sql() -> str:
             FROM trust_overdue_followup_entries e
             INNER JOIN trust_overdue_followup_cases c ON c.id = e.case_id
             WHERE c.trust_product_id = mc.trust_product_id
-              AND c.custody_asset_code = mc.custody_asset_code
+              AND c.asset_code = mc.asset_code
         )
     """
 
@@ -316,7 +316,7 @@ def _custody_marks_join_sql() -> str:
     return """
         LEFT JOIN trust_asset_trust_marks tm
             ON tm.trust_product_id = mc.trust_product_id
-           AND tm.custody_asset_code = mc.custody_asset_code
+           AND tm.asset_code = mc.asset_code
            AND tm.data_date = mc.data_date
     """
 
@@ -820,10 +820,10 @@ def fetch_overdue_overview(
     }
 
 
-def upsert_custody_trust_mark(
+def upsert_asset_trust_mark(
     conn,
     trust_product_id: int,
-    custody_asset_code: str,
+    asset_code: str,
     data_date: str,
     *,
     trust_marker: str | None = None,
@@ -842,12 +842,12 @@ def upsert_custody_trust_mark(
             SELECT id, trust_marker, internal_status
             FROM trust_asset_trust_marks
             WHERE trust_product_id = :trust_product_id
-              AND custody_asset_code = :custody_asset_code
+              AND asset_code = :asset_code
               AND data_date = :data_date
         """),
         {
             "trust_product_id": trust_product_id,
-            "custody_asset_code": custody_asset_code,
+            "asset_code": asset_code,
             "data_date": data_date,
         },
     ).fetchone()
@@ -876,7 +876,7 @@ def upsert_custody_trust_mark(
         return {
             "id": existing.id,
             "trust_product_id": trust_product_id,
-            "custody_asset_code": custody_asset_code,
+            "asset_code": asset_code,
             "data_date": data_date,
             "trust_marker": new_marker,
             "internal_status": new_status,
@@ -887,17 +887,17 @@ def upsert_custody_trust_mark(
     row = conn.execute(
         text("""
             INSERT INTO trust_asset_trust_marks (
-                trust_product_id, custody_asset_code, data_date,
+                trust_product_id, asset_code, custody_asset_code, data_date,
                 trust_marker, internal_status, created_by, updated_by
             ) VALUES (
-                :trust_product_id, :custody_asset_code, :data_date,
+                :trust_product_id, :asset_code, :asset_code, :data_date,
                 :trust_marker, :internal_status, :updated_by, :updated_by
             )
             RETURNING id
         """),
         {
             "trust_product_id": trust_product_id,
-            "custody_asset_code": custody_asset_code,
+            "asset_code": asset_code,
             "data_date": data_date,
             "trust_marker": new_marker,
             "internal_status": new_status,
@@ -907,11 +907,51 @@ def upsert_custody_trust_mark(
     return {
         "id": row.id,
         "trust_product_id": trust_product_id,
-        "custody_asset_code": custody_asset_code,
+        "asset_code": asset_code,
         "data_date": data_date,
         "trust_marker": new_marker,
         "internal_status": new_status,
     }
+
+
+def upsert_custody_trust_mark(
+    conn,
+    trust_product_id: int,
+    custody_asset_code: str,
+    data_date: str,
+    *,
+    trust_marker: str | None = None,
+    internal_status: str | None = None,
+    updated_by: str | None = None,
+) -> dict:
+    """Legacy: resolve custody to asset_code then upsert."""
+    row = conn.execute(
+        text("""
+            SELECT m.asset_code
+            FROM trust_asset_monitor_records m
+            INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
+            WHERE m.trust_product_id = :trust_product_id
+              AND m.data_date = :data_date
+              AND COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                  = :custody_asset_code
+            LIMIT 1
+        """),
+        {
+            "trust_product_id": trust_product_id,
+            "custody_asset_code": custody_asset_code,
+            "data_date": data_date,
+        },
+    ).fetchone()
+    asset_code = str(row.asset_code) if row and row.asset_code else custody_asset_code
+    return upsert_asset_trust_mark(
+        conn,
+        trust_product_id,
+        asset_code,
+        data_date,
+        trust_marker=trust_marker,
+        internal_status=internal_status,
+        updated_by=updated_by,
+    )
 
 
 def fetch_trust_products(conn) -> list[dict]:
@@ -1261,16 +1301,16 @@ def _render_custody_mark_select(field: str, value: str, options: list[str], item
     return f"""
         <select class="custody-mark-select" data-field="{field}"
             data-trust-product-id="{item['trust_product_id']}"
-            data-custody-asset-code="{escape(item['custody_asset_code'])}"
+            data-asset-code="{escape(item['asset_code'])}"
             data-data-date="{escape(item['data_date'])}">{opts}</select>
     """
 
 
 def _render_followup_cell(item: dict) -> str:
     cnt = int(item.get("followup_count") or 0)
-    custody_q = quote(item["custody_asset_code"])
+    ac = quote(str(item.get("asset_code") or item["custody_asset_code"]))
     pid = item["trust_product_id"]
-    base = f"/overdue/workbench?custody_asset_code={custody_q}&trust_product_id={pid}"
+    base = f"/overdue/workbench?asset_code={ac}&trust_product_id={pid}"
     if cnt > 0:
         return f'<a href="{base}">{cnt}条</a>'
     return f'<a href="{base}&new_followup=1">新建</a>'
@@ -1877,7 +1917,7 @@ def render_overdue_html(
             var field = sel.getAttribute('data-field');
             var payload = {{
                 trust_product_id: parseInt(sel.getAttribute('data-trust-product-id'), 10),
-                custody_asset_code: sel.getAttribute('data-custody-asset-code'),
+                asset_code: sel.getAttribute('data-asset-code'),
                 data_date: sel.getAttribute('data-data-date')
             }};
             payload[field] = sel.value;
@@ -3518,11 +3558,24 @@ def update_custody_mark(
     body: dict = Body(...),
 ):
     trust_product_id = body.get("trust_product_id")
+    asset_code = body.get("asset_code")
     custody_asset_code = body.get("custody_asset_code")
     data_date = body.get("data_date")
-    if not trust_product_id or not custody_asset_code or not data_date:
+    if not trust_product_id or not data_date:
         raise HTTPException(status_code=400, detail="Missing required fields")
+    if not asset_code and not custody_asset_code:
+        raise HTTPException(status_code=400, detail="Missing asset_code")
     with engine.begin() as conn:
+        if asset_code:
+            return upsert_asset_trust_mark(
+                conn,
+                int(trust_product_id),
+                str(asset_code),
+                str(data_date),
+                trust_marker=body.get("trust_marker"),
+                internal_status=body.get("internal_status"),
+                updated_by=current_user.get("username"),
+            )
         return upsert_custody_trust_mark(
             conn,
             int(trust_product_id),
@@ -3586,6 +3639,7 @@ def overdue_dashboard(
 def overdue_workbench_data(
     current_user: Annotated[dict, Depends(get_current_user)],
     trust_product_id: str | None = None,
+    asset_code: str | None = None,
     trust_asset_id: str | None = None,
     data_date: str | None = None,
     custody_asset_code: str | None = None,
@@ -3594,6 +3648,7 @@ def overdue_workbench_data(
 
     return build_overdue_workbench_service(engine).get_detail(
         trust_product_id=query_utils.parse_optional_int(trust_product_id),
+        asset_code=query_utils.clean_optional_str(asset_code),
         custody_asset_code=query_utils.clean_optional_str(custody_asset_code),
         trust_asset_id=query_utils.parse_optional_int(trust_asset_id),
         data_date=query_utils.parse_optional_date(data_date),
@@ -3628,13 +3683,43 @@ def overdue_workbench_page(
     custody = query_utils.clean_optional_str(custody_asset_code)
     bucket = query_utils.clean_optional_str(delinquency_bucket) or DEFAULT_DELINQUENCY_BUCKET
     list_scope_explicit = list_product_id is not None
+    parsed_date = query_utils.parse_optional_date(data_date)
+
+    if custody and not ac and pid is not None:
+        resolved_ac = svc.resolve_asset_code(pid, custody, parsed_date)
+        if resolved_ac:
+            from urllib.parse import urlencode
+
+            redirect_params: dict[str, str] = {
+                "trust_product_id": str(pid),
+                "asset_code": resolved_ac,
+                "delinquency_bucket": bucket,
+            }
+            if parsed_date:
+                redirect_params["data_date"] = parsed_date
+            if aid is not None:
+                redirect_params["trust_asset_id"] = str(aid)
+            if list_scope_explicit:
+                redirect_params["list_product_id"] = "" if list_pid is None else str(list_pid)
+            if query_utils.clean_optional_str(trust_marker):
+                redirect_params["trust_marker"] = query_utils.clean_optional_str(trust_marker) or ""
+            if query_utils.clean_optional_str(followup_status):
+                redirect_params["followup_status"] = (
+                    query_utils.clean_optional_str(followup_status) or ""
+                )
+            if query_utils.parse_optional_int(new_followup):
+                redirect_params["new_followup"] = "1"
+            return RedirectResponse(
+                url=f"/overdue/workbench?{urlencode(redirect_params)}",
+                status_code=302,
+            )
 
     dto = svc.get_workbench_page_dto(
         trust_product_id=pid,
         asset_code=ac,
-        custody_asset_code=custody,
+        custody_asset_code=custody if ac else None,
         delinquency_bucket=bucket,
-        data_date=query_utils.parse_optional_date(data_date),
+        data_date=parsed_date,
         list_product_id=list_pid,
         list_product_scope_explicit=list_scope_explicit,
         trust_asset_id=aid,

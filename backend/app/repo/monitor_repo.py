@@ -136,6 +136,90 @@ class MonitorRepo:
             ).fetchall()
         return rows_to_dicts(rows)
 
+    def fetch_splits_by_asset_code(
+        self,
+        trust_product_id: int,
+        asset_code: str,
+        data_date: str,
+    ) -> list[dict]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT
+                        m.trust_asset_id,
+                        m.asset_code,
+                        COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                            AS custody_asset_code,
+                        COALESCE(m.source_asset_code, ta.source_asset_code, m.asset_code)
+                            AS source_asset_code,
+                        m.trust_product_id,
+                        m.data_date,
+                        m.overdue_days,
+                        m.risk_score,
+                        m.risk_level,
+                        m.initial_transfer_amount,
+                        m.repaid_amount,
+                        m.remaining_amount,
+                        m.last_payment_date,
+                        m.max_payment_date,
+                        ta.asset_name,
+                        tp.name AS trust_product_name
+                    FROM trust_asset_monitor_records m
+                    INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
+                    INNER JOIN trust_products tp ON tp.id = m.trust_product_id
+                    WHERE m.trust_product_id = :trust_product_id
+                      AND m.data_date = :data_date
+                      AND m.asset_code = :asset_code
+                    ORDER BY m.risk_score DESC NULLS LAST,
+                             m.overdue_days DESC,
+                             m.custody_asset_code
+                    """
+                ),
+                {
+                    "trust_product_id": trust_product_id,
+                    "asset_code": asset_code,
+                    "data_date": data_date,
+                },
+            ).fetchall()
+        return rows_to_dicts(rows)
+
+    def resolve_asset_code(
+        self,
+        trust_product_id: int,
+        custody_asset_code: str,
+        data_date: str | None = None,
+    ) -> str | None:
+        """Legacy: map custody URL param to canonical asset_code."""
+        with self._engine.connect() as conn:
+            params: dict = {
+                "trust_product_id": trust_product_id,
+                "custody_asset_code": custody_asset_code,
+            }
+            date_clause = ""
+            if data_date:
+                date_clause = "AND m.data_date = :data_date"
+                params["data_date"] = data_date
+            row = conn.execute(
+                text(
+                    f"""
+                    SELECT m.asset_code
+                    FROM trust_asset_monitor_records m
+                    INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
+                    WHERE m.trust_product_id = :trust_product_id
+                      AND COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                          = :custody_asset_code
+                      {date_clause}
+                    ORDER BY m.data_date DESC
+                    LIMIT 1
+                    """
+                ),
+                params,
+            ).fetchone()
+        if row is None or row.asset_code is None:
+            return None
+        return str(row.asset_code)
+
     def fetch_custody_queue(
         self, trust_product_id: int, data_date: str, limit: int = 50
     ) -> list[dict]:
@@ -186,7 +270,7 @@ class MonitorRepo:
             """AND EXISTS (
                 SELECT 1 FROM trust_asset_trust_marks tm
                 WHERE tm.trust_product_id = m.trust_product_id
-                  AND tm.custody_asset_code = COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                  AND tm.asset_code = m.asset_code
                   AND tm.data_date = :data_date
                   AND tm.trust_marker = :trust_marker
             )"""
@@ -197,7 +281,7 @@ class MonitorRepo:
             """AND EXISTS (
                 SELECT 1 FROM trust_asset_trust_marks tm2
                 WHERE tm2.trust_product_id = m.trust_product_id
-                  AND tm2.custody_asset_code = COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                  AND tm2.asset_code = m.asset_code
                   AND tm2.data_date = :data_date
                   AND tm2.internal_status = :followup_status
             )"""

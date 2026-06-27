@@ -139,12 +139,6 @@ def render_overdue_workbench_html(
         if current_asset_code
         else ""
     )
-    primary_custody = dto.get("primary_custody_asset_code") or ""
-    custody_hidden = (
-        f'<input type="hidden" name="custody_asset_code" value="{escape(primary_custody)}">'
-        if primary_custody
-        else ""
-    )
     bucket_hidden = (
         f'<input type="hidden" name="delinquency_bucket" value="{escape(delinquency_bucket)}">'
     )
@@ -165,7 +159,6 @@ def render_overdue_workbench_html(
         write_bar = _panel_followup_write(
             product_hidden,
             asset_hidden,
-            custody_hidden,
             bucket_hidden,
             workbench_qs,
             dto,
@@ -453,7 +446,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
 
     # Followup tier — editable selects
     pid = dto.get("trust_product_id")
-    primary_custody = asset.get("primary_custody_asset_code") or ""
+    ac_raw = asset.get("asset_code") or dto.get("asset_code") or ""
     data_date = dto.get("data_date") or ""
     current_marker = trust_mark.get("trust_marker") or "未标记"
     current_internal = trust_mark.get("internal_status") or "待跟进"
@@ -467,7 +460,6 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         f'<option value="{escape(s)}"{" selected" if s == current_internal else ""}>{escape(s)}</option>'
         for s in INTERNAL_STATUS_OPTIONS
     )
-    custody_note = f'标注挂在托管号 {escape(str(primary_custody or "—"))} 上' if primary_custody else ""
 
     return f"""<div class="card-summary">
         <div class="detail-primary">
@@ -507,7 +499,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
                 <span class="info-label">信托标记</span>
                 <span class="mark-display" title="双击修改">{escape(current_marker)}</span>
                 <select class="mark-select summary-select mark-edit-hidden" data-field="trust_marker"
-                        data-product="{pid}" data-custody="{escape(str(primary_custody))}" data-date="{escape(str(data_date))}">
+                        data-product="{pid}" data-asset-code="{escape(str(ac_raw))}" data-date="{escape(str(data_date))}">
                     {marker_opts}
                 </select>
             </div>
@@ -515,7 +507,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
                 <span class="info-label">跟进状态</span>
                 <span class="mark-display" title="双击修改">{escape(current_internal)}</span>
                 <select class="mark-select summary-select mark-edit-hidden" data-field="internal_status"
-                        data-product="{pid}" data-custody="{escape(str(primary_custody))}" data-date="{escape(str(data_date))}">
+                        data-product="{pid}" data-asset-code="{escape(str(ac_raw))}" data-date="{escape(str(data_date))}">
                     {status_opts}
                 </select>
             </div>
@@ -523,7 +515,6 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
                 <span class="info-label">跟进记录数</span>
                 <span class="info-value-sm">{followup_count} 条</span>
             </div>
-            {f'<p class="summary-custody-note">{custody_note}</p>' if custody_note else ''}
         </div>
     </div>"""
 
@@ -638,7 +629,7 @@ def _render_asset_list(
         bucket_html = fmt_delinquency_badge(it.get("delinquency_bucket"))
         custodies = it.get("custody_asset_codes") or []
         if len(custodies) <= 1:
-            custody_hint = escape(str(custodies[0] if custodies else it.get("primary_custody_asset_code") or "—"))
+            custody_hint = escape(str(custodies[0] if custodies else "—"))
         else:
             custody_hint = f"托管 {len(custodies)} 个"
         product_name = escape(str(it.get("trust_product_name") or ""))
@@ -757,7 +748,7 @@ def _render_panels(dto: dict, asset: dict, workbench_qs) -> str:
     Row 3 (1/4 | 2/4 | 1/4): trust | timeline | ops
     """
     if not asset or not (asset.get("selected_split") or asset.get("monitor", {}).get("splits")):
-        if dto.get("asset_code") and dto.get("view_mode") == "detail":
+        if dto.get("asset_code"):
             return '<div class="empty">该资产主编号暂无监控分笔数据</div>'
         return '<div class="empty">请从资产清单选择资产。</div>'
     return f"""<div class="detail-grid">
@@ -935,7 +926,7 @@ def _panel_monitor(mon: dict, summary: dict, data_date: str | None) -> str:
 
 def _panel_trust_mark(mark: dict, dto: dict, asset: dict) -> str:
     pid = dto.get("trust_product_id")
-    custody = asset.get("primary_custody_asset_code") or ""
+    ac_raw = asset.get("asset_code") or dto.get("asset_code") or ""
     data_date = dto.get("data_date")
     marker = mark.get("trust_marker") or "未标记"
     internal = mark.get("internal_status") or "待跟进"
@@ -956,15 +947,15 @@ def _panel_trust_mark(mark: dict, dto: dict, asset: dict) -> str:
                 <p><span class="lbl">内部状态</span><strong>{escape(internal)}</strong></p>
                 <p><span class="lbl">备注</span>{note}</p>
             </div>
-            <p class="muted tiny">标注挂在默认托管号 {escape(str(custody or '—'))} 上</p>
+            <p class="muted tiny">标注按 {ASSET_CODE_LABEL} {escape(str(ac_raw or '—'))} 保存</p>
             <div class="mark-edit muted tiny">修改标注</div>
             <p><span class="lbl">信托标记</span>
             <select class="mark-select" data-field="trust_marker"
-                    data-product="{pid}" data-custody="{escape(str(custody))}" data-date="{escape(str(data_date))}">
+                    data-product="{pid}" data-asset-code="{escape(str(ac_raw))}" data-date="{escape(str(data_date))}">
             {marker_opts}</select></p>
             <p><span class="lbl">内部状态</span>
             <select class="mark-select" data-field="internal_status"
-                    data-product="{pid}" data-custody="{escape(str(custody))}" data-date="{escape(str(data_date))}">
+                    data-product="{pid}" data-asset-code="{escape(str(ac_raw))}" data-date="{escape(str(data_date))}">
             {status_opts}</select></p>
             <p class="muted tiny">修改后自动保存</p>
         </div>
@@ -1055,7 +1046,6 @@ def _followup_status_options(current: str | None) -> str:
 def _panel_followup_write(
     product_hidden,
     asset_hidden,
-    custody_hidden,
     bucket_hidden,
     workbench_qs,
     dto,
@@ -1072,13 +1062,6 @@ def _panel_followup_write(
     summary = asset.get("summary") or {}
     internal = escape(str(summary.get("internal_status") or "待跟进"))
     asset_code = escape(str(dto.get("asset_code") or asset.get("asset_code") or ""))
-    primary = escape(str(dto.get("primary_custody_asset_code") or ""))
-    custodies = dto.get("custody_asset_codes") or []
-    multi_hint = ""
-    if len(custodies) > 1 and primary:
-        multi_hint = (
-            f'<p class="muted tiny warn-text">当前跟进与标记暂挂在默认托管号 {primary} 上。</p>'
-        )
     expanded = "1" if new_followup else "0"
     last_entry = asset.get("timeline") or []
     last_reason = ""
@@ -1102,14 +1085,12 @@ def _panel_followup_write(
         </div>
         <div class="sticky-write-panel" id="followup-write-panel">
             <div class="sticky-write-inner">
-                {multi_hint}
                 <p class="muted tiny">跟进时间于保存时自动生成 · 每次保存追加一条跟进记录（V2.2 entries）</p>
                 <form class="followup-form" id="followup-form" method="post" enctype="multipart/form-data"
                       action="/overdue/workbench/followups/entries{workbench_qs()}">
                     <input type="hidden" name="redirect_to_workbench" value="1">
                     {product_hidden}
                     {asset_hidden}
-                    {custody_hidden}
                     {bucket_hidden}
                     <input type="hidden" name="data_date" value="{data_date}">
                     <div class="followup-form-grid">
@@ -1217,7 +1198,7 @@ document.addEventListener('DOMContentLoaded', function() {
         sel.addEventListener('change', function() {
             var payload = {
                 trust_product_id: parseInt(this.dataset.product, 10),
-                custody_asset_code: this.dataset.custody,
+                asset_code: this.dataset.assetCode,
                 data_date: this.dataset.date
             };
             payload[this.dataset.field] = this.value;

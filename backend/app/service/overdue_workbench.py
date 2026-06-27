@@ -22,16 +22,28 @@ class OverdueWorkbenchService:
         self._followup = FollowupRepo(engine)
         self._marks = MarksRepo(engine)
 
+    def resolve_asset_code(
+        self,
+        trust_product_id: int,
+        custody_asset_code: str,
+        data_date: str | None = None,
+    ) -> str | None:
+        return self._monitor.resolve_asset_code(
+            trust_product_id, custody_asset_code, data_date
+        )
+
     def get_detail(
         self,
         *,
         trust_product_id: int | None = None,
+        asset_code: str | None = None,
         custody_asset_code: str | None = None,
         trust_asset_id: int | None = None,
         data_date: str | None = None,
     ) -> dict:
         empty = {
             "trust_product_id": trust_product_id,
+            "asset_code": asset_code,
             "custody_asset_code": custody_asset_code,
             "identity_id": None,
             "data_date": data_date,
@@ -49,35 +61,51 @@ class OverdueWorkbenchService:
             "detail": None,
         }
 
-        if trust_product_id is None or not custody_asset_code:
+        resolved_asset = asset_code
+        if not resolved_asset and custody_asset_code and trust_product_id is not None:
+            resolved_asset = self.resolve_asset_code(
+                trust_product_id, custody_asset_code, data_date
+            )
+
+        if trust_product_id is None or not resolved_asset:
             return empty
+
+        empty["asset_code"] = resolved_asset
 
         resolved_date = self._monitor.resolve_latest_data_date(trust_product_id, data_date)
         if resolved_date is None:
             return empty
 
-        issuance_records = self._issuance.fetch_by_product_custody(
-            trust_product_id, custody_asset_code
+        splits_raw = self._monitor.fetch_splits_by_asset_code(
+            trust_product_id, resolved_asset, resolved_date
+        )
+        custody_codes = list(
+            dict.fromkeys(
+                s.get("custody_asset_code")
+                for s in splits_raw
+                if s.get("custody_asset_code")
+            )
+        )
+
+        issuance_records = self._issuance.fetch_for_asset_code(
+            trust_product_id, resolved_asset, custody_codes
         )
         identity_id = issuance_records[0]["id"] if issuance_records else None
 
-        splits_raw = self._monitor.fetch_splits_by_custody(
-            trust_product_id, custody_asset_code, resolved_date
-        )
         if not splits_raw:
             empty["data_date"] = resolved_date
             empty["issuance_records"] = issuance_records
             empty["trust_mark"] = self._marks.fetch_mark(
-                trust_product_id, custody_asset_code, resolved_date
+                trust_product_id, resolved_asset, resolved_date
             )
             empty["ops"] = suggest_ops(self._engine, identity_id)
             return empty
 
-        repayment_total = self._repayment.sum_by_product_custody(
-            trust_product_id, custody_asset_code
+        repayment_total = self._repayment.sum_by_product_asset_code(
+            trust_product_id, resolved_asset
         )
-        repayment_items = self._repayment.fetch_by_product_custody(
-            trust_product_id, custody_asset_code
+        repayment_items = self._repayment.fetch_by_product_asset_code(
+            trust_product_id, resolved_asset
         )
 
         trust_asset_ids = [int(s["trust_asset_id"]) for s in splits_raw]
@@ -177,8 +205,8 @@ class OverdueWorkbenchService:
         if repayment_items:
             recent_repay = repayment_items[0].get("repayment_date")
 
-        case_row = self._followup.fetch_case_by_custody(
-            trust_product_id, custody_asset_code, active_only=False
+        case_row = self._followup.fetch_case_by_asset_code(
+            trust_product_id, resolved_asset, active_only=False
         )
         entry_list: list[dict] = []
         if case_row:
@@ -194,7 +222,7 @@ class OverdueWorkbenchService:
             repayment_items, followup_history, entry_list, attachments_by_entry
         )
         trust_mark = self._marks.fetch_mark(
-            trust_product_id, custody_asset_code, resolved_date
+            trust_product_id, resolved_asset, resolved_date
         )
         ops = suggest_ops(self._engine, identity_id)
 
@@ -222,8 +250,8 @@ class OverdueWorkbenchService:
             "has_check_anomaly": has_check_anomaly,
         }
 
-        followup_case = self._followup.fetch_case_by_custody(
-            trust_product_id, custody_asset_code, active_only=True
+        followup_case = self._followup.fetch_case_by_asset_code(
+            trust_product_id, resolved_asset, active_only=True
         ) or case_row
 
         last_follow_up_at = None
@@ -246,7 +274,8 @@ class OverdueWorkbenchService:
 
         return {
             "trust_product_id": trust_product_id,
-            "custody_asset_code": custody_asset_code,
+            "asset_code": resolved_asset,
+            "custody_asset_codes": custody_codes,
             "identity_id": identity_id,
             "data_date": resolved_date,
             "summary": summary,
@@ -301,13 +330,9 @@ class OverdueWorkbenchService:
             else:
                 bucket = checks_service.calc_risk_level(int(overdue_days or 0), remaining)
 
-            followup_count = sum(
-                self._followup.count_entries_by_custody(pid, c) for c in custodies
-            )
-            primary_custody = custodies[0] if custodies else ac
-            internal_status = self._marks.fetch_mark(
-                pid, primary_custody, resolved_date
-            ).get("internal_status")
+            followup_count = self._followup.count_entries_by_asset_code(pid, ac)
+            mark = self._marks.fetch_mark(pid, ac, resolved_date)
+            internal_status = mark.get("internal_status")
 
             items.append(
                 {
@@ -320,7 +345,6 @@ class OverdueWorkbenchService:
                     "followup_count": followup_count,
                     "internal_status": internal_status,
                     "custody_asset_codes": custodies,
-                    "primary_custody_asset_code": primary_custody,
                 }
             )
         return {"data_date": resolved_date, "items": items}
@@ -340,9 +364,11 @@ class OverdueWorkbenchService:
         followup_status: str | None = None,
     ) -> dict:
         """Build full DTO expected by render.py (asset_code-centric)."""
-        # Resolve effective custody: use provided value, or fall back to asset_code
-        effective_custody = custody_asset_code or asset_code
-        effective_asset_code = asset_code or custody_asset_code
+        resolved_asset = asset_code
+        if not resolved_asset and custody_asset_code and trust_product_id is not None:
+            resolved_asset = self.resolve_asset_code(
+                trust_product_id, custody_asset_code, data_date
+            )
 
         filters = {
             "trust_product_id": trust_product_id,
@@ -353,19 +379,16 @@ class OverdueWorkbenchService:
             "followup_status": followup_status,
         }
 
-        # Get detail DTO using existing method
         old = self.get_detail(
             trust_product_id=trust_product_id,
-            custody_asset_code=effective_custody,
+            asset_code=resolved_asset,
             trust_asset_id=trust_asset_id,
             data_date=data_date,
         )
         resolved_date = old.get("data_date")
 
-        # Determine list scope product id
         list_pid = list_product_id if list_product_scope_explicit else trust_product_id
 
-        # Get asset list (may be slow on large datasets; acceptable for now)
         asset_list = self.get_asset_list(
             trust_product_id=list_pid,
             data_date=resolved_date,
@@ -373,42 +396,18 @@ class OverdueWorkbenchService:
             followup_status=followup_status,
         )
 
-        # Collect custody codes from monitor splits
-        old_queue = old.get("queue") or []
-        custody_codes = list(
-            dict.fromkeys(
-                q.get("custody_asset_code")
-                for q in old_queue
-                if q.get("custody_asset_code")
-            )
-        )
-        primary_custody = custody_codes[0] if custody_codes else effective_custody
+        custody_codes = list(old.get("custody_asset_codes") or [])
 
-        # Fetch issuance records for ALL custody codes under this asset
-        all_issuance: list[dict] = []
-        if trust_product_id and custody_codes:
-            all_issuance = self._issuance.fetch_by_product_custodies(
-                trust_product_id, custody_codes
-            )
-        elif trust_product_id and effective_custody:
-            all_issuance = self._issuance.fetch_by_product_custodies(
-                trust_product_id, [effective_custody]
-            )
-        else:
-            all_issuance = old.get("issuance_records") or []
-
-        # Build nested asset dict for render.py
         asset_dict: dict = {}
-        if effective_asset_code or effective_custody:
+        if resolved_asset:
             asset_dict = {
-                "asset_code": effective_asset_code,
+                "asset_code": resolved_asset,
                 "custody_asset_codes": custody_codes,
-                "primary_custody_asset_code": primary_custody,
                 "selected_trust_asset_id": old.get("selected_asset_id"),
                 "selected_split": old.get("detail"),
                 "summary": old.get("summary"),
                 "checks": old.get("checks"),
-                "issuance_records": all_issuance,
+                "issuance_records": old.get("issuance_records") or [],
                 "repayment": old.get("repayment") or {},
                 "monitor": old.get("monitor") or {},
                 "trust_mark": old.get("trust_mark"),
@@ -419,8 +418,7 @@ class OverdueWorkbenchService:
 
         return {
             "trust_product_id": trust_product_id,
-            "asset_code": effective_asset_code,
-            "primary_custody_asset_code": primary_custody,
+            "asset_code": resolved_asset,
             "custody_asset_codes": custody_codes,
             "identity_id": old.get("identity_id"),
             "data_date": resolved_date,
@@ -442,17 +440,21 @@ class OverdueWorkbenchService:
         items = []
         for row in rows:
             custody = row["custody_asset_code"]
+            asset_code = self.resolve_asset_code(trust_product_id, custody, resolved_date)
+            if not asset_code:
+                continue
             items.append(
                 {
                     "custody_asset_code": custody,
+                    "asset_code": asset_code,
                     "overdue_days": row.get("overdue_days"),
                     "remaining_amount": float(row.get("remaining_amount") or 0),
                     "split_count": row.get("split_count"),
-                    "followup_count": self._followup.count_entries_by_custody(
-                        trust_product_id, custody
+                    "followup_count": self._followup.count_entries_by_asset_code(
+                        trust_product_id, asset_code
                     ),
                     "internal_status": self._marks.fetch_mark(
-                        trust_product_id, custody, resolved_date
+                        trust_product_id, asset_code, resolved_date
                     ).get("internal_status"),
                 }
             )
@@ -493,6 +495,7 @@ def _build_timeline(
                 "title": f"还款 期次 {item.get('period_no') or '—'}",
                 "amount": item.get("actual_repayment_amount"),
                 "source_asset_code": item.get("source_asset_code") or item.get("asset_code"),
+                "custody_asset_code": item.get("custody_asset_code"),
                 "legacy": False,
             }
         )

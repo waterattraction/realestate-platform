@@ -102,16 +102,16 @@ class FollowupRepo:
             ).fetchall()
         return rows_to_dicts(rows)
 
-    def fetch_case_by_custody(
-        self, trust_product_id: int, custody_asset_code: str, active_only: bool = False
+    def fetch_case_by_asset_code(
+        self, trust_product_id: int, asset_code: str, active_only: bool = False
     ) -> dict | None:
         sql = """
-            SELECT id, trust_product_id, custody_asset_code, data_date, status,
+            SELECT id, trust_product_id, asset_code, custody_asset_code, data_date, status,
                    owner_name, opened_at, closed_at, last_follow_up_at,
                    created_by, updated_by, created_at, updated_at
             FROM trust_overdue_followup_cases
             WHERE trust_product_id = :trust_product_id
-              AND custody_asset_code = :custody_asset_code
+              AND asset_code = :asset_code
         """
         if active_only:
             sql += " AND status IN ('open', 'in_progress')"
@@ -121,10 +121,16 @@ class FollowupRepo:
                 text(sql),
                 {
                     "trust_product_id": trust_product_id,
-                    "custody_asset_code": custody_asset_code,
+                    "asset_code": asset_code,
                 },
             ).fetchone()
         return row_to_dict(row)
+
+    def fetch_case_by_custody(
+        self, trust_product_id: int, custody_asset_code: str, active_only: bool = False
+    ) -> dict | None:
+        """Deprecated: resolve via asset_code at service layer."""
+        return None
 
     def fetch_entries_by_case_id(self, case_id: int, limit: int = 200) -> list[dict]:
         with self._engine.connect() as conn:
@@ -144,7 +150,7 @@ class FollowupRepo:
             ).fetchall()
         return rows_to_dicts(rows)
 
-    def count_entries_by_custody(self, trust_product_id: int, custody_asset_code: str) -> int:
+    def count_entries_by_asset_code(self, trust_product_id: int, asset_code: str) -> int:
         with self._engine.connect() as conn:
             row = conn.execute(
                 text(
@@ -153,21 +159,24 @@ class FollowupRepo:
                     FROM trust_overdue_followup_entries e
                     INNER JOIN trust_overdue_followup_cases c ON c.id = e.case_id
                     WHERE c.trust_product_id = :trust_product_id
-                      AND c.custody_asset_code = :custody_asset_code
+                      AND c.asset_code = :asset_code
                     """
                 ),
                 {
                     "trust_product_id": trust_product_id,
-                    "custody_asset_code": custody_asset_code,
+                    "asset_code": asset_code,
                 },
             ).fetchone()
         return int(row.cnt) if row else 0
+
+    def count_entries_by_custody(self, trust_product_id: int, custody_asset_code: str) -> int:
+        return 0
 
     def insert_entry_and_update_case(
         self,
         *,
         trust_product_id: int,
-        custody_asset_code: str,
+        asset_code: str,
         data_date: str,
         status: str,
         owner_name: str | None,
@@ -188,14 +197,14 @@ class FollowupRepo:
                     """
                     SELECT id FROM trust_overdue_followup_cases
                     WHERE trust_product_id = :trust_product_id
-                      AND custody_asset_code = :custody_asset_code
+                      AND asset_code = :asset_code
                       AND status IN ('open', 'in_progress')
                     LIMIT 1
                     """
                 ),
                 {
                     "trust_product_id": trust_product_id,
-                    "custody_asset_code": custody_asset_code,
+                    "asset_code": asset_code,
                 },
             ).fetchone()
 
@@ -204,11 +213,11 @@ class FollowupRepo:
                     text(
                         """
                         INSERT INTO trust_overdue_followup_cases (
-                            trust_product_id, custody_asset_code, data_date,
+                            trust_product_id, asset_code, custody_asset_code, data_date,
                             status, owner_name, opened_at, closed_at,
                             last_follow_up_at, created_by, updated_by
                         ) VALUES (
-                            :trust_product_id, :custody_asset_code, :data_date,
+                            :trust_product_id, :asset_code, :asset_code, :data_date,
                             :status, :owner_name, NOW(),
                             CASE WHEN :status IN ('resolved', 'closed') THEN NOW() ELSE NULL END,
                             NOW(), :created_by, :created_by
@@ -218,7 +227,7 @@ class FollowupRepo:
                     ),
                     {
                         "trust_product_id": trust_product_id,
-                        "custody_asset_code": custody_asset_code,
+                        "asset_code": asset_code,
                         "data_date": data_date,
                         "status": status,
                         "owner_name": owner_name,
