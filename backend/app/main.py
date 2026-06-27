@@ -678,7 +678,8 @@ def fetch_overdue_overview(
                 COUNT(*) FILTER (
                     WHERE {sql_m3_plus_asset_filter("mc.overdue_days", "mc.remaining_amount")}
                 ) AS m3_plus_count,
-                COUNT(*) AS total_asset_count
+                COUNT(*) AS total_asset_count,
+                COUNT(DISTINCT mc.asset_code) AS total_asset_code_count
             FROM monitor_custody mc
             GROUP BY mc.data_date
         """),
@@ -701,6 +702,7 @@ def fetch_overdue_overview(
             "m3_plus_count": 0,
             **kpi,
             "total_asset_count": 0,
+            "total_asset_code_count": 0,
             "reconciliation_failed_count": 0,
             "reconciliation_count_basis": "asset_code",
             "active_followup_count": 0,
@@ -808,6 +810,7 @@ def fetch_overdue_overview(
         "m3_plus_count": m3_plus,
         **kpi,
         "total_asset_count": int(row.total_asset_count),
+        "total_asset_code_count": int(row.total_asset_code_count),
         "reconciliation_failed_count": int(recon_row.failed_count) if recon_row else 0,
         "reconciliation_count_basis": "asset_code",
         "active_followup_count": int(followup_row.cnt) if followup_row else 0,
@@ -1655,7 +1658,7 @@ def render_overdue_html(
             <div class="card">
                 <div class="card-label">资产规模（Exposure）</div>
                 <div class="card-value">{overview["exposure_total"]}</div>
-                <div class="card-hint">ES+M1+M2+M3+M3+ 总风险暴露 · 托管房源 {overview["total_asset_count"]} 户</div>
+                <div class="card-hint">ES+M1+M2+M3+M3+ 总风险暴露 · 资产 {overview["total_asset_code_count"]} 个</div>
             </div>
             <div class="card">
                 <div class="card-label">逾期资产（Overdue）</div>
@@ -2828,7 +2831,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             overview_kpi = fetch_overdue_overview(conn)
             overdue_total = int(overview_kpi.get("overdue_total", 0))
             exposure_total = int(overview_kpi.get("exposure_total", 0))
-            monitor_asset_count = int(overview_kpi.get("total_asset_count", 0))
+            monitor_asset_count = int(overview_kpi.get("total_asset_code_count", 0))
             if overview_kpi.get("data_date"):
                 snapshot_date = str(overview_kpi["data_date"])
             risk_row = conn.execute(text("""
@@ -3279,7 +3282,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                     </div>
                     <div class="mini-kpi-row">
                         <span>监控快照日 <strong>{dash_date(snapshot_date)}</strong></span>
-                        <span>托管资产 <strong>{monitor_count_display}</strong> 户</span>
+                        <span>资产数 <strong>{monitor_count_display}</strong></span>
                     </div>
                 </div>
             </div>
