@@ -152,7 +152,7 @@ CREATE INDEX idx_followup_attachments_entry
     ON trust_overdue_followup_attachments (entry_id);
 ```
 
-文件落盘：`{INGESTION_UPLOAD_DIR}/followups/{case_id}/{entry_id}/`（对齐 `ingestion_upload.save_batch_files` 模式）。
+文件落盘：`{ASSET_UPLOAD_DIR}/followups/{case_id}/{entry_id}/`（对齐 `assetinfo_upload.save_batch_files` 模式）。
 
 ### 2.4 列表 SQL 影响（`/overdue` overview）
 

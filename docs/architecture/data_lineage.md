@@ -39,8 +39,8 @@ Excel 文件
 
 | 阶段 | 组件 | 输入 | 输出 |
 |------|------|------|------|
-| 上传 | `ingestion_upload.py` | `.xlsx` + `trust_product_id` | 管道批次 |
-| 识别 | `ingestion_cleanse.is_monitor_sheet` | 固定列 + alias | 监控 Sheet |
+| 上传 | `assetinfo_upload.py` | `.xlsx` + `trust_product_id` | 管道批次 |
+| 识别 | `assetinfo_cleanse.is_monitor_sheet` | 固定列 + alias | 监控 Sheet |
 | 清洗 | 列名 + `COL_ALIASES`（如 `remaining_amount`） | Excel | `data_date`, amounts |
 | 推导 | `derive_custody_from_source` | `source_asset_code` | `custody_asset_code` |
 | 预检 | scope 冲突 | `(product, data_date, file, sheet)` | overwrite / skip |
@@ -133,7 +133,7 @@ Excel 文件
 | 文档 | 代码 |
 |------|------|
 | `docs/excel/issuance.md` | `issuance_cleanse.py`, `issuance_upload.py` |
-| `docs/excel/monitor.md` | `ingestion_cleanse.py`, `ingestion_upload.py` |
+| `docs/excel/monitor.md` | `assetinfo_cleanse.py`, `assetinfo_upload.py` |
 | `docs/excel/repayment.md` | ingestion + issuance 还款识别 |
 | `docs/canonical/alias_dictionary.md` | `COL_ALIASES` |
 | `docs/data_dictionary/*.md` | `db/modules/*.sql` |

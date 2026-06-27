@@ -4,7 +4,7 @@
 
 | sheet_type | 中文名 | 代码入口 |
 |------------|--------|----------|
-| `repayment_detail` | 还款明细 | `ingestion_upload` |
+| `repayment_detail` | 还款明细 | `assetinfo_upload` |
 
 ## 2. 识别规则
 
@@ -103,5 +103,5 @@
 
 | 文件 | 职责 |
 |------|------|
-| `backend/app/ingestion_upload.py` | `COL_CUSTODY`、`COL_ASSET_CODE`、`precheck_repayment_sheet` |
-| `backend/app/ingestion_cleanse.py` | 清洗、防重 |
+| `backend/app/assetinfo_upload.py` | `COL_CUSTODY`、`COL_ASSET_CODE`、`precheck_repayment_sheet` |
+| `backend/app/assetinfo_cleanse.py` | 清洗、防重 |

@@ -15,7 +15,7 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from app import ingestion_cleanse as cleanse
+from app import assetinfo_cleanse as cleanse
 from app import ingestion_date_rules
 from app import query_utils
 from app.auth import record_ingestion_run, record_sheet_run

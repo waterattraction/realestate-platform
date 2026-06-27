@@ -54,7 +54,7 @@
 
 ## 下游使用模块
 
-- ingestion 管道（TODO：与 `ingestion_cleanse` 实际调用关系）
+- assetinfo 管道（TODO：与 `assetinfo_cleanse` 实际调用关系）
 
 ## 注意事项
 

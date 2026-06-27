@@ -6,7 +6,7 @@ from datetime import date
 
 import pandas as pd
 
-from app import ingestion_cleanse as cleanse
+from app import assetinfo_cleanse as cleanse
 
 COL_ALIASES: dict[str, tuple[str, ...]] = {
     "custody_asset_code": (

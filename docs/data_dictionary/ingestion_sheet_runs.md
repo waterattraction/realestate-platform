@@ -47,7 +47,7 @@
 
 ## 上游来源
 
-- `ingestion_upload.py`
+- `assetinfo_upload.py`
 
 ## 下游使用模块
 

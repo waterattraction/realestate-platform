@@ -8,7 +8,7 @@
 |------|------|
 | 存储类型 | `NUMERIC(18, 2)` |
 | 默认 | 非负（表级 CHECK 或业务校验） |
-| 比较容差 | `0.01`（`ingestion_cleanse.RECONCILIATION_TOLERANCE`） |
+| 比较容差 | `0.01`（`assetinfo_cleanse.RECONCILIATION_TOLERANCE`） |
 | API 展示 | `float` |
 
 ## 比例字段

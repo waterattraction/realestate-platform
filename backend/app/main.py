@@ -19,7 +19,7 @@ from app.api import overdue_workbench
 from app.api import followups
 from app import assetinfo_html as ingestion_html
 from app import ingestion_pipeline
-from app import ingestion_upload
+from app import assetinfo_upload as ingestion_upload
 from app import issuance_html
 from app import issuance_upload
 from app import query_utils
@@ -3921,7 +3921,7 @@ def auth_me(current_user: Annotated[dict, Depends(get_current_user)]):
 
 
 @app.post("/assetinfo/pipeline")
-def ingestion_pipeline_run(
+def assetinfo_pipeline_run(
     current_user: Annotated[dict, Depends(get_current_user)],
     body: dict = Body(default={}),
 ):
@@ -3940,7 +3940,7 @@ def ingestion_pipeline_run(
 
 
 @app.get("/assetinfo/upload", response_class=HTMLResponse)
-def ingestion_upload_page(page_user: Annotated[dict, Depends(get_page_user)]):
+def assetinfo_upload_page(page_user: Annotated[dict, Depends(get_page_user)]):
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         products = [{"id": r.id, "name": r.name} for r in rows]
@@ -3948,7 +3948,7 @@ def ingestion_upload_page(page_user: Annotated[dict, Depends(get_page_user)]):
 
 
 @app.post("/assetinfo/preview")
-async def ingestion_preview(
+async def assetinfo_preview(
     current_user: Annotated[dict, Depends(get_current_user)],
     trust_product_id: int = Form(...),
     files: list[UploadFile] = File(...),
@@ -3960,7 +3960,7 @@ async def ingestion_preview(
 
 
 @app.post("/assetinfo/import")
-def ingestion_import(
+def assetinfo_import(
     current_user: Annotated[dict, Depends(get_current_user)],
     body: dict = Body(...),
 ):
@@ -3981,7 +3981,7 @@ def ingestion_import(
 
 
 @app.get("/assetinfo/repayment-records/data")
-def ingestion_repayment_records_data(
+def assetinfo_repayment_records_data(
     current_user: Annotated[dict, Depends(get_current_user)],
     page: str | None = Query(default=None),
     page_size: str | None = Query(default=None),
@@ -4010,7 +4010,7 @@ def ingestion_repayment_records_data(
 
 
 @app.get("/assetinfo/repayment-records", response_class=HTMLResponse)
-def ingestion_repayment_records_page(
+def assetinfo_repayment_records_page(
     page_user: Annotated[dict, Depends(get_page_user)],
     page: str | None = Query(default=None),
     page_size: str | None = Query(default=None),
@@ -4048,7 +4048,7 @@ def ingestion_repayment_records_page(
 
 
 @app.get("/assetinfo/monitor-records/data")
-def ingestion_monitor_records_data(
+def assetinfo_monitor_records_data(
     current_user: Annotated[dict, Depends(get_current_user)],
     page: str | None = Query(default=None),
     page_size: str | None = Query(default=None),
@@ -4079,7 +4079,7 @@ def ingestion_monitor_records_data(
 
 
 @app.get("/assetinfo/monitor-records", response_class=HTMLResponse)
-def ingestion_monitor_records_page(
+def assetinfo_monitor_records_page(
     page_user: Annotated[dict, Depends(get_page_user)],
     page: str | None = Query(default=None),
     page_size: str | None = Query(default=None),

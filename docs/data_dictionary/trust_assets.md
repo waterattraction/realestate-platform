@@ -63,7 +63,7 @@
 
 - **`asset_code` 是历史兼容字段**：DB 唯一约束仍为 `(trust_product_id, asset_code)`；新逻辑应使用 `custody_asset_code` + `source_asset_code`，**禁止在新功能中继续扩散对 `asset_code` 的依赖**。
 - `source_asset_code` 回填规则：默认等于历史 `asset_code`（分笔号）。
-- `custody_asset_code` 可从分笔号推导：`101127075900-001` → `101127075900`（见 `ingestion_cleanse.derive_custody_from_source`）。
+- `custody_asset_code` 可从分笔号推导：`101127075900-001` → `101127075900`（见 `assetinfo_cleanse.derive_custody_from_source`）。
 - 与发行模块的 `custody_asset_code` 语义一致，但发行记录不强制 FK 到本表。
 
 ## 变更记录

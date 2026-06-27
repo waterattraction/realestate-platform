@@ -51,7 +51,7 @@
 
 ## 维护规则
 
-1. 新 Excel 列名 **必须先登记本表**，再写入 `issuance_cleanse` / `ingestion_cleanse` 的 `COL_ALIASES`
+1. 新 Excel 列名 **必须先登记本表**，再写入 `issuance_cleanse` / `assetinfo_cleanse` 的 `COL_ALIASES`
 2. 同一 Alias 只映射一个 Canonical Field
 3. 废弃 Alias 标「否」，保留追溯
 

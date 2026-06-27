@@ -4,7 +4,7 @@
 
 | sheet_type | 中文名 | 代码入口 |
 |------------|--------|----------|
-| `asset_monitor` | 资产监控快照 | `ingestion_upload` |
+| `asset_monitor` | 资产监控快照 | `assetinfo_upload` |
 
 ## 2. 识别规则
 
@@ -98,5 +98,5 @@
 
 | 文件 | 职责 |
 |------|------|
-| `backend/app/ingestion_upload.py` | `COL_*`、`precheck_monitor_sheet` |
-| `backend/app/ingestion_cleanse.py` | `MONITOR_FIXED_COLUMNS`、清洗 |
+| `backend/app/assetinfo_upload.py` | `COL_*`、`precheck_monitor_sheet` |
+| `backend/app/assetinfo_cleanse.py` | `MONITOR_FIXED_COLUMNS`、清洗 |

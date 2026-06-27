@@ -48,7 +48,7 @@ AI / BI 语义标签
 
 1. 查 [`alias_dictionary.md`](alias_dictionary.md) — 是否已有别名
 2. 查 [`field_dictionary.md`](field_dictionary.md) — 归哪个 Canonical Field
-3. 无则 **先补 canonical**，再改 `issuance_cleanse` / `ingestion_upload`
+3. 无则 **先补 canonical**，再改 `issuance_cleanse` / `assetinfo_upload`
 
 ### 新增 DB 列
 
