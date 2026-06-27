@@ -181,7 +181,7 @@ def render_overdue_workbench_html(
 <div class="page-wrap">
 <div class="container">
     <div class="breadcrumb">
-        <a href="/">主页</a> / <a href="/overdue">逾期管理</a> / 资产逾期跟进工作台
+        <a href="/">首页</a> / <a href="/overdue">逾期管理</a> / 资产逾期跟进工作台
     </div>
     <header class="page-header">
         <div class="header-row">
@@ -227,7 +227,7 @@ def _render_legacy_error_page(dto: dict) -> str:
 <body>
 <div class="page-wrap"><div class="container">
     <div class="breadcrumb">
-        <a href="/">主页</a> / <a href="/overdue">逾期管理</a> / 资产逾期跟进工作台
+        <a href="/">首页</a> / <a href="/overdue">逾期管理</a> / 资产逾期跟进工作台
     </div>
     <header class="page-header">
         <h1>资产逾期跟进工作台</h1>
