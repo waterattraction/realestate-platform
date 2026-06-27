@@ -36,3 +36,4 @@ migrations/20260624_trust_product_aliases.sql
 migrations/20260623_overdue_followup_cases_entries.sql
 migrations/20260625_overdue_followup_attachments.sql
 migrations/20260626_backfill_legacy_followups_to_entries.sql
+migrations/20260627_rename_ingestion_tables_to_assetinfo.sql

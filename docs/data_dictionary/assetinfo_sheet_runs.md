@@ -1,11 +1,11 @@
-# 数据准入 Sheet 记录（`ingestion_sheet_runs`）
+# 资产数据导入 Sheet 记录（`assetinfo_sheet_runs`）
 
 ## 基本信息
 
 | 项 | 值 |
 |----|-----|
 | 表中文名 | 数据准入 Sheet 导入记录 |
-| 表英文名 | `ingestion_sheet_runs` |
+| 表英文名 | `assetinfo_sheet_runs` |
 | Schema 来源 | `db/modules/ingestion/schema_upload_v2.sql` |
 | 主键 | `id` |
 | 业务唯一标识 | scope：`(pipeline_run_id, source_file_name, source_sheet_name)` |
@@ -27,7 +27,7 @@
 | Field | 中文名 | 类型 | 必填 | 来源 | 用途 | 备注 |
 |-------|--------|------|:----:|------|------|------|
 | id | 记录 ID | BIGINT | 是 | 系统 | 主键 | |
-| pipeline_run_id | 父批次 ID | BIGINT | 是 | 系统 | FK → ingestion_pipeline_runs | |
+| pipeline_run_id | 父批次 ID | BIGINT | 是 | 系统 | FK → assetinfo_pipeline_runs | |
 | source_file_name | 来源文件名 | VARCHAR(500) | 是 | Excel | scope | |
 | source_sheet_name | Sheet 名 | VARCHAR(200) | 是 | Excel | scope | |
 | sheet_type | Sheet 类型 | VARCHAR(32) | 是 | 识别逻辑 | monitor / repayment 等 | |
@@ -42,8 +42,8 @@
 
 | 索引名 | 列 | 用途 |
 |--------|-----|------|
-| `idx_ingestion_sheet_runs_pipeline` | `pipeline_run_id` | 反查批次 |
-| `idx_ingestion_sheet_runs_source` | `source_file_name`, `source_sheet_name` | scope 查询 |
+| `idx_assetinfo_sheet_runs_pipeline` | `pipeline_run_id` | 反查批次 |
+| `idx_assetinfo_sheet_runs_source` | `source_file_name`, `source_sheet_name` | scope 查询 |
 
 ## 上游来源
 

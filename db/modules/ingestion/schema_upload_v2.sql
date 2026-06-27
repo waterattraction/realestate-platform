@@ -5,15 +5,15 @@
 -- ============================================================
 
 -- 1. 扩展导入批次审计
-ALTER TABLE ingestion_pipeline_runs
+ALTER TABLE assetinfo_pipeline_runs
     ADD COLUMN IF NOT EXISTS skipped_sheet_count INT NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS failed_sheet_count INT NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS error_message TEXT;
 
 -- 2. Sheet 级审计
-CREATE TABLE IF NOT EXISTS ingestion_sheet_runs (
+CREATE TABLE IF NOT EXISTS assetinfo_sheet_runs (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    pipeline_run_id     BIGINT NOT NULL REFERENCES ingestion_pipeline_runs (id),
+    pipeline_run_id     BIGINT NOT NULL REFERENCES assetinfo_pipeline_runs (id),
     source_file_name    VARCHAR(500) NOT NULL,
     source_sheet_name   VARCHAR(200) NOT NULL,
     sheet_type          VARCHAR(32)  NOT NULL,
@@ -25,11 +25,11 @@ CREATE TABLE IF NOT EXISTS ingestion_sheet_runs (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_ingestion_sheet_runs_pipeline
-    ON ingestion_sheet_runs (pipeline_run_id);
+CREATE INDEX IF NOT EXISTS idx_assetinfo_sheet_runs_pipeline
+    ON assetinfo_sheet_runs (pipeline_run_id);
 
-CREATE INDEX IF NOT EXISTS idx_ingestion_sheet_runs_source
-    ON ingestion_sheet_runs (source_file_name, source_sheet_name);
+CREATE INDEX IF NOT EXISTS idx_assetinfo_sheet_runs_source
+    ON assetinfo_sheet_runs (source_file_name, source_sheet_name);
 
 -- 3. 查询加速索引（非 UNIQUE）
 CREATE INDEX IF NOT EXISTS idx_repayment_source_scope

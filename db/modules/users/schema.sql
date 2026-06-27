@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);
 
--- 每次数据导入管道执行记录（created_by 关联操作人）
-CREATE TABLE IF NOT EXISTS ingestion_pipeline_runs (
+-- 每次资产数据导入管道执行记录（created_by 关联操作人）
+CREATE TABLE IF NOT EXISTS assetinfo_pipeline_runs (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     trust_product_id    BIGINT NOT NULL REFERENCES trust_products (id),
     data_date           DATE,
@@ -29,8 +29,8 @@ CREATE TABLE IF NOT EXISTS ingestion_pipeline_runs (
     upsert_asset_count  INT NOT NULL DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_ingestion_pipeline_runs_created_by
-    ON ingestion_pipeline_runs (created_by, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_assetinfo_pipeline_runs_created_by
+    ON assetinfo_pipeline_runs (created_by, created_at DESC);
 
-CREATE INDEX IF NOT EXISTS idx_ingestion_pipeline_runs_product_date
-    ON ingestion_pipeline_runs (trust_product_id, data_date DESC);
+CREATE INDEX IF NOT EXISTS idx_assetinfo_pipeline_runs_product_date
+    ON assetinfo_pipeline_runs (trust_product_id, data_date DESC);

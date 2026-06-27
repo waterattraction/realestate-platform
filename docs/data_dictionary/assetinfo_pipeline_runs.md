@@ -1,11 +1,11 @@
-# 数据准入导入批次（`ingestion_pipeline_runs`）
+# 资产数据导入批次（`assetinfo_pipeline_runs`）
 
 ## 基本信息
 
 | 项 | 值 |
 |----|-----|
 | 表中文名 | 数据准入导入批次 |
-| 表英文名 | `ingestion_pipeline_runs` |
+| 表英文名 | `assetinfo_pipeline_runs` |
 | Schema 来源 | `db/modules/users/schema.sql` |
 | 主键 | `id` |
 | 业务唯一标识 | 无（审计批次） |
@@ -41,8 +41,8 @@
 
 | 索引名 | 列 | 用途 |
 |--------|-----|------|
-| `idx_ingestion_pipeline_runs_created_by` | `created_by`, `created_at` | 审计查询 |
-| `idx_ingestion_pipeline_runs_product_date` | `trust_product_id`, `data_date` | 按产品查批次 |
+| `idx_assetinfo_pipeline_runs_created_by` | `created_by`, `created_at` | 审计查询 |
+| `idx_assetinfo_pipeline_runs_product_date` | `trust_product_id`, `data_date` | 按产品查批次 |
 
 ## 上游来源
 
@@ -50,7 +50,7 @@
 
 ## 下游使用模块
 
-- `ingestion_sheet_runs`（子记录）
+- `assetinfo_sheet_runs`（子记录）
 - 导入审计查询（TODO：管理页）
 
 ## 注意事项
