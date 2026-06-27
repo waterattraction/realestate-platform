@@ -425,16 +425,18 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
             </div>
         </div>
         <div class="detail-followup">
-            <div class="info-group">
+            <div class="info-group mark-inline-group">
                 <span class="info-label">信托标记</span>
-                <select class="mark-select summary-select" data-field="trust_marker"
+                <span class="mark-display" title="双击修改">{escape(current_marker)}</span>
+                <select class="mark-select summary-select mark-edit-hidden" data-field="trust_marker"
                         data-product="{pid}" data-custody="{escape(str(primary_custody))}" data-date="{escape(str(data_date))}">
                     {marker_opts}
                 </select>
             </div>
-            <div class="info-group">
+            <div class="info-group mark-inline-group">
                 <span class="info-label">跟进状态</span>
-                <select class="mark-select summary-select" data-field="internal_status"
+                <span class="mark-display" title="双击修改">{escape(current_internal)}</span>
+                <select class="mark-select summary-select mark-edit-hidden" data-field="internal_status"
                         data-product="{pid}" data-custody="{escape(str(primary_custody))}" data-date="{escape(str(data_date))}">
                     {status_opts}
                 </select>
@@ -1146,6 +1148,27 @@ document.addEventListener('DOMContentLoaded', function() {
             }).catch(function() { alert('标注保存失败'); });
         });
     });
+
+    // Double-click to edit inline mark fields in Summary Card
+    document.querySelectorAll('.mark-inline-group').forEach(function(group) {
+        var display = group.querySelector('.mark-display');
+        var sel = group.querySelector('.mark-select');
+        if (!display || !sel) return;
+        display.addEventListener('dblclick', function() {
+            display.classList.add('mark-edit-hidden');
+            sel.classList.remove('mark-edit-hidden');
+            sel.focus();
+        });
+        sel.addEventListener('change', function() {
+            display.textContent = this.options[this.selectedIndex].text;
+            sel.classList.add('mark-edit-hidden');
+            display.classList.remove('mark-edit-hidden');
+        });
+        sel.addEventListener('blur', function() {
+            sel.classList.add('mark-edit-hidden');
+            display.classList.remove('mark-edit-hidden');
+        });
+    });
     var form = document.getElementById('followup-form');
     var fileInput = document.getElementById('followup-files');
     var preview = document.getElementById('file-preview');
@@ -1290,6 +1313,13 @@ _WORKBENCH_CSS = """
     }
     .summary-select:focus { border-color: rgba(99,179,237,0.5); }
     .summary-custody-note { font-size: 11px; color: #475569; width: 100%; margin-top: 2px; }
+    .mark-edit-hidden { display: none; }
+    .mark-display {
+        font-size: 12px; color: #e2e8f0; cursor: default;
+        border-bottom: 1px dashed rgba(255,255,255,0.18);
+        padding: 1px 0; user-select: none;
+    }
+    .mark-display:hover { border-bottom-color: rgba(99,179,237,0.55); color: #93c5fd; }
     /* kept for sidebar asset-info card */
     .hero-lbl { display: block; font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.25rem; }
     .sidebar-section + .sidebar-section { border-top: 1px solid rgba(255,255,255,0.08); }
