@@ -256,6 +256,7 @@ def _monitor_custody_ctes(monitor_filter: str) -> str:
                 m.overdue_days,
                 m.last_payment_date,
                 m.max_payment_date,
+                m.asset_code,
                 COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code) AS custody_asset_code,
                 COALESCE(m.source_asset_code, ta.source_asset_code, m.asset_code) AS source_asset_code
             FROM trust_asset_monitor_records m
@@ -463,6 +464,65 @@ def _reconciliation_query_sql(monitor_filter: str, trust_product_id: int | None)
     """
 
 
+def _reconciliation_query_sql_by_asset(monitor_filter: str, trust_product_id: int | None) -> str:
+    """金额核对 SQL —— 按资产主编号（asset_code）粒度聚合，替代 custody_asset_code 版本。"""
+    custody_ctes = _monitor_custody_ctes(monitor_filter)
+    product_filter = (
+        "AND r.trust_product_id = :trust_product_id" if trust_product_id is not None else ""
+    )
+    return f"""
+        WITH {custody_ctes},
+        monitor_asset AS (
+            SELECT
+                d.trust_product_id,
+                d.data_date,
+                d.asset_code,
+                COUNT(DISTINCT d.custody_asset_code) AS custody_count,
+                SUM(d.initial_transfer_amount) AS initial_transfer_amount,
+                SUM(d.repaid_amount)            AS repaid_amount,
+                SUM(d.remaining_amount)         AS remaining_amount,
+                CASE
+                    WHEN SUM(d.remaining_amount) <= {RECONCILIATION_TOLERANCE}
+                    THEN NULL
+                    ELSE MAX(d.overdue_days)
+                END AS overdue_days,
+                MAX(d.last_payment_date) AS last_payment_date,
+                MAX(d.max_payment_date)  AS max_payment_date
+            FROM monitor_enriched d
+            GROUP BY d.trust_product_id, d.data_date, d.asset_code
+        ),
+        repayment_asset AS (
+            SELECT
+                r.trust_product_id,
+                ta.asset_code,
+                COALESCE(SUM(r.actual_repayment_amount), 0) AS repayment_detail_total
+            FROM trust_repayment_detail_records r
+            JOIN trust_assets ta ON ta.id = r.trust_asset_id
+            WHERE 1=1
+            {product_filter}
+            GROUP BY r.trust_product_id, ta.asset_code
+        )
+        SELECT
+            ma.trust_product_id,
+            tp.name AS trust_product_name,
+            ma.data_date,
+            ma.asset_code,
+            ma.custody_count,
+            ma.initial_transfer_amount,
+            ma.repaid_amount,
+            ma.remaining_amount,
+            (ma.remaining_amount - ma.initial_transfer_amount + ma.repaid_amount) AS balance_remainder,
+            COALESCE(ra.repayment_detail_total, 0) AS repayment_detail_total,
+            (ma.repaid_amount - COALESCE(ra.repayment_detail_total, 0)) AS cross_diff
+        FROM monitor_asset ma
+        INNER JOIN trust_products tp ON tp.id = ma.trust_product_id
+        LEFT JOIN repayment_asset ra
+            ON ra.trust_product_id = ma.trust_product_id
+           AND ra.asset_code = ma.asset_code
+        ORDER BY ma.trust_product_id, ma.asset_code
+    """
+
+
 def _reconciliation_item_from_row(row) -> dict:
     balance_remainder = float(row.balance_remainder)
     cross_diff = float(row.cross_diff)
@@ -473,7 +533,8 @@ def _reconciliation_item_from_row(row) -> dict:
         "trust_product_id": row.trust_product_id,
         "trust_product_name": row.trust_product_name,
         "data_date": str(row.data_date),
-        "custody_asset_code": row.custody_asset_code,
+        "asset_code": row.asset_code,
+        "custody_count": int(row.custody_count),
         "initial_transfer_amount": float(row.initial_transfer_amount),
         "repaid_amount": repaid_amount,
         "remaining_amount": float(row.remaining_amount),
@@ -640,7 +701,7 @@ def fetch_overdue_overview(
             **kpi,
             "total_asset_count": 0,
             "reconciliation_failed_count": 0,
-            "reconciliation_count_basis": "custody_asset_code",
+            "reconciliation_count_basis": "asset_code",
             "active_followup_count": 0,
             "top_overdue_by_bucket": empty_buckets,
             **_fetch_overdue_recalc_meta(conn, trust_product_id, data_date),
@@ -660,7 +721,7 @@ def fetch_overdue_overview(
     recon_row = conn.execute(
         text(f"""
             SELECT COUNT(*) AS failed_count
-            FROM ({_reconciliation_query_sql(recon_filter, trust_product_id)}) recon
+            FROM ({_reconciliation_query_sql_by_asset(recon_filter, trust_product_id)}) recon
             WHERE ABS(recon.balance_remainder) > :tolerance
                OR ABS(recon.cross_diff) > :tolerance
         """),
@@ -747,7 +808,7 @@ def fetch_overdue_overview(
         **kpi,
         "total_asset_count": int(row.total_asset_count),
         "reconciliation_failed_count": int(recon_row.failed_count) if recon_row else 0,
-        "reconciliation_count_basis": "custody_asset_code",
+        "reconciliation_count_basis": "asset_code",
         "active_followup_count": int(followup_row.cnt) if followup_row else 0,
         "top_overdue_by_bucket": top_overdue_by_bucket,
         "list_filters": list_filters,
@@ -932,7 +993,7 @@ def fetch_reconciliation(conn, trust_product_id: int | None = None, data_date: s
             recon_filter = "m.data_date = :data_date"
 
     rows = conn.execute(
-        text(_reconciliation_query_sql(recon_filter, trust_product_id)),
+        text(_reconciliation_query_sql_by_asset(recon_filter, trust_product_id)),
         query_params,
     )
 
@@ -1254,17 +1315,19 @@ def _render_custody_es_table_rows(items: list) -> str:
 
 def _render_reconciliation_table_rows(reconciliation: list) -> str:
     if not reconciliation:
-        return '<tr class="recon-empty"><td colspan="9" class="empty">暂无核对记录</td></tr>'
+        return '<tr class="recon-empty"><td colspan="10" class="empty">暂无核对记录</td></tr>'
     rows = ""
     for item in reconciliation:
         bal_ok = item["balance_passed"]
         cross_ok = item["cross_passed"]
+        custody_count = item.get("custody_count", 1)
+        custody_note = f'<span class="recon-custody-count" title="含 {custody_count} 个托管房源号">×{custody_count}</span>' if custody_count > 1 else ""
         rows += f"""
             <tr class="recon-row"
                 data-balance-passed="{"1" if bal_ok else "0"}"
                 data-cross-passed="{"1" if cross_ok else "0"}"
                 data-has-anomaly="{"1" if item["has_anomaly"] else "0"}">
-                <td>{escape(item["custody_asset_code"])}</td>
+                <td>{escape(item["asset_code"])}{custody_note}</td>
                 <td>{escape(item["trust_product_name"])}</td>
                 <td>{fmt_recon_money(item["balance_remainder"], passed=bal_ok)}</td>
                 <td>{fmt_recon_money(item["remaining_amount"], passed=True)}</td>
@@ -1486,6 +1549,7 @@ def render_overdue_html(
         .section-title-row .section-title {{ margin-bottom: 0; }}
         .recon-meta {{ font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }}
         .recon-meta strong {{ color: #e2e8f0; font-weight: 600; }}
+        .recon-custody-count {{ font-size: 0.72rem; color: #64748b; margin-left: 4px; vertical-align: middle; }}
         .api-link {{ font-size: 0.8rem; font-weight: 400; color: #64748b; }}
         {TABLE_SCROLL_CSS}
         th, td {{
@@ -1659,7 +1723,7 @@ def render_overdue_html(
                 <table id="recon-table">
                     <thead>
                         <tr>
-                            <th>托管房源号</th><th>信托产品</th><th>剩余差额</th>
+                            <th>资产主编号</th><th>信托产品</th><th>剩余差额</th>
                             <th>剩余还款金额或剩余应还款金额</th><th>初始受让金额</th><th>已还款金额</th>
                             <th>跨表检查</th><th>监控表已还款金额</th><th>还款明细汇总</th>
                         </tr>
