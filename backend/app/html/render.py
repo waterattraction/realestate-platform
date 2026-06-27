@@ -373,11 +373,23 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         bal_txt = "—"
         cross_txt = "—"
 
-    # Followup tier
-    marker = escape(str(trust_mark.get("trust_marker") or "未标记"))
-    case_status = followup_case.get("status") or ""
-    followup_status = escape(str(FOLLOWUP_STATUS_LABELS.get(case_status, "待跟进")))
+    # Followup tier — editable selects
+    pid = dto.get("trust_product_id")
+    primary_custody = asset.get("primary_custody_asset_code") or ""
+    data_date = dto.get("data_date") or ""
+    current_marker = trust_mark.get("trust_marker") or "未标记"
+    current_internal = trust_mark.get("internal_status") or "待跟进"
     followup_count = len([e for e in timeline if e.get("event_type") == "followup"])
+
+    marker_opts = "".join(
+        f'<option value="{escape(m)}"{" selected" if m == current_marker else ""}>{escape(m)}</option>'
+        for m in TRUST_MARKER_OPTIONS
+    )
+    status_opts = "".join(
+        f'<option value="{escape(s)}"{" selected" if s == current_internal else ""}>{escape(s)}</option>'
+        for s in INTERNAL_STATUS_OPTIONS
+    )
+    custody_note = f'标注挂在托管号 {escape(str(primary_custody or "—"))} 上' if primary_custody else ""
 
     return f"""<div class="card-summary">
         <div class="detail-primary">
@@ -415,16 +427,23 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         <div class="detail-followup">
             <div class="info-group">
                 <span class="info-label">信托标记</span>
-                <span class="info-value-sm">{marker}</span>
+                <select class="mark-select summary-select" data-field="trust_marker"
+                        data-product="{pid}" data-custody="{escape(str(primary_custody))}" data-date="{escape(str(data_date))}">
+                    {marker_opts}
+                </select>
             </div>
             <div class="info-group">
                 <span class="info-label">跟进状态</span>
-                <span class="info-value-sm">{followup_status}</span>
+                <select class="mark-select summary-select" data-field="internal_status"
+                        data-product="{pid}" data-custody="{escape(str(primary_custody))}" data-date="{escape(str(data_date))}">
+                    {status_opts}
+                </select>
             </div>
             <div class="info-group">
                 <span class="info-label">跟进记录数</span>
                 <span class="info-value-sm">{followup_count} 条</span>
             </div>
+            {f'<p class="summary-custody-note">{custody_note}</p>' if custody_note else ''}
         </div>
     </div>"""
 
@@ -664,7 +683,6 @@ def _render_panels(dto: dict, asset: dict, workbench_qs) -> str:
         <div class="grid-issuance">{_panel_issuance(asset.get("issuance_records") or [])}</div>
         <div class="grid-monitor">{_panel_monitor(asset.get("monitor") or {}, asset.get("summary") or {}, dto.get("data_date"))}</div>
         <div class="grid-repay">{_panel_repayment(asset.get("repayment") or {})}</div>
-        <div class="grid-trust">{_panel_trust_mark(asset.get("trust_mark") or {}, dto, asset)}</div>
         <div class="grid-timeline">{_panel_timeline(asset.get("timeline") or [])}</div>
         <div class="grid-ops">{_panel_ops(asset.get("ops"), asset.get("summary") or {})}</div>
     </div>"""
@@ -1215,7 +1233,7 @@ _WORKBENCH_CSS = """
         grid-template-areas:
             "summary   summary   issuance  issuance"
             "monitor   repay     repay     repay"
-            "trust     timeline  timeline  ops";
+            "timeline  timeline  timeline  ops";
         gap: 16px;
         align-items: start;
     }
@@ -1223,7 +1241,6 @@ _WORKBENCH_CSS = """
     .grid-issuance { grid-area: issuance; }
     .grid-monitor  { grid-area: monitor; }
     .grid-repay    { grid-area: repay; }
-    .grid-trust    { grid-area: trust; }
     .grid-timeline { grid-area: timeline; }
     .grid-ops      { grid-area: ops; }
     @media (max-width: 960px) {
@@ -1232,7 +1249,7 @@ _WORKBENCH_CSS = """
             grid-template-areas:
                 "summary" "issuance"
                 "monitor" "repay"
-                "trust" "timeline" "ops";
+                "timeline" "ops";
         }
     }
     /* ── Summary Card (Detail · Level A) ──────────────────────── */
@@ -1264,8 +1281,15 @@ _WORKBENCH_CSS = """
     .check-icon-pass { color: #34d399; font-weight: 600; }
     .check-icon-fail { color: #f87171; font-weight: 600; }
     /* Level 3 — Followup (marker / case status / count) */
-    .detail-followup { display: flex; flex-wrap: wrap; gap: 6px 24px; }
+    .detail-followup { display: flex; flex-wrap: wrap; gap: 6px 24px; align-items: center; }
     .info-warn { color: #f87171; }
+    .summary-select {
+        font-size: 12px; color: #e2e8f0; background: rgba(255,255,255,0.07);
+        border: 1px solid rgba(255,255,255,0.12); border-radius: 5px;
+        padding: 2px 6px; cursor: pointer; outline: none; max-width: 120px;
+    }
+    .summary-select:focus { border-color: rgba(99,179,237,0.5); }
+    .summary-custody-note { font-size: 11px; color: #475569; width: 100%; margin-top: 2px; }
     /* kept for sidebar asset-info card */
     .hero-lbl { display: block; font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.25rem; }
     .sidebar-section + .sidebar-section { border-top: 1px solid rgba(255,255,255,0.08); }
