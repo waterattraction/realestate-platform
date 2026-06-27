@@ -337,19 +337,22 @@ def _fmt_source_asset_code(value) -> str:
 
 
 def _render_summary_card(dto: dict, asset: dict) -> str:
-    """Summary Card only — used as grid-area: summary in detail-grid."""
+    """Summary Card — 3-tier: Primary / Metadata / Followup."""
     summary = asset.get("summary") or {}
     checks = asset.get("checks")
+    trust_mark = asset.get("trust_mark") or {}
+    followup_case = asset.get("followup_case") or {}
+    timeline = asset.get("timeline") or []
+
     asset_code = escape(str(asset.get("asset_code") or dto.get("asset_code") or "—"))
     custodies = asset.get("custody_asset_codes") or dto.get("custody_asset_codes") or []
     custody_str = "、".join(escape(str(c)) for c in custodies) if custodies else "—"
-    product = escape(str(summary.get("trust_product_name") or "—"))
-    split_count = summary.get("split_count", 0)
+
     bucket = summary.get("delinquency_bucket")
     remaining = summary.get("remaining_amount")
     overdue_days = summary.get("overdue_days")
-
     remaining_str = fmt_money(remaining)
+
     if bucket == "ES":
         overdue_str = "提前结清"
         od_cls = ""
@@ -360,13 +363,21 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         overdue_str = "—"
         od_cls = ""
 
+    # Metadata — check results
     if checks:
-        ok = checks["balance_equation"]["passed"] and checks["cross_sheet_repayment"]["passed"]
-        check_status = "通过" if ok else "异常"
-        check_meta_cls = "" if ok else " info-warn"
+        bal = checks["balance_equation"]
+        cross = checks["cross_sheet_repayment"]
+        bal_txt = f'<span class="check-icon-pass">✓</span>' if bal["passed"] else f'<span class="check-icon-fail">⚠ 差额 {fmt_money(bal["diff_amount"])}</span>'
+        cross_txt = f'<span class="check-icon-pass">✓</span>' if cross["passed"] else f'<span class="check-icon-fail">⚠ 差额 {fmt_money(cross["diff_amount"])}</span>'
     else:
-        check_status = "—"
-        check_meta_cls = ""
+        bal_txt = "—"
+        cross_txt = "—"
+
+    # Followup tier
+    marker = escape(str(trust_mark.get("trust_marker") or "未标记"))
+    case_status = followup_case.get("status") or ""
+    followup_status = escape(str(FOLLOWUP_STATUS_LABELS.get(case_status, "待跟进")))
+    followup_count = len([e for e in timeline if e.get("event_type") == "followup"])
 
     return f"""<div class="card-summary">
         <div class="detail-primary">
@@ -379,22 +390,12 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
                 <span class="info-value-xl">{remaining_str}</span>
             </div>
             <div class="info-group">
+                <span class="info-label">M 级</span>
+                <span class="info-value-xl">{fmt_delinquency_badge(bucket)}</span>
+            </div>
+            <div class="info-group">
                 <span class="info-label">逾期天数</span>
                 <span class="info-value-xl{od_cls}">{overdue_str}</span>
-            </div>
-        </div>
-        <div class="detail-secondary">
-            <div class="info-group">
-                <span class="info-label">所属产品</span>
-                <span class="info-value-md">{product}</span>
-            </div>
-            <div class="info-group">
-                <span class="info-label">M 级</span>
-                <span class="info-value-md">{fmt_delinquency_badge(bucket)}</span>
-            </div>
-            <div class="info-group">
-                <span class="info-label">资产分笔数</span>
-                <span class="info-value-md">{split_count} 笔</span>
             </div>
         </div>
         <div class="detail-meta">
@@ -403,8 +404,26 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
                 <span class="info-value-sm">{custody_str}</span>
             </div>
             <div class="info-group">
-                <span class="info-label">核对状态</span>
-                <span class="info-value-sm{check_meta_cls}">{check_status}</span>
+                <span class="info-label">余额等式</span>
+                <span class="info-value-sm">{bal_txt}</span>
+            </div>
+            <div class="info-group">
+                <span class="info-label">跨表已还</span>
+                <span class="info-value-sm">{cross_txt}</span>
+            </div>
+        </div>
+        <div class="detail-followup">
+            <div class="info-group">
+                <span class="info-label">信托标记</span>
+                <span class="info-value-sm">{marker}</span>
+            </div>
+            <div class="info-group">
+                <span class="info-label">跟进状态</span>
+                <span class="info-value-sm">{followup_status}</span>
+            </div>
+            <div class="info-group">
+                <span class="info-label">跟进记录数</span>
+                <span class="info-value-sm">{followup_count} 条</span>
             </div>
         </div>
     </div>"""
@@ -643,7 +662,6 @@ def _render_panels(dto: dict, asset: dict, workbench_qs) -> str:
     return f"""<div class="detail-grid">
         <div class="grid-summary">{_render_summary_card(dto, asset)}</div>
         <div class="grid-issuance">{_panel_issuance(asset.get("issuance_records") or [])}</div>
-        <div class="grid-check">{_render_check_card(asset.get("checks"))}</div>
         <div class="grid-monitor">{_panel_monitor(asset.get("monitor") or {}, asset.get("summary") or {}, dto.get("data_date"))}</div>
         <div class="grid-repay">{_panel_repayment(asset.get("repayment") or {})}</div>
         <div class="grid-trust">{_panel_trust_mark(asset.get("trust_mark") or {}, dto, asset)}</div>
@@ -1134,14 +1152,13 @@ _WORKBENCH_CSS = """
         grid-template-columns: repeat(4, minmax(0, 1fr));
         grid-template-areas:
             "summary   summary   issuance  issuance"
-            "check     monitor   repay     repay"
+            "monitor   repay     repay     repay"
             "trust     timeline  timeline  ops";
         gap: 16px;
         align-items: start;
     }
     .grid-summary  { grid-area: summary; }
     .grid-issuance { grid-area: issuance; }
-    .grid-check    { grid-area: check; }
     .grid-monitor  { grid-area: monitor; }
     .grid-repay    { grid-area: repay; }
     .grid-trust    { grid-area: trust; }
@@ -1152,7 +1169,7 @@ _WORKBENCH_CSS = """
             grid-template-columns: 1fr;
             grid-template-areas:
                 "summary" "issuance"
-                "check" "monitor" "repay"
+                "monitor" "repay"
                 "trust" "timeline" "ops";
         }
     }
@@ -1174,34 +1191,19 @@ _WORKBENCH_CSS = """
         font-size: 22px; font-weight: 700; color: #f8fafc;
         font-variant-numeric: tabular-nums; line-height: 1.2;
     }
-    /* Level 2 — Business (product / M级 / split count) */
-    .detail-secondary {
-        display: flex; flex-wrap: wrap; gap: 8px 24px;
+    .info-value-md { font-size: 15px; font-weight: 600; color: #e2e8f0; line-height: 1.3; }
+    /* Level 2 — Metadata (custody / check results) */
+    .detail-meta {
+        display: flex; flex-wrap: wrap; gap: 6px 24px;
         padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.06);
         margin-bottom: 10px;
     }
-    .info-value-md { font-size: 15px; font-weight: 600; color: #e2e8f0; line-height: 1.3; }
-    /* Level 3 — Metadata (custody code / check status) */
-    .detail-meta { display: flex; flex-wrap: wrap; gap: 6px 24px; }
     .info-value-sm { font-size: 13px; color: #94a3b8; line-height: 1.3; }
+    .check-icon-pass { color: #34d399; font-weight: 600; }
+    .check-icon-fail { color: #f87171; font-weight: 600; }
+    /* Level 3 — Followup (marker / case status / count) */
+    .detail-followup { display: flex; flex-wrap: wrap; gap: 6px 24px; }
     .info-warn { color: #f87171; }
-    /* ── Check Card (Detail · Level B) ───────────────────────── */
-    .card-check {
-        background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 10px; padding: 12px 16px;
-    }
-    .card-check-alert { border-color: rgba(248,113,113,0.35); background: rgba(239,68,68,0.05); }
-    .card-check-title {
-        font-size: 11px; font-weight: 600; color: #64748b;
-        text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px;
-    }
-    .check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 4px; }
-    .check-label { color: #94a3b8; min-width: 60px; }
-    .check-result { font-weight: 600; }
-    .check-pass { color: #34d399; }
-    .check-fail { color: #f87171; }
-    .check-diff { color: #64748b; font-size: 12px; font-variant-numeric: tabular-nums; }
-    .check-basis { margin-top: 6px; }
     /* kept for sidebar asset-info card */
     .hero-lbl { display: block; font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.25rem; }
     .sidebar-section + .sidebar-section { border-top: 1px solid rgba(255,255,255,0.08); }
