@@ -331,7 +331,7 @@ def _filter_query_string(filters: dict, page: int | None = None) -> str:
 RECORD_COLUMN_LABELS: dict[str, str] = {
     "custody_asset_code": "托管房源号",
     "source_asset_code": "资产分笔号",
-    "asset_code": "asset_code(兼容)",
+    "asset_code": "资产主编号",
     "trust_product_name": "信托产品",
     "trust_product_id": "产品ID",
     "data_date": "数据日期",
@@ -356,9 +356,9 @@ RECORD_COLUMN_LABELS: dict[str, str] = {
 
 REPAYMENT_COLUMN_ORDER: tuple[str, ...] = (
     "trust_product_name",
+    "asset_code",
     "custody_asset_code",
     "source_asset_code",
-    "asset_code",
     "data_date",
     "repayment_date",
     "period_no",
@@ -374,9 +374,9 @@ REPAYMENT_COLUMN_ORDER: tuple[str, ...] = (
 
 MONITOR_COLUMN_ORDER: tuple[str, ...] = (
     "trust_product_name",
+    "asset_code",
     "custody_asset_code",
     "source_asset_code",
-    "asset_code",
     "data_date",
     "overdue_days",
     "initial_transfer_amount",
@@ -566,6 +566,7 @@ def render_records_page(
 
     for key, label in [
         ("data_date", "数据日期"),
+        ("asset_code", "资产主编号"),
         ("custody_asset_code", "托管房源号"),
         ("source_asset_code", "资产分笔号"),
         ("source_file_name", "文件名"),
@@ -575,16 +576,6 @@ def render_records_page(
         filter_inputs += f"""
         <div><label>{label}</label>
         <input name="{key}" value="{val}" form="f"></div>"""
-
-    compat_asset = escape(str(filters.get("asset_code") or ""))
-    filter_inputs += f"""
-        <details class="compat-filters">
-            <summary>高级筛选（兼容字段）</summary>
-            <div style="margin-top:0.5rem">
-                <label>asset_code（兼容，等同资产分笔号）</label>
-                <input name="asset_code" value="{compat_asset}" form="f" style="width:100%">
-            </div>
-        </details>"""
 
     snapshot_banner = ""
     if record_type == "monitor":
