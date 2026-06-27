@@ -3,7 +3,7 @@
 -- 信托产品初始化 — 导入 V2 上线前
 -- 依赖：asset_pools.id = 1 已存在（seed.sql 默认创建）
 -- 幂等：按 code / name 检查，可重复执行
--- 执行顺序：… → ingestion_upload_v2_schema.sql → 本文件
+-- 执行顺序：… → assetinfo_upload_v2_schema.sql → 本文件
 -- ============================================================
 
 BEGIN;

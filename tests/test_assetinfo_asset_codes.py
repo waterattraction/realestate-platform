@@ -13,7 +13,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
-from app import ingestion_upload as iu
+from app import assetinfo_upload as iu
 
 
 def _repayment_row(
@@ -283,7 +283,7 @@ class TestAssetCodeGlobalPolicy(unittest.TestCase):
 
     def test_upsert_trust_asset_does_not_overwrite_asset_code(self):
         path = os.path.join(
-            os.path.dirname(__file__), "..", "backend", "app", "ingestion_upload.py",
+            os.path.dirname(__file__), "..", "backend", "app", "assetinfo_upload.py",
         )
         with open(path, encoding="utf-8") as f:
             content = f.read()

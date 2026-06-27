@@ -45,7 +45,7 @@ Excel 文件
 | 推导 | `derive_custody_from_source` | `source_asset_code` | `custody_asset_code` |
 | 预检 | scope 冲突 | `(product, data_date, file, sheet)` | overwrite / skip |
 | 导入 | UPSERT | 行 | `trust_assets`, `trust_asset_monitor_records` |
-| 审计 | `ingestion_pipeline_runs` | 批次 | status |
+| 审计 | `assetinfo_pipeline_runs` | 批次 | status |
 | 下游 | 托管列表、风险 Hub | `data_date` 最新快照 | HTML + SQL 聚合 |
 
 **时间维度**：`data_date`（统计日期）。
@@ -56,7 +56,7 @@ Excel 文件
 
 | 阶段 | 组件 | 输入 | 输出 |
 |------|------|------|------|
-| 识别 | `issuance_cleanse.is_repayment_like_sheet` 或 ingestion 路径 | 含「当期实际还款金额」等 | 还款 Sheet |
+| 识别 | `issuance_cleanse.is_repayment_like_sheet` 或 assetinfo 路径 | 含「当期实际还款金额」等 | 还款 Sheet |
 | 清洗 | Excel 列 | `repayment_date`, `actual_repayment_amount`, `period_no` | Canonical 行 |
 | 关联 | `trust_asset_id` lookup | `custody_asset_code` / `source_asset_code` | FK |
 | 导入 | INSERT + scope 索引 | 行 | `trust_repayment_detail_records` |
@@ -134,7 +134,7 @@ Excel 文件
 |------|------|
 | `docs/excel/issuance.md` | `issuance_cleanse.py`, `issuance_upload.py` |
 | `docs/excel/monitor.md` | `assetinfo_cleanse.py`, `assetinfo_upload.py` |
-| `docs/excel/repayment.md` | ingestion + issuance 还款识别 |
+| `docs/excel/repayment.md` | assetinfo + issuance 还款识别 |
 | `docs/canonical/alias_dictionary.md` | `COL_ALIASES` |
 | `docs/data_dictionary/*.md` | `db/modules/*.sql` |
 

@@ -6,7 +6,7 @@
 |----|-----|
 | 表中文名 | 信托底层房源 |
 | 表英文名 | `trust_assets` |
-| Schema 来源 | `db/modules/overdue/schema.sql` + `db/modules/ingestion/schema.sql` + `db/migrations/20250302_asset_code_semantics_v2.sql` |
+| Schema 来源 | `db/modules/overdue/schema.sql` + `db/modules/assetinfo/schema.sql` + `db/migrations/20250302_asset_code_semantics_v2.sql` |
 | 主键 | `id` |
 | 业务唯一标识 | `(trust_product_id, asset_code)` UNIQUE；另有 `(trust_product_id, custody_asset_code)` 部分唯一 |
 
@@ -47,7 +47,7 @@
 
 ## 上游来源
 
-- 监控/还款 Excel 导入（`/ingestion`）
+- 监控/还款 Excel 导入（`/assetinfo`）
 - 种子：`db/modules/overdue/seed.sql`
 
 ## 下游使用模块
@@ -71,5 +71,5 @@
 | 日期 | 变更 | Migration |
 |------|------|-----------|
 | — | 基线表 | `db/modules/overdue/schema.sql` |
-| — | 新增 custody | `db/modules/ingestion/schema.sql` |
+| — | 新增 custody | `db/modules/assetinfo/schema.sql` |
 | — | 新增 source_asset_code | `db/migrations/20250302_asset_code_semantics_v2.sql` |

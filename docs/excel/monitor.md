@@ -86,7 +86,7 @@
 | 剩余还款金额 | 剩余应还款余额 | `remaining_amount` | 金额 | 是 | `to_numeric` | |
 | 当前信托计划（已发行） | — | 过滤用 alias | 字符串 | 否 | `filter_alias` | |
 
-配置种子：`db/modules/ingestion/seed_mapping.sql`（Sheet `2更新的资产数据表`）
+配置种子：`db/modules/assetinfo/seed_mapping.sql`（Sheet `2更新的资产数据表`）
 
 ## 10. 示例值
 

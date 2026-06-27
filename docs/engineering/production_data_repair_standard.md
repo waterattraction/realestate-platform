@@ -181,7 +181,7 @@ _ops_backup_<repair_name>
 
 ## 8. 单元测试要求
 
-- 若 Repair 伴随**程序防复发**，必须有单元测试（如 `tests/test_ingestion_asset_codes.py`）
+- 若 Repair 伴随**程序防复发**，必须有单元测试（如 `tests/test_assetinfo_asset_codes.py`）
 - 测试须覆盖：根因场景、预检/匹配逻辑、回归用例
 - CI 通过 `scripts/checks/check_repair_package.py` 校验 Repair 包完整性
 
@@ -224,7 +224,7 @@ docs/engineering/
 | Repair 脚本 | [`db/ops/fixes/product3_repay_0612_custody/repair.py`](../../db/ops/fixes/product3_repay_0612_custody/repair.py) |
 | 入口 shim | [`scripts/ops/fix_product3_repay_0612_custody.py`](../../scripts/ops/fix_product3_repay_0612_custody.py) |
 | Check SQL | [`db/ops/fixes/product3_repay_0612_custody/check.sql`](../../db/ops/fixes/product3_repay_0612_custody/check.sql) |
-| 单元测试 | [`tests/test_ingestion_asset_codes.py`](../../tests/test_ingestion_asset_codes.py) |
+| 单元测试 | [`tests/test_assetinfo_asset_codes.py`](../../tests/test_assetinfo_asset_codes.py) |
 
 **已验收结果摘要**（2026-06-25）：71 行 UPDATE；111/111 编码对齐；跨表核对 79→0 失败；严格倍数基线 301/407 不变。
 

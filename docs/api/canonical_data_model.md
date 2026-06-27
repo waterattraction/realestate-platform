@@ -325,7 +325,7 @@
 |----|-----|
 | API 名称 | `ImportRun` |
 | 中文名 | 导入批次 |
-| 物理表 | `ingestion_pipeline_runs` / `issuance_import_runs` |
+| 物理表 | `assetinfo_pipeline_runs` / `issuance_import_runs` |
 | 主键 | `id` → `importRunId` |
 
 ### 核心字段
@@ -333,7 +333,7 @@
 | API 字段 | DB 来源 | 含义 |
 |----------|---------|------|
 | `importRunId` | `id` | 批次 ID |
-| `module` | 逻辑 | `ingestion` / `issuance` |
+| `module` | 逻辑 | `assetinfo` / `issuance` |
 | `trustProductId` | `trust_product_id` | 产品 |
 | `status` | `status` | pending / running / completed / failed |
 | `createdAt` | `created_at` | 创建时间 |

@@ -21,7 +21,7 @@
 - `当期实际还款金额`
 - `还款日期` / `当期还款日期` → `repayment_date`
 
-**日期：** 优先从 Sheet 名/产品名解析 fallback date（`ingestion_date_rules`）
+**日期：** 优先从 Sheet 名/产品名解析 fallback date（`assetinfo_date_rules`）
 
 ## 3. 必填列
 
@@ -91,7 +91,7 @@
 | 还款期数 | — | `period_no` | 字符串 | 否 | `clean_period_no` | — |
 | （导入逻辑写入） | — | `data_date` | DATE | 是 | 同 repayment_date | 遗留字段 |
 
-配置种子：`db/modules/ingestion/seed_mapping.sql`（Sheet `1全量还款明细汇总`）
+配置种子：`db/modules/assetinfo/seed_mapping.sql`（Sheet `1全量还款明细汇总`）
 
 ## 10. 示例值
 

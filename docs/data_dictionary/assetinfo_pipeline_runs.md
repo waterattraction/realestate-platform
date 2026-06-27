@@ -12,7 +12,7 @@
 
 ## 表用途
 
-记录 `/ingestion` 模块一次 Excel 上传与导入的批次审计：监控、还款等 Sheet 的汇总统计。
+记录 `/assetinfo` 模块一次 Excel 上传与导入的批次审计：监控、还款等 Sheet 的汇总统计。
 
 ## 生命周期
 
@@ -55,7 +55,7 @@
 
 ## 注意事项
 
-- Canonical 对象 `ImportRun`（ingestion 变体）。
+- Canonical 对象 `ImportRun`（assetinfo 变体）。
 - 无 `status` 列于基线 schema；状态可能由子表推断（TODO 与代码核对）。
 
 ## 变更记录

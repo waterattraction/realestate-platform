@@ -16,7 +16,7 @@
 
 ## import action
 
-导入 Sheet 行级动作（`issuance_import_sheet_runs.action` / ingestion 同类字段）。
+导入 Sheet 行级动作（`issuance_import_sheet_runs.action` / assetinfo 同类字段）。
 
 | Value | 中文 | 含义 |
 |-------|------|------|

@@ -16,9 +16,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from app import assetinfo_cleanse as cleanse
-from app import ingestion_date_rules
+from app import assetinfo_date_rules
 from app import query_utils
-from app.auth import record_ingestion_run, record_sheet_run
+from app.auth import record_assetinfo_run, record_sheet_run
 
 RECONCILIATION_TOLERANCE = cleanse.RECONCILIATION_TOLERANCE
 
@@ -808,7 +808,7 @@ def _resolve_monitor_batch_date(
     """确定监控快照 data_date；优先文件名/Sheet 规则，避免按行统计日期众数误删行。"""
     warnings: list[str] = []
     if file_name and product_name:
-        parsed = ingestion_date_rules.parse_monitor_snapshot_date(
+        parsed = assetinfo_date_rules.parse_monitor_snapshot_date(
             file_name, sheet_name or "", product_name,
         )
         if parsed.ok and parsed.parsed_date:
@@ -982,7 +982,7 @@ def precheck_repayment_sheet(
     df: pd.DataFrame,
 ) -> dict[str, Any]:
     mismatches = _excel_custody_source_mismatch_rows(df)
-    parsed = ingestion_date_rules.parse_sheet_repayment_date(sheet_name, product_name)
+    parsed = assetinfo_date_rules.parse_sheet_repayment_date(sheet_name, product_name)
     sheet_fallback = parsed.parsed_date if parsed.ok else None
 
     result: dict[str, Any] = {
@@ -1276,7 +1276,7 @@ def _import_repayment_sheet(
     if sheet_err:
         raise HTTPException(status_code=400, detail=sheet_err)
 
-    parsed = ingestion_date_rules.parse_sheet_repayment_date(sheet_name, product_name)
+    parsed = assetinfo_date_rules.parse_sheet_repayment_date(sheet_name, product_name)
     if not parsed.ok or not parsed.parsed_date:
         raise HTTPException(status_code=400, detail=parsed.error or "日期解析失败")
 
@@ -1628,7 +1628,7 @@ def run_import(
     if failed:
         error_message = f"{failed} 个 Sheet 导入失败"
 
-    run_id, created_at = record_ingestion_run(
+    run_id, created_at = record_assetinfo_run(
         conn,
         trust_product_id=trust_product_id,
         data_date=pipeline_data_date,

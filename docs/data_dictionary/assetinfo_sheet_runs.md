@@ -6,13 +6,13 @@
 |----|-----|
 | 表中文名 | 数据准入 Sheet 导入记录 |
 | 表英文名 | `assetinfo_sheet_runs` |
-| Schema 来源 | `db/modules/ingestion/schema_upload_v2.sql` |
+| Schema 来源 | `db/modules/assetinfo/schema_upload_v2.sql` |
 | 主键 | `id` |
 | 业务唯一标识 | scope：`(pipeline_run_id, source_file_name, source_sheet_name)` |
 
 ## 表用途
 
-记录 ingestion 批次内每个 Sheet 的类型、行数、action（import/overwrite/skip 等）及消息。
+记录 assetinfo 批次内每个 Sheet 的类型、行数、action（import/overwrite/skip 等）及消息。
 
 ## 生命周期
 
@@ -55,11 +55,11 @@
 
 ## 注意事项
 
-- Canonical 对象 `ImportSheetRun`（ingestion 变体）。
+- Canonical 对象 `ImportSheetRun`（assetinfo 变体）。
 - `action` 枚举见 `docs/canonical/enumerations.md`。
 
 ## 变更记录
 
 | 日期 | 变更 | Migration |
 |------|------|-----------|
-| — | V2 上传 | `db/modules/ingestion/schema_upload_v2.sql` |
+| — | V2 上传 | `db/modules/assetinfo/schema_upload_v2.sql` |

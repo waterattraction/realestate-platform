@@ -20,8 +20,8 @@
 | [issuance_import_sheet_runs.md](issuance_import_sheet_runs.md) | `issuance_import_sheet_runs` | 发行审计 |
 | [monitor_records.md](monitor_records.md) | `trust_asset_monitor_records` | 监控 |
 | [repayment_records.md](repayment_records.md) | `trust_repayment_detail_records` | 还款 |
-| [ingestion_pipeline_runs.md](ingestion_pipeline_runs.md) | `ingestion_pipeline_runs` | 导入审计 |
-| [ingestion_sheet_runs.md](ingestion_sheet_runs.md) | `ingestion_sheet_runs` | 导入审计 |
+| [assetinfo_pipeline_runs.md](assetinfo_pipeline_runs.md) | `assetinfo_pipeline_runs` | 导入审计 |
+| [assetinfo_sheet_runs.md](assetinfo_sheet_runs.md) | `assetinfo_sheet_runs` | 导入审计 |
 | [data_mapping_config.md](data_mapping_config.md) | `data_mapping_config` | 导入配置 |
 | [trust_product_aliases.md](trust_product_aliases.md) | `trust_product_aliases` | 发行 |
 | [trust_asset_trust_marks.md](trust_asset_trust_marks.md) | `trust_asset_trust_marks` | 托管标记 |

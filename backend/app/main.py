@@ -17,9 +17,9 @@ from app.api import asset_workbench
 from app.api import overdue_ops
 from app.api import overdue_workbench
 from app.api import followups
-from app import assetinfo_html as ingestion_html
-from app import ingestion_pipeline
-from app import assetinfo_upload as ingestion_upload
+from app import assetinfo_html
+from app import assetinfo_pipeline
+from app import assetinfo_upload
 from app import issuance_html
 from app import issuance_upload
 from app import query_utils
@@ -3261,10 +3261,10 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                         <span>发行明细 <strong>{issuance_count_display}</strong> 条</span>
                     </div>
                 </div>
-                <div class="ops-panel" aria-labelledby="sec-ingestion">
+                <div class="ops-panel" aria-labelledby="sec-assetinfo">
                     <div class="section-title">
                         <span class="section-num">2</span>
-                        <h2 id="sec-ingestion">资产情况更新</h2>
+                        <h2 id="sec-assetinfo">资产情况更新</h2>
                     </div>
                     <div class="op-row">
                         <a href="/assetinfo/upload" class="op-chip op-blue">
@@ -3929,7 +3929,7 @@ def assetinfo_pipeline_run(
     if trust_product_id is None:
         raise HTTPException(status_code=400, detail="trust_product_id is required")
     with engine.connect() as conn:
-        return ingestion_pipeline.run_ingestion_pipeline(
+        return assetinfo_pipeline.run_assetinfo_pipeline(
             conn,
             trust_product_id=int(trust_product_id),
             trust_plan_alias=body.get("trust_plan_alias"),
@@ -3944,7 +3944,7 @@ def assetinfo_upload_page(page_user: Annotated[dict, Depends(get_page_user)]):
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         products = [{"id": r.id, "name": r.name} for r in rows]
-    return HTMLResponse(content=ingestion_html.render_upload_page(products, page_user["username"]))
+    return HTMLResponse(content=assetinfo_html.render_upload_page(products, page_user["username"]))
 
 
 @app.post("/assetinfo/preview")
@@ -3954,9 +3954,9 @@ async def assetinfo_preview(
     files: list[UploadFile] = File(...),
 ):
     batch_uuid = str(uuid.uuid4())
-    saved = await ingestion_upload.save_batch_files(batch_uuid, files)
+    saved = await assetinfo_upload.save_batch_files(batch_uuid, files)
     with engine.connect() as conn:
-        return ingestion_upload.run_preview(conn, trust_product_id, batch_uuid, saved)
+        return assetinfo_upload.run_preview(conn, trust_product_id, batch_uuid, saved)
 
 
 @app.post("/assetinfo/import")
@@ -3969,7 +3969,7 @@ def assetinfo_import(
     if not batch_uuid or trust_product_id is None:
         raise HTTPException(status_code=400, detail="batch_uuid/file_id and trust_product_id required")
     with engine.connect() as conn:
-        return ingestion_upload.run_import(
+        return assetinfo_upload.run_import(
             conn,
             batch_uuid=batch_uuid,
             trust_product_id=int(trust_product_id),
@@ -3994,7 +3994,7 @@ def assetinfo_repayment_records_data(
     source_sheet_name: str | None = Query(default=None),
 ):
     page_no, page_sz = query_utils.parse_pagination(page, page_size)
-    filters = ingestion_upload.build_record_filters(
+    filters = assetinfo_upload.build_record_filters(
         trust_product_id=trust_product_id,
         data_date=data_date,
         asset_code=asset_code,
@@ -4004,7 +4004,7 @@ def assetinfo_repayment_records_data(
         source_sheet_name=source_sheet_name,
     )
     with engine.connect() as conn:
-        return ingestion_upload.fetch_paginated_records(
+        return assetinfo_upload.fetch_paginated_records(
             conn, "repayment", page_no, page_sz, filters,
         )
 
@@ -4023,7 +4023,7 @@ def assetinfo_repayment_records_page(
     source_sheet_name: str | None = Query(default=None),
 ):
     page_no, page_sz = query_utils.parse_pagination(page, page_size)
-    filters = ingestion_upload.build_record_filters(
+    filters = assetinfo_upload.build_record_filters(
         trust_product_id=trust_product_id,
         data_date=data_date,
         asset_code=asset_code,
@@ -4033,14 +4033,14 @@ def assetinfo_repayment_records_page(
         source_sheet_name=source_sheet_name,
     )
     with engine.connect() as conn:
-        data = ingestion_upload.fetch_paginated_records(
+        data = assetinfo_upload.fetch_paginated_records(
             conn, "repayment", page_no, page_sz, filters,
         )
         products = [
             {"id": r.id, "name": r.name}
             for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         ]
-    return HTMLResponse(content=ingestion_html.render_records_page(
+    return HTMLResponse(content=assetinfo_html.render_records_page(
         "还款明细数据", "/assetinfo/repayment-records/data", filters, data, products,
         page_user["username"],
         record_type="repayment",
@@ -4062,7 +4062,7 @@ def assetinfo_monitor_records_data(
     include_history: str | None = Query(default=None),
 ):
     page_no, page_sz = query_utils.parse_pagination(page, page_size)
-    filters = ingestion_upload.build_record_filters(
+    filters = assetinfo_upload.build_record_filters(
         trust_product_id=trust_product_id,
         data_date=data_date,
         asset_code=asset_code,
@@ -4073,7 +4073,7 @@ def assetinfo_monitor_records_data(
         include_history=include_history,
     )
     with engine.connect() as conn:
-        return ingestion_upload.fetch_paginated_records(
+        return assetinfo_upload.fetch_paginated_records(
             conn, "monitor", page_no, page_sz, filters,
         )
 
@@ -4093,7 +4093,7 @@ def assetinfo_monitor_records_page(
     include_history: str | None = Query(default=None),
 ):
     page_no, page_sz = query_utils.parse_pagination(page, page_size)
-    filters = ingestion_upload.build_record_filters(
+    filters = assetinfo_upload.build_record_filters(
         trust_product_id=trust_product_id,
         data_date=data_date,
         asset_code=asset_code,
@@ -4104,14 +4104,14 @@ def assetinfo_monitor_records_page(
         include_history=include_history,
     )
     with engine.connect() as conn:
-        data = ingestion_upload.fetch_paginated_records(
+        data = assetinfo_upload.fetch_paginated_records(
             conn, "monitor", page_no, page_sz, filters,
         )
         products = [
             {"id": r.id, "name": r.name}
             for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         ]
-    return HTMLResponse(content=ingestion_html.render_records_page(
+    return HTMLResponse(content=assetinfo_html.render_records_page(
         "资产监控数据", "/assetinfo/monitor-records/data", filters, data, products,
         page_user["username"],
         record_type="monitor",

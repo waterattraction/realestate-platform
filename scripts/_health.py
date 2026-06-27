@@ -229,7 +229,7 @@ def check_excel_aliases() -> HealthReport:
 
     issuance_text = read_text(issuance_doc)
     issuance_aliases = extract_col_aliases(repo_path("backend", "app", "issuance_cleanse.py"))
-    ingestion_aliases = extract_col_aliases(repo_path("backend", "app", "ingestion_cleanse.py"))
+    assetinfo_aliases = extract_col_aliases(repo_path("backend", "app", "assetinfo_cleanse.py"))
 
     gaps: list[str] = []
     total_checks = 0
@@ -250,16 +250,16 @@ def check_excel_aliases() -> HealthReport:
 
     if monitor_doc.is_file():
         monitor_text = read_text(monitor_doc)
-        for field, names in ingestion_aliases.items():
+        for field, names in assetinfo_aliases.items():
             total_checks += 1
             if f"`{field}`" not in monitor_text:
-                gaps.append(f"ingestion.{field}: field not in monitor.md")
+                gaps.append(f"assetinfo.{field}: field not in monitor.md")
             else:
                 passed += 1
             for alias in names:
                 total_checks += 1
                 if alias not in monitor_text:
-                    gaps.append(f"ingestion.{field}: alias「{alias}」not in monitor.md")
+                    gaps.append(f"assetinfo.{field}: alias「{alias}」not in monitor.md")
                 else:
                     passed += 1
 

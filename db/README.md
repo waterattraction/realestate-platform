@@ -26,7 +26,7 @@ db/
 ├── modules/
 │   ├── overdue/
 │   ├── risk/
-│   ├── ingestion/
+│   ├── assetinfo/
 │   ├── issuance/
 │   ├── users/
 │   └── trust/
@@ -162,7 +162,7 @@ YYYYMMDD_<short_description>.sql
 当前依赖链：
 
 ```text
-baseline → overdue → risk → ingestion → users → upload_v2
+baseline → overdue → risk → assetinfo → users → upload_v2
   → trust seed → mapping seed → issuance → trust marks
   → migrations（audit → semantics → overdue_recalc → indexes → issuance_type → aliases）
 ```

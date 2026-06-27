@@ -73,7 +73,7 @@ sudo /opt/realestate-platform/deploy/scripts/enable-https-jiakubo.sh
 1. 检测外网 80 是否可达  
 2. 申请 Let's Encrypt 证书  
 3. 部署 HTTPS Nginx  
-4. 为 `/ingestion/` 配置 Basic Auth  
+4. 为 `/assetinfo/` 配置 Basic Auth  
 5. 启用 UFW（仅放行 22/80/443）
 
 ---
@@ -85,18 +85,18 @@ sudo /opt/realestate-platform/deploy/scripts/enable-https-jiakubo.sh
 | 平台首页 | https://jiakubo.com/ |
 | 逾期工作台 | https://jiakubo.com/overdue/workbench |
 | 风控中台 | https://jiakubo.com/risk/workbench |
-| 数据导入 API | https://jiakubo.com/ingestion/pipeline（需 Basic Auth） |
+| 资产数据导入 API | https://jiakubo.com/assetinfo/pipeline（需 Basic Auth） |
 
 导入接口凭据（脚本运行后）：
 
 ```bash
-sudo cat /root/.ingestion-htpasswd-credentials
+sudo cat /root/.assetinfo-htpasswd-credentials
 ```
 
 调用示例：
 
 ```bash
-curl -u ingestion:你的密码 -X POST https://jiakubo.com/ingestion/pipeline \
+curl -u assetinfo:你的密码 -X POST https://jiakubo.com/assetinfo/pipeline \
   -H "Content-Type: application/json" \
   -d '{"trust_product_id":1,"trust_plan_alias":"信托1号"}'
 ```

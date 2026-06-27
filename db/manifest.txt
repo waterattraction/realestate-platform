@@ -17,11 +17,11 @@ modules/overdue/schema.sql       # 逾期跟进表
 modules/overdue/seed.sql         # 逾期种子（依赖 trust_product_id=1）
 modules/risk/schema.sql          # 风险管理 V2
 modules/risk/seed.sql            # 风险种子（依赖 overdue seed）
-modules/ingestion/schema.sql     # 数据准入管道主表
+modules/assetinfo/schema.sql     # 资产数据管道主表
 modules/users/schema.sql         # 用户与导入审计
-modules/ingestion/schema_upload_v2.sql   # 上传批次 V2
+modules/assetinfo/schema_upload_v2.sql   # 上传批次 V2
 modules/trust/seed_products.sql  # 信托产品种子（幂等）
-modules/ingestion/seed_mapping.sql       # 字段映射配置种子
+modules/assetinfo/seed_mapping.sql       # 字段映射配置种子
 modules/issuance/schema.sql      # 发行资产明细
 modules/trust/schema_marks.sql   # 托管房源信托标记
 

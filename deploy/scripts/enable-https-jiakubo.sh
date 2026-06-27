@@ -28,14 +28,14 @@ sudo cp "${REPO}/deploy/nginx/realestate-jiakubo.conf" /etc/nginx/sites-availabl
 sudo nginx -t
 sudo systemctl reload nginx
 
-echo "==> 配置导入接口基础认证（如尚未配置）..."
-if [ ! -f /etc/nginx/.htpasswd-ingestion ]; then
+echo "==> 配置资产数据导入接口基础认证（如尚未配置）..."
+if [ ! -f /etc/nginx/.htpasswd-assetinfo ]; then
   PASS=$(openssl rand -base64 12)
-  echo "ingestion:${PASS}" | sudo tee /root/.ingestion-htpasswd-credentials >/dev/null
+  echo "assetinfo:${PASS}" | sudo tee /root/.assetinfo-htpasswd-credentials >/dev/null
   sudo apt-get install -y apache2-utils >/dev/null 2>&1 || true
-  echo "ingestion:$(openssl passwd -apr1 "${PASS}")" | sudo tee /etc/nginx/.htpasswd-ingestion >/dev/null
-  sudo chmod 640 /etc/nginx/.htpasswd-ingestion
-  echo "导入接口凭据已写入 /root/.ingestion-htpasswd-credentials"
+  echo "assetinfo:$(openssl passwd -apr1 "${PASS}")" | sudo tee /etc/nginx/.htpasswd-assetinfo >/dev/null
+  sudo chmod 640 /etc/nginx/.htpasswd-assetinfo
+  echo "导入接口凭据已写入 /root/.assetinfo-htpasswd-credentials"
 fi
 
 echo "==> 启用 UFW 防火墙..."
@@ -49,4 +49,4 @@ sudo ufw --force enable
 
 echo ""
 echo "完成！请访问: https://${DOMAIN}/"
-echo "导入接口: https://${DOMAIN}/ingestion/pipeline （需 Basic Auth）"
+echo "导入接口: https://${DOMAIN}/assetinfo/pipeline （需 Basic Auth）"

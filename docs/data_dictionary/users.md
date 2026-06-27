@@ -12,7 +12,7 @@
 
 ## 表用途
 
-平台登录与操作审计。导入运行记录（`ingestion_pipeline_runs`、`issuance_import_runs`）通过 `created_by` 关联本表。
+平台登录与操作审计。导入运行记录（`assetinfo_pipeline_runs`、`issuance_import_runs`）通过 `created_by` 关联本表。
 
 ## 生命周期
 
@@ -46,7 +46,7 @@
 
 ## 下游使用模块
 
-全站认证；`ingestion_pipeline_runs.created_by`、`issuance_import_runs.created_by`（见 [ingestion_pipeline_runs.md](ingestion_pipeline_runs.md)）
+全站认证；`assetinfo_pipeline_runs.created_by`、`issuance_import_runs.created_by`（见 [assetinfo_pipeline_runs.md](assetinfo_pipeline_runs.md)）
 
 ## 数据质量规则
 
@@ -54,7 +54,7 @@
 
 ## 注意事项
 
-- 导入审计表见 `ingestion_pipeline_runs.md`、`issuance_import_runs.md`。
+- 导入审计表见 `assetinfo_pipeline_runs.md`、`issuance_import_runs.md`。
 
 ## 变更记录
 

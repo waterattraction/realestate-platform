@@ -13,7 +13,7 @@
 | `trust_asset_trust_marks` | `internal_status` | [内部跟进状态](#trust_asset_trust_marksinternal_status) |
 | `trust_overdue_followups` | `status` | [逾期跟进状态](#trust_overdue_followupsstatus) |
 | `risk_alerts` | `status` | [风险预警状态](#risk_alertsstatus) |
-| ingestion | sheet `action` / `status` | [Ingestion 导入状态](#ingestion-sheet-action--status) |
+| assetinfo | sheet `action` / `status` | [Assetinfo 导入状态](#assetinfo-sheet-action--status) |
 | issuance | sheet `action` / `status` | [Issuance 导入状态](#issuance-sheet-action--status) |
 
 ---
@@ -77,26 +77,26 @@
 
 ---
 
-## Ingestion sheet action / status
+## Assetinfo sheet action / status
 
 ### action（行级，见 `enumerations.md` import action）
 
 | 表/模块 | 字段 | 值 | 中文 | 含义 | 是否终态 |
 |---------|------|-----|------|------|----------|
-| ingestion sheet run | `action` | `import` | 导入 | 新增 | 是 |
-| ingestion sheet run | `action` | `overwrite` | 覆盖 | 覆盖 scope | 是 |
-| ingestion sheet run | `action` | `skip` | 跳过 | 不写入 | 是 |
-| ingestion sheet run | `action` | `needs_confirm` | 待确认 | 人工确认 | 否 |
-| ingestion sheet run | `action` | `failed` | 失败 | 行失败 | 是 |
+| assetinfo sheet run | `action` | `import` | 导入 | 新增 | 是 |
+| assetinfo sheet run | `action` | `overwrite` | 覆盖 | 覆盖 scope | 是 |
+| assetinfo sheet run | `action` | `skip` | 跳过 | 不写入 | 是 |
+| assetinfo sheet run | `action` | `needs_confirm` | 待确认 | 人工确认 | 否 |
+| assetinfo sheet run | `action` | `failed` | 失败 | 行失败 | 是 |
 
 ### status（批次/Sheet 级）
 
 | 表/模块 | 字段 | 值 | 中文 | 含义 | 是否终态 |
 |---------|------|-----|------|------|----------|
-| `ingestion_pipeline_runs` | `status` | `pending` | 待处理 | 已创建 | 否 |
-| `ingestion_pipeline_runs` | `status` | `running` | 运行中 | 执行中 | 否 |
-| `ingestion_pipeline_runs` | `status` | `completed` | 已完成 | 成功结束 | 是 |
-| `ingestion_pipeline_runs` | `status` | `failed` | 失败 | 失败结束 | 是 |
+| `assetinfo_pipeline_runs` | `status` | `pending` | 待处理 | 已创建 | 否 |
+| `assetinfo_pipeline_runs` | `status` | `running` | 运行中 | 执行中 | 否 |
+| `assetinfo_pipeline_runs` | `status` | `completed` | 已完成 | 成功结束 | 是 |
+| `assetinfo_pipeline_runs` | `status` | `failed` | 失败 | 失败结束 | 是 |
 
 > **TODO**：与代码中实际枚举逐条核对。
 
@@ -106,7 +106,7 @@
 
 ### action
 
-同 Ingestion import action（`import` / `overwrite` / `skip` / `needs_confirm` / `failed`）。
+同 Assetinfo import action（`import` / `overwrite` / `skip` / `needs_confirm` / `failed`）。
 
 ### status
 

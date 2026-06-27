@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from app.auth import record_ingestion_run
+from app.auth import record_assetinfo_run
 
 RECONCILIATION_TOLERANCE = 0.01
 SHEET_MONITOR = "2更新的资产数据表"
@@ -59,7 +59,7 @@ DEFAULT_MAPPINGS = [
 
 
 def _repo_root() -> Path:
-    env_root = os.getenv("INGESTION_REPO_ROOT")
+    env_root = os.getenv("ASSETINFO_REPO_ROOT")
     if env_root:
         root = Path(env_root)
         if root.is_dir():
@@ -398,7 +398,7 @@ def run_consistency_checks(
     }
 
 
-def run_ingestion_pipeline(
+def run_assetinfo_pipeline(
     conn: Connection,
     trust_product_id: int,
     trust_plan_alias: str | None = None,
@@ -558,7 +558,7 @@ def run_ingestion_pipeline(
         text("SELECT name FROM trust_products WHERE id = :id"),
         {"id": trust_product_id},
     ).fetchone()
-    run_id, created_at = record_ingestion_run(
+    run_id, created_at = record_assetinfo_run(
         conn,
         trust_product_id=trust_product_id,
         data_date=data_date,

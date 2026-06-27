@@ -1,5 +1,5 @@
 -- 数据准入管道 V1 — 字段映射配置
--- 执行：ingestion_schema.sql → 本文件
+-- 执行：assetinfo_schema.sql → 本文件
 
 BEGIN;
 

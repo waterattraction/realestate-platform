@@ -106,7 +106,7 @@ Project
 
 | 对象 | 表（示例） | 说明 |
 |------|-----------|------|
-| `ImportRun` | `ingestion_pipeline_runs` / `issuance_import_runs` | 一次上传批次 |
+| `ImportRun` | `assetinfo_pipeline_runs` / `issuance_import_runs` | 一次上传批次 |
 | `ImportSheetRun` | `issuance_import_sheet_runs` 等 | Sheet 级 action/status |
 
 ### User

@@ -66,5 +66,5 @@ docker compose exec -T backend python3 /data/repo/db/ops/fixes/product3_repay_06
 
 ## 防复发
 
-- `backend/app/ingestion_upload.py` — 权威字段、预检 ERROR、`upsert` 顺序
-- `tests/test_ingestion_asset_codes.py` — 19 项单元测试
+- `backend/app/assetinfo_upload.py` — 权威字段、预检 ERROR、`upsert` 顺序
+- `tests/test_assetinfo_asset_codes.py` — 19 项单元测试

@@ -18,7 +18,7 @@
 
 | 阶段 | 说明 |
 |------|------|
-| 创建 | `/ingestion` 还款 Sheet 导入 INSERT |
+| 创建 | `/assetinfo` 还款 Sheet 导入 INSERT |
 | 更新 | 同 scope 覆盖（DELETE + INSERT） |
 | 冻结 | 历史明细一般不改 |
 | 删除/归档 | scope 按文件+Sheet；ops 去重 |
@@ -53,7 +53,7 @@
 
 ## 上游来源
 
-- 还款明细 Excel（`/ingestion`）
+- 还款明细 Excel（`/assetinfo`）
 - 列：`托管房源编码/编号`、`资产编号(房源)`、`还款日期`、`当期实际还款金额`
 
 ## 下游使用模块

@@ -369,7 +369,7 @@ BOTTOM: 单一跟进表单（Phase 1 仍可走旧 POST；Phase 2 改 entries）
 | **R6** | Ops identity 依赖 issuance | **中** | 无发行行则 ops 空 | 空态 Panel；不阻塞跟进 |
 | **R7** | HTML 迁移遗漏业务 if | **中** | render 内藏逻辑 | Code review + 「render 禁止 connect」lint 约定 |
 | **R8** | 旧 POST 书签/脚本 | **低** | 运营习惯 | Phase 2 过渡期 307 转发到新 API |
-| **R9** | 附件安全 | **中** | 路径遍历、未授权下载 | 鉴权路由；stored_path 不暴露；复用 ingestion 校验 |
+| **R9** | 附件安全 | **中** | 路径遍历、未授权下载 | 鉴权路由；stored_path 不暴露；复用 assetinfo 校验 |
 | **R10** | M3 文档与实现漂移 | **低** | m3.2 写 followup 事实表名仍为旧表 | Phase 2 后补文档；本方案明确工作台不走路径 asset-workbench 读 |
 | **R11** | 活跃 case 唯一约束 | **中** | 并发双开案 | DB 部分唯一索引 + 应用层捕获冲突提示 |
 | **R12** | escalate 写 system entry | **低** | 与「Ops 不写」例外混淆 | UI 明确「系统记录」；entry_type=system 不可当人工跟进 |

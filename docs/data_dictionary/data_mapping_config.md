@@ -6,7 +6,7 @@
 |----|-----|
 | 表中文名 | Excel 字段映射配置 |
 | 表英文名 | `data_mapping_config` |
-| Schema 来源 | `db/modules/ingestion/schema.sql` |
+| Schema 来源 | `db/modules/assetinfo/schema.sql` |
 | 主键 | `id` |
 | 业务唯一标识 | `(sheet_name, excel_column, target_table, target_column)` UNIQUE |
 
@@ -18,7 +18,7 @@
 
 | 阶段 | 说明 |
 |------|------|
-| 创建 | `db/modules/ingestion/seed_mapping.sql` |
+| 创建 | `db/modules/assetinfo/seed_mapping.sql` |
 | 更新 | 配置版本迭代 |
 | 停用 | `active=false` |
 | 删除/归档 | 一般逻辑停用 |
@@ -50,7 +50,7 @@
 
 ## 上游来源
 
-- `db/modules/ingestion/seed_mapping.sql`
+- `db/modules/assetinfo/seed_mapping.sql`
 
 ## 下游使用模块
 
@@ -64,4 +64,4 @@
 
 | 日期 | 变更 | Migration |
 |------|------|-----------|
-| — | 基线 | `db/modules/ingestion/schema.sql` |
+| — | 基线 | `db/modules/assetinfo/schema.sql` |

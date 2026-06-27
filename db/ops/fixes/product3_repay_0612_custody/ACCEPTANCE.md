@@ -32,7 +32,7 @@
 | [`repair.sql`](./repair.sql) | SQL 变体 |
 | [`check.sql`](./check.sql) | 只读检查 |
 | [`rollback.sql`](./rollback.sql) | 回滚 SQL |
-| [`tests/test_ingestion_asset_codes.py`](../../../tests/test_ingestion_asset_codes.py) | 防复发单元测试（19 OK） |
+| [`tests/test_assetinfo_asset_codes.py`](../../../tests/test_assetinfo_asset_codes.py) | 防复发单元测试（19 OK） |
 
 ---
 

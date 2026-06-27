@@ -15,7 +15,7 @@
 | `OverdueFollowup` | 逾期跟进 | `trust_overdue_followups` | `id` | TODO | 逾期 | 物理表 |
 | `RiskAlert` | 风险预警 | `risk_alerts` | `id` | 开放规则唯一 | 风险 | 物理表 |
 | `RiskCase` | 风险案件 | `trust_overdue_followups`（扩展） | `id` | 逻辑案件 | 风险/逾期 | **逻辑对象** |
-| `ImportRun` | 导入批次 | `ingestion_pipeline_runs` / `issuance_import_runs` | `id` | 按模块 | 导入 | 物理表（多表） |
+| `ImportRun` | 导入批次 | `assetinfo_pipeline_runs` / `issuance_import_runs` | `id` | 按模块 | 导入 | 物理表（多表） |
 | `ImportSheetRun` | Sheet 导入记录 | `issuance_import_sheet_runs` 等 | `id` | scope | 导入 | 物理表 |
 | `User` | 用户 | `users` | `id` | `username` | 认证/审计 | 物理表 |
 
@@ -102,7 +102,7 @@
 
 | 项 | 值 |
 |----|-----|
-| 物理表 | 是（`/ingestion` 与 `/issuance` 各有一套） |
+| 物理表 | 是（`/assetinfo` 与 `/issuance` 各有一套） |
 | 开放 API / AI | TODO（审计查询） |
 
 ### User

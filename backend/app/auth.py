@@ -278,7 +278,7 @@ def make_page_user_dependency(engine: Engine):
     return get_page_user
 
 
-def record_ingestion_run(
+def record_assetinfo_run(
     conn: Connection,
     *,
     trust_product_id: int,
