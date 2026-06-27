@@ -274,13 +274,20 @@ class OverdueWorkbenchService:
         *,
         trust_product_id: int | None,
         data_date: str | None = None,
+        trust_marker: str | None = None,
+        followup_status: str | None = None,
     ) -> dict:
         """Return asset_list dict (asset_code-based) for render.py."""
         resolved_date = self._monitor.resolve_latest_data_date(trust_product_id, data_date)
         if resolved_date is None:
             return {"data_date": None, "items": []}
 
-        rows = self._monitor.fetch_asset_queue(trust_product_id, resolved_date)
+        rows = self._monitor.fetch_asset_queue(
+            trust_product_id,
+            resolved_date,
+            trust_marker=trust_marker,
+            followup_status=followup_status,
+        )
         items = []
         for row in rows:
             ac = row["asset_code"]
@@ -329,6 +336,8 @@ class OverdueWorkbenchService:
         list_product_id: int | None = None,
         list_product_scope_explicit: bool = False,
         trust_asset_id: int | None = None,
+        trust_marker: str | None = None,
+        followup_status: str | None = None,
     ) -> dict:
         """Build full DTO expected by render.py (asset_code-centric)."""
         # Resolve effective custody: use provided value, or fall back to asset_code
@@ -340,6 +349,8 @@ class OverdueWorkbenchService:
             "delinquency_bucket": delinquency_bucket,
             "list_product_id": list_product_id,
             "list_product_scope_explicit": list_product_scope_explicit,
+            "trust_marker": trust_marker,
+            "followup_status": followup_status,
         }
 
         # Get detail DTO using existing method
@@ -358,6 +369,8 @@ class OverdueWorkbenchService:
         asset_list = self.get_asset_list(
             trust_product_id=list_pid,
             data_date=resolved_date,
+            trust_marker=trust_marker,
+            followup_status=followup_status,
         )
 
         # Collect custody codes from monitor splits

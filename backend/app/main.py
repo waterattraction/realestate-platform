@@ -3612,6 +3612,8 @@ def overdue_workbench_page(
     list_product_id: str | None = None,
     trust_asset_id: str | None = None,
     new_followup: str | None = None,
+    trust_marker: str | None = None,
+    followup_status: str | None = None,
 ):
     from app.html.render import render_overdue_workbench_html
     from app.service.overdue_workbench import (
@@ -3637,6 +3639,8 @@ def overdue_workbench_page(
         list_product_id=list_pid,
         list_product_scope_explicit=list_scope_explicit,
         trust_asset_id=aid,
+        trust_marker=query_utils.clean_optional_str(trust_marker),
+        followup_status=query_utils.clean_optional_str(followup_status),
     )
     with engine.connect() as conn:
         dto["products"] = fetch_trust_products(conn)

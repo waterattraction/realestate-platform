@@ -173,11 +173,35 @@ class MonitorRepo:
         trust_product_id: int | None,
         data_date: str,
         limit: int = 100,
+        trust_marker: str | None = None,
+        followup_status: str | None = None,
     ) -> list[dict]:
         """Return one row per asset_code for the workbench left-column list."""
         pid_clause = (
             "AND m.trust_product_id = :trust_product_id"
             if trust_product_id is not None
+            else ""
+        )
+        marker_clause = (
+            """AND EXISTS (
+                SELECT 1 FROM trust_asset_trust_marks tm
+                WHERE tm.trust_product_id = m.trust_product_id
+                  AND tm.custody_asset_code = COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                  AND tm.data_date = :data_date
+                  AND tm.trust_marker = :trust_marker
+            )"""
+            if trust_marker
+            else ""
+        )
+        status_clause = (
+            """AND EXISTS (
+                SELECT 1 FROM trust_asset_trust_marks tm2
+                WHERE tm2.trust_product_id = m.trust_product_id
+                  AND tm2.custody_asset_code = COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                  AND tm2.data_date = :data_date
+                  AND tm2.internal_status = :followup_status
+            )"""
+            if followup_status
             else ""
         )
         params: dict = {
@@ -187,6 +211,10 @@ class MonitorRepo:
         }
         if trust_product_id is not None:
             params["trust_product_id"] = trust_product_id
+        if trust_marker:
+            params["trust_marker"] = trust_marker
+        if followup_status:
+            params["followup_status"] = followup_status
         with self._engine.connect() as conn:
             rows = conn.execute(
                 text(
@@ -208,6 +236,8 @@ class MonitorRepo:
                     WHERE m.data_date = :data_date
                       AND m.overdue_days >= :overdue_min_days
                       {pid_clause}
+                      {marker_clause}
+                      {status_clause}
                     GROUP BY m.asset_code, m.trust_product_id, tp.name
                     ORDER BY MAX(m.overdue_days) DESC
                     LIMIT :limit

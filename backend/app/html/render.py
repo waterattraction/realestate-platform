@@ -32,7 +32,7 @@ _BUCKET_FILTER_OPTIONS = [
     ("M3", "M3"),
     ("M3_PLUS", "M3+"),
     ("M1", "M1"),
-    ("ES", "ES（提前结清）"),
+    ("ES", "ES"),
 ]
 
 
@@ -244,15 +244,24 @@ def _render_legacy_error_page(dto: dict) -> str:
 
 
 def _render_sidebar_filter(dto: dict) -> str:
-    """Compact filter form rendered inside the sidebar below the panel-hd."""
+    """Compact inline-edit filter row rendered inside the sidebar below the panel-hd."""
     filters = dto.get("filters") or {}
     active_bucket = filters.get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
+    active_marker = filters.get("trust_marker") or ""
+    active_status = filters.get("followup_status") or ""
     filter_pid = _filter_bar_product_id(dto)
     data_date = dto.get("data_date") or ""
     products = dto.get("products") or []
     current_asset = dto.get("asset_code")
     detail_pid = dto.get("trust_product_id")
 
+    # Display labels
+    product_name = next((p["name"] for p in products if filter_pid == p["id"]), "全部产品")
+    bucket_label = dict(_BUCKET_FILTER_OPTIONS).get(active_bucket, active_bucket)
+    marker_label = active_marker or "全部标记"
+    status_label = active_status or "全部状态"
+
+    # Options
     product_opts = '<option value="">全部产品</option>'
     for p in products:
         sel = " selected" if filter_pid == p["id"] else ""
@@ -263,21 +272,45 @@ def _render_sidebar_filter(dto: dict) -> str:
         sel = " selected" if active_bucket == val else ""
         bucket_opts += f'<option value="{val}"{sel}>{escape(label)}</option>'
 
+    marker_opts = '<option value="">全部标记</option>'
+    for m in TRUST_MARKER_OPTIONS:
+        sel = " selected" if active_marker == m else ""
+        marker_opts += f'<option value="{escape(m)}"{sel}>{escape(m)}</option>'
+
+    status_opts = '<option value="">全部状态</option>'
+    for s in INTERNAL_STATUS_OPTIONS:
+        sel = " selected" if active_status == s else ""
+        status_opts += f'<option value="{escape(s)}"{sel}>{escape(s)}</option>'
+
+    # Hidden fields
     detail_fields = ""
     if current_asset and detail_pid is not None:
         detail_fields = (
             f'<input type="hidden" name="trust_product_id" value="{detail_pid}">'
             f'<input type="hidden" name="asset_code" value="{escape(str(current_asset))}">'
         )
-
     date_hidden = f'<input type="hidden" name="data_date" value="{escape(str(data_date))}">' if data_date else ""
 
-    return f"""<form class="sidebar-filter" method="get" action="/overdue/workbench">
-        <select name="list_product_id" class="sidebar-filter-select">{product_opts}</select>
-        <select name="delinquency_bucket" class="sidebar-filter-select">{bucket_opts}</select>
-        {date_hidden}{detail_fields}
-        <button type="submit" class="btn btn-compact sidebar-filter-btn">应用</button>
-    </form>"""
+    def item(title: str, label: str, name: str, opts: str) -> str:
+        return (
+            f'<span class="sf-item" title="{title}">'
+            f'<span class="sf-display">{escape(label)}</span>'
+            f'<select class="sf-select" name="{name}">{opts}</select>'
+            f'</span>'
+        )
+
+    return (
+        f'<form class="sidebar-filter" method="get" action="/overdue/workbench" id="sf-form">'
+        + item("双击修改产品", product_name, "list_product_id", product_opts)
+        + '<span class="sf-sep">·</span>'
+        + item("双击修改M级", bucket_label, "delinquency_bucket", bucket_opts)
+        + '<span class="sf-sep">·</span>'
+        + item("双击修改信托标记", marker_label, "trust_marker", marker_opts)
+        + '<span class="sf-sep">·</span>'
+        + item("双击修改跟进状态", status_label, "followup_status", status_opts)
+        + date_hidden + detail_fields
+        + '</form>'
+    )
 
 
 def _render_filter_bar(dto: dict, workbench_qs) -> str:
@@ -1211,6 +1244,26 @@ document.addEventListener('DOMContentLoaded', function() {
             display.classList.remove('mark-edit-hidden');
         });
     });
+
+    // Double-click to edit sidebar filter items (auto-submit on change)
+    document.querySelectorAll('.sf-item').forEach(function(item) {
+        var display = item.querySelector('.sf-display');
+        var sel = item.querySelector('.sf-select');
+        if (!display || !sel) return;
+        display.addEventListener('dblclick', function() {
+            display.style.display = 'none';
+            sel.style.display = '';
+            sel.focus();
+        });
+        sel.addEventListener('change', function() {
+            var form = document.getElementById('sf-form');
+            if (form) form.submit();
+        });
+        sel.addEventListener('blur', function() {
+            sel.style.display = 'none';
+            display.style.display = '';
+        });
+    });
     var form = document.getElementById('followup-form');
     var fileInput = document.getElementById('followup-files');
     var preview = document.getElementById('file-preview');
@@ -1276,18 +1329,24 @@ _WORKBENCH_CSS = """
     .header-action-btns { display: flex; gap: 0.5rem; }
     .header-sub { color: #94a3b8; margin-top: 0.35rem; font-size: 0.9rem; }
     .header-data-date { font-size: 12px; color: #475569; font-weight: 400; white-space: nowrap; }
-    /* Sidebar compact filter form */
+    /* Sidebar compact inline-edit filter row */
     .sidebar-filter {
-        display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+        display: flex; flex-wrap: wrap; gap: 3px 4px; align-items: center;
         padding: 6px 0.85rem 8px; border-bottom: 1px solid rgba(255,255,255,0.06);
     }
-    .sidebar-filter-select {
-        font-size: 12px; color: #e2e8f0; height: 28px; max-width: 116px;
-        background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.12);
-        border-radius: 5px; padding: 0 4px; cursor: pointer; outline: none;
-        box-sizing: border-box; flex-shrink: 1; min-width: 0;
+    .sf-item { display: inline-flex; align-items: center; }
+    .sf-display {
+        font-size: 12px; color: #e2e8f0; cursor: default; user-select: none;
+        border-bottom: 1px dashed rgba(255,255,255,0.18); padding: 1px 0;
     }
-    .sidebar-filter-btn { height: 28px; padding: 0 10px; font-size: 12px; flex-shrink: 0; }
+    .sf-display:hover { border-bottom-color: rgba(99,179,237,0.55); color: #93c5fd; }
+    .sf-select {
+        display: none; font-size: 12px; color: #e2e8f0; height: 26px;
+        max-width: 116px; background: rgba(0,0,0,0.25);
+        border: 1px solid rgba(255,255,255,0.12); border-radius: 5px;
+        padding: 0 4px; cursor: pointer; outline: none; box-sizing: border-box;
+    }
+    .sf-sep { color: #475569; padding: 0 2px; font-size: 11px; line-height: 1; }
     .ok-text { color: #4ade80; }
     .warn-text { color: #f87171; }
     .workbench {
