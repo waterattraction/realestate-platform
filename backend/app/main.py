@@ -3025,38 +3025,53 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         .op-row {{
             display: flex;
             flex-wrap: wrap;
-            gap: 0.4rem;
-            margin-bottom: 0.45rem;
+            gap: 0.5rem;
+            margin-bottom: 0.55rem;
         }}
         a.op-chip {{
             display: inline-flex;
             align-items: center;
-            gap: 0.35rem;
-            padding: 0.38rem 0.55rem;
-            border-radius: 8px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            background: rgba(15, 23, 42, 0.55);
+            gap: 0.4rem;
+            padding: 0.5rem 0.85rem;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: rgba(255, 255, 255, 0.06);
             color: #f8fafc;
             text-decoration: none;
-            font-size: 0.78rem;
-            font-weight: 500;
-            transition: border-color 0.15s, transform 0.15s;
+            font-size: 0.85rem;
+            font-weight: 600;
+            letter-spacing: 0.01em;
+            transition: background 0.15s, border-color 0.15s, transform 0.15s, box-shadow 0.15s;
         }}
         a.op-chip:hover {{
-            border-color: rgba(56, 189, 248, 0.4);
-            transform: translateY(-1px);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
             text-decoration: none;
         }}
         .op-chip svg {{
-            width: 14px;
-            height: 14px;
+            width: 15px;
+            height: 15px;
             fill: currentColor;
             flex-shrink: 0;
         }}
-        .op-blue {{ color: #38bdf8; }}
-        .op-green {{ color: #4ade80; }}
-        .op-orange {{ color: #fb923c; }}
-        .op-purple {{ color: #c084fc; }}
+        /* 导入主按钮：填充背景 */
+        a.op-chip.op-blue {{
+            background: linear-gradient(135deg, rgba(56,189,248,0.25) 0%, rgba(56,189,248,0.12) 100%);
+            border-color: rgba(56,189,248,0.5);
+            color: #7dd3fc;
+        }}
+        a.op-chip.op-blue:hover {{
+            background: linear-gradient(135deg, rgba(56,189,248,0.38) 0%, rgba(56,189,248,0.2) 100%);
+            border-color: #38bdf8;
+            box-shadow: 0 4px 14px rgba(56,189,248,0.25);
+        }}
+        /* 查看/明细类按钮：彩色边框 */
+        a.op-chip.op-green {{ color: #4ade80; border-color: rgba(74,222,128,0.35); }}
+        a.op-chip.op-green:hover {{ border-color: #4ade80; box-shadow: 0 4px 12px rgba(74,222,128,0.2); }}
+        a.op-chip.op-orange {{ color: #fb923c; border-color: rgba(251,146,60,0.35); }}
+        a.op-chip.op-orange:hover {{ border-color: #fb923c; box-shadow: 0 4px 12px rgba(251,146,60,0.2); }}
+        a.op-chip.op-purple {{ color: #c084fc; border-color: rgba(192,132,252,0.35); }}
+        a.op-chip.op-purple:hover {{ border-color: #c084fc; box-shadow: 0 4px 12px rgba(192,132,252,0.2); }}
         .mini-kpi-row {{
             display: flex;
             flex-wrap: wrap;
@@ -3231,7 +3246,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                     <div class="op-row">
                         <a href="/issuance/upload" class="op-chip op-blue">
                             <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
-                            数据导入
+                            发行数据导入
                         </a>
                         <a href="/issuance/records" class="op-chip op-green">
                             <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
@@ -3251,7 +3266,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                     <div class="op-row">
                         <a href="/ingestion/upload" class="op-chip op-blue">
                             <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
-                            Excel 导入
+                            资产数据导入
                         </a>
                         <a href="/ingestion/repayment-records" class="op-chip op-orange">
                             <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
