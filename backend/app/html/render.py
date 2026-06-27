@@ -464,7 +464,16 @@ def _render_sidebar(
     return f"""
         <div class="sidebar-section">
             <div class="panel-hd">资产清单 <span class="muted tiny">· {escape(str(bucket_label))}</span></div>
-            <div class="queue-body compact-queue">{asset_list_html}</div>
+            <div class="queue-body compact-queue" id="asset-queue">{asset_list_html}</div>
+            <script>
+            (function(){{
+                var pos = sessionStorage.getItem('_queueScroll');
+                if (pos !== null) {{
+                    document.getElementById('asset-queue').scrollTop = parseInt(pos, 10);
+                    sessionStorage.removeItem('_queueScroll');
+                }}
+            }})();
+            </script>
         </div>
     """
 
@@ -990,7 +999,20 @@ document.addEventListener('DOMContentLoaded', function() {
 
     var activeQueueItem = document.querySelector('.compact-queue .queue-item.active');
     if (activeQueueItem) {
-        activeQueueItem.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        // Only scroll on fresh load (sessionStorage already handled the click-navigation case)
+        if (!sessionStorage.getItem('_queueScroll')) {
+            activeQueueItem.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        }
+    }
+
+    // Save scroll position before navigating to a new asset
+    var assetQueue = document.getElementById('asset-queue');
+    if (assetQueue) {
+        assetQueue.addEventListener('mousedown', function(e) {
+            if (e.target.closest('.queue-item')) {
+                sessionStorage.setItem('_queueScroll', assetQueue.scrollTop);
+            }
+        });
     }
 
     var filterForm = document.querySelector('.workbench-filter');
