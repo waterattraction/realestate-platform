@@ -11,7 +11,7 @@
 | 适用 | 不适用 |
 |------|--------|
 | `backend/app/**/*.py` 内联 HTML | JSON API 响应 |
-| `issuance_html.py` / `ingestion_html.py` / `html/render.py` 等页面壳 | 前端框架（本项目暂无） |
+| `issuance_html.py` / `assetinfo_html.py` / `html/render.py` 等页面壳 | 前端框架（本项目暂无） |
 | 登录页 `auth_html.py`（Chrome 子集） | 第三方静态资源 |
 
 新增或修改任何业务 HTML 页面前，须对照本文与 [`.cursor/rules/ui_layout.mdc`](../../.cursor/rules/ui_layout.mdc)。
@@ -227,7 +227,7 @@ Dashboard **仅**可在 KPI 条以下使用 `space-sm`–`space-md`；**不得**
 | [`auth_html.py`](../../backend/app/auth_html.py) | 用户栏、`USER_BAR_CSS` | Chrome 标准件 |
 | [`ui_css.py`](../../backend/app/ui_css.py) | `TABLE_SCROLL_CSS` | 表格标准件 |
 | [`issuance_html.py`](../../backend/app/issuance_html.py) | `_page_shell` | **Standard** 参考 |
-| [`ingestion_html.py`](../../backend/app/ingestion_html.py) | `_page_shell` | **Standard** 参考 |
+| [`assetinfo_html.py`](../../backend/app/assetinfo_html.py) | `_page_shell` | **Standard** 参考 |
 | [`main.py`](../../backend/app/main.py) | `/overdue`、`/risk`、资产包、`GET /` | Standard + **Dashboard** |
 | [`html/render.py`](../../backend/app/html/render.py) | 逾期跟进工作台 | Standard（工作台顶边 1.5rem） |
 

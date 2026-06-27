@@ -17,7 +17,7 @@ from app.api import asset_workbench
 from app.api import overdue_ops
 from app.api import overdue_workbench
 from app.api import followups
-from app import ingestion_html
+from app import assetinfo_html as ingestion_html
 from app import ingestion_pipeline
 from app import ingestion_upload
 from app import issuance_html
@@ -3267,15 +3267,15 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                         <h2 id="sec-ingestion">资产情况更新</h2>
                     </div>
                     <div class="op-row">
-                        <a href="/ingestion/upload" class="op-chip op-blue">
+                        <a href="/assetinfo/upload" class="op-chip op-blue">
                             <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
                             资产数据导入
                         </a>
-                        <a href="/ingestion/repayment-records" class="op-chip op-orange">
+                        <a href="/assetinfo/repayment-records" class="op-chip op-orange">
                             <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
                             还款明细
                         </a>
-                        <a href="/ingestion/monitor-records" class="op-chip op-purple">
+                        <a href="/assetinfo/monitor-records" class="op-chip op-purple">
                             <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                             监控快照
                         </a>
@@ -3314,7 +3314,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                     <div class="risk-card-value overdue">{dash_count(overdue_total)}</div>
                     <div class="risk-card-foot">暴露规模 {dash_count(exposure_total)} 户 →</div>
                 </a>
-                <a href="/ingestion/monitor-records" class="risk-card">
+                <a href="/assetinfo/monitor-records" class="risk-card">
                     <div class="risk-card-head">
                         <span class="risk-card-label">监控中资产</span>
                         <span class="risk-card-icon risk-icon-monitor" aria-hidden="true">
@@ -3920,7 +3920,7 @@ def auth_me(current_user: Annotated[dict, Depends(get_current_user)]):
     return current_user
 
 
-@app.post("/ingestion/pipeline")
+@app.post("/assetinfo/pipeline")
 def ingestion_pipeline_run(
     current_user: Annotated[dict, Depends(get_current_user)],
     body: dict = Body(default={}),
@@ -3939,7 +3939,7 @@ def ingestion_pipeline_run(
         )
 
 
-@app.get("/ingestion/upload", response_class=HTMLResponse)
+@app.get("/assetinfo/upload", response_class=HTMLResponse)
 def ingestion_upload_page(page_user: Annotated[dict, Depends(get_page_user)]):
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
@@ -3947,7 +3947,7 @@ def ingestion_upload_page(page_user: Annotated[dict, Depends(get_page_user)]):
     return HTMLResponse(content=ingestion_html.render_upload_page(products, page_user["username"]))
 
 
-@app.post("/ingestion/preview")
+@app.post("/assetinfo/preview")
 async def ingestion_preview(
     current_user: Annotated[dict, Depends(get_current_user)],
     trust_product_id: int = Form(...),
@@ -3959,7 +3959,7 @@ async def ingestion_preview(
         return ingestion_upload.run_preview(conn, trust_product_id, batch_uuid, saved)
 
 
-@app.post("/ingestion/import")
+@app.post("/assetinfo/import")
 def ingestion_import(
     current_user: Annotated[dict, Depends(get_current_user)],
     body: dict = Body(...),
@@ -3980,7 +3980,7 @@ def ingestion_import(
         )
 
 
-@app.get("/ingestion/repayment-records/data")
+@app.get("/assetinfo/repayment-records/data")
 def ingestion_repayment_records_data(
     current_user: Annotated[dict, Depends(get_current_user)],
     page: str | None = Query(default=None),
@@ -4009,7 +4009,7 @@ def ingestion_repayment_records_data(
         )
 
 
-@app.get("/ingestion/repayment-records", response_class=HTMLResponse)
+@app.get("/assetinfo/repayment-records", response_class=HTMLResponse)
 def ingestion_repayment_records_page(
     page_user: Annotated[dict, Depends(get_page_user)],
     page: str | None = Query(default=None),
@@ -4041,13 +4041,13 @@ def ingestion_repayment_records_page(
             for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         ]
     return HTMLResponse(content=ingestion_html.render_records_page(
-        "还款明细", "/ingestion/repayment-records/data", filters, data, products,
+        "还款明细数据", "/assetinfo/repayment-records/data", filters, data, products,
         page_user["username"],
         record_type="repayment",
     ))
 
 
-@app.get("/ingestion/monitor-records/data")
+@app.get("/assetinfo/monitor-records/data")
 def ingestion_monitor_records_data(
     current_user: Annotated[dict, Depends(get_current_user)],
     page: str | None = Query(default=None),
@@ -4078,7 +4078,7 @@ def ingestion_monitor_records_data(
         )
 
 
-@app.get("/ingestion/monitor-records", response_class=HTMLResponse)
+@app.get("/assetinfo/monitor-records", response_class=HTMLResponse)
 def ingestion_monitor_records_page(
     page_user: Annotated[dict, Depends(get_page_user)],
     page: str | None = Query(default=None),
@@ -4112,7 +4112,7 @@ def ingestion_monitor_records_page(
             for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         ]
     return HTMLResponse(content=ingestion_html.render_records_page(
-        "资产监控快照", "/ingestion/monitor-records/data", filters, data, products,
+        "资产监控数据", "/assetinfo/monitor-records/data", filters, data, products,
         page_user["username"],
         record_type="monitor",
     ))
