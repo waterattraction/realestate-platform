@@ -30,6 +30,19 @@ PAGE_CHROME_CSS = """
         }
 """
 
+# 用户栏与面包屑同一行：绝对定位到页面右上角（标准子页复用）
+AUTH_TOPBAR_INLINE_CSS = """
+        .auth-topbar {
+            position: absolute;
+            top: 0.4rem;
+            right: 1rem;
+            margin: 0;
+            padding: 0;
+            max-width: none;
+            width: auto;
+        }
+"""
+
 # 对账表格：单行完整展示，容器横向滚动，禁止截断/折行
 TABLE_SCROLL_CSS = """
         .table-wrap {

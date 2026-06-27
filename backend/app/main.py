@@ -3944,7 +3944,8 @@ def assetinfo_upload_page(page_user: Annotated[dict, Depends(get_page_user)]):
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         products = [{"id": r.id, "name": r.name} for r in rows]
-    return HTMLResponse(content=assetinfo_html.render_upload_page(products, page_user["username"]))
+    html = assetinfo_html.render_upload_page(products)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
 @app.post("/assetinfo/preview")
@@ -4040,11 +4041,11 @@ def assetinfo_repayment_records_page(
             {"id": r.id, "name": r.name}
             for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         ]
-    return HTMLResponse(content=assetinfo_html.render_records_page(
+    html = assetinfo_html.render_records_page(
         "还款明细数据", "/assetinfo/repayment-records/data", filters, data, products,
-        page_user["username"],
         record_type="repayment",
-    ))
+    )
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
 @app.get("/assetinfo/monitor-records/data")
@@ -4111,11 +4112,11 @@ def assetinfo_monitor_records_page(
             {"id": r.id, "name": r.name}
             for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         ]
-    return HTMLResponse(content=assetinfo_html.render_records_page(
+    html = assetinfo_html.render_records_page(
         "资产监控数据", "/assetinfo/monitor-records/data", filters, data, products,
-        page_user["username"],
         record_type="monitor",
-    ))
+    )
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
 @app.get("/issuance/upload", response_class=HTMLResponse)
@@ -4123,7 +4124,8 @@ def issuance_upload_page(page_user: Annotated[dict, Depends(get_page_user)]):
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         products = [{"id": r.id, "name": r.name} for r in rows]
-    return HTMLResponse(content=issuance_html.render_upload_page(products, page_user["username"]))
+    html = issuance_html.render_upload_page(products)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
 @app.post("/issuance/preview")
@@ -4244,6 +4246,5 @@ def issuance_records_page(
             {"id": r.id, "name": r.name}
             for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         ]
-    return HTMLResponse(content=issuance_html.render_records_page(
-        filters, data, products, page_user["username"],
-    ))
+    html = issuance_html.render_records_page(filters, data, products)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))

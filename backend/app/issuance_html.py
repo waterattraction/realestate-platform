@@ -6,17 +6,13 @@ from datetime import date, datetime, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
-from app.ui_css import PAGE_CHROME_CSS, TABLE_SCROLL_CSS
+from app.ui_css import AUTH_TOPBAR_INLINE_CSS, PAGE_CHROME_CSS, TABLE_SCROLL_CSS
 from app import issuance_cleanse as ic
 
 DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 
 
-def _page_shell(title: str, body: str, username: str | None = None) -> str:
-    from app import auth_html
-
-    user_bar = auth_html.user_bar_div(username) if username else ""
-    user_css = auth_html.USER_BAR_CSS if username else ""
+def _page_shell(title: str, body: str) -> str:
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -24,8 +20,7 @@ def _page_shell(title: str, body: str, username: str | None = None) -> str:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{escape(title)}</title>
     <style>
-        {user_css}
-        .auth-topbar {{ position: absolute; top: 0.4rem; right: 1rem; margin: 0; padding: 0; max-width: none; width: auto; }}
+        {AUTH_TOPBAR_INLINE_CSS}
         {PAGE_CHROME_CSS}
         h1 {{ font-size: 1.5rem; color: #f8fafc; margin: 0 0 0.5rem; }}
         p.muted {{ color: #94a3b8; margin-bottom: 1rem; font-size: 0.9rem; }}
@@ -34,12 +29,12 @@ def _page_shell(title: str, body: str, username: str | None = None) -> str:
             border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem;
         }}
         label {{ display: block; font-size: 0.85rem; color: #94a3b8; margin: 0.75rem 0 0.25rem; }}
-        input, select, button {{
+        .container input, .container select, .container button {{
             font: inherit; padding: 0.5rem 0.75rem; border-radius: 8px;
             border: 1px solid rgba(255,255,255,0.15); background: rgba(15,23,42,0.8); color: #f8fafc;
         }}
-        button {{ cursor: pointer; background: #0ea5e9; border-color: #0ea5e9; margin-top: 1rem; }}
-        button.secondary {{ background: transparent; margin-left: 0.5rem; }}
+        .container button {{ cursor: pointer; background: #0ea5e9; border-color: #0ea5e9; margin-top: 1rem; }}
+        .container button.secondary {{ background: transparent; margin-left: 0.5rem; }}
         {TABLE_SCROLL_CSS}
         th, td {{ padding: 0.5rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.08); text-align: left; }}
         th {{ color: #94a3b8; }}
@@ -70,7 +65,7 @@ def _page_shell(title: str, body: str, username: str | None = None) -> str:
         pre {{ white-space: pre-wrap; font-size: 0.8rem; color: #cbd5e1; }}
     </style>
 </head>
-<body>{user_bar}
+<body>
 <div class="container">{body}</div>
 <script>
 (function() {{
@@ -94,7 +89,7 @@ def _page_shell(title: str, body: str, username: str | None = None) -> str:
 </body></html>"""
 
 
-def render_upload_page(trust_products: list[dict], username: str) -> str:
+def render_upload_page(trust_products: list[dict]) -> str:
     options = "".join(
         f'<option value="{tp["id"]}">{escape(tp["name"])} (id={tp["id"]})</option>'
         for tp in trust_products
@@ -272,7 +267,7 @@ def render_upload_page(trust_products: list[dict], username: str) -> str:
     }}
     </script>
     """
-    return _page_shell("发行资产明细导入", body, username)
+    return _page_shell("发行资产明细导入", body)
 
 
 COLUMN_LABELS: dict[str, str] = {
@@ -368,7 +363,6 @@ def render_records_page(
     filters: dict,
     data: dict,
     trust_products: list[dict] | None = None,
-    username: str | None = None,
 ) -> str:
     selected_product_id = str(filters.get("trust_product_id") or "")
     product_options = '<option value="">全部</option>'
@@ -470,4 +464,4 @@ def render_records_page(
     </div>
     {pager}
     """
-    return _page_shell("发行资产明细", body, username)
+    return _page_shell("发行资产明细", body)

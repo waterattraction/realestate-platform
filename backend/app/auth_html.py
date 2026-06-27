@@ -20,6 +20,7 @@ USER_BAR_CSS = """
 .auth-topbar button {
     cursor: pointer;
     font: inherit;
+    margin: 0;
     padding: 0.35rem 0.75rem;
     border-radius: 8px;
     border: 1px solid rgba(255,255,255,0.15);
