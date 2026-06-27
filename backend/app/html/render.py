@@ -21,7 +21,13 @@ from app.overdue.ui_constants import (
 )
 from app.service.checks_service import RECONCILIATION_BASIS_LABEL
 from app.service.overdue_workbench import DEFAULT_DELINQUENCY_BUCKET
-from app.ui_css import TABLE_SCROLL_CSS
+from app.ui_css import (
+    BTN_CSS,
+    PAGE_CHROME_CSS,
+    STANDARD_HEADER_CSS,
+    TABLE_SCROLL_CSS,
+    WORKBENCH_BODY_CSS,
+)
 
 _TIMELINE_PREVIEW = 3
 _REPAYMENT_PREVIEW = 5
@@ -174,7 +180,6 @@ def render_overdue_workbench_html(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>资产逾期跟进工作台 · 房地产资产证券化平台</title>
-    <style>{TABLE_SCROLL_CSS}</style>
     {_WORKBENCH_CSS}
 </head>
 <body class="workbench-page" data-scroll-followup="{scroll_flag}">
@@ -1303,27 +1308,11 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 """
 
-_WORKBENCH_CSS = """
-<style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
-        min-height: 100vh; color: #e2e8f0;
-    }
-    a { color: #38bdf8; text-decoration: none; }
-    .page-wrap { padding: 0.4rem 1rem 0; padding-bottom: 0; }
-    .container { max-width: 1400px; margin: 0 auto; padding-bottom: 1.5rem; }
-    .breadcrumb { font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.75rem; line-height: 2rem; }
-    /* Auth topbar floats to top-right, breadcrumb aligns on same visual row */
-    body.workbench-page { position: relative; }
-    body.workbench-page .auth-topbar {
-        position: absolute; top: 0.4rem; right: 1rem;
-        margin: 0; padding: 0; max-width: none; width: auto;
-    }
+_WORKBENCH_SPECIFIC_CSS = """
+    .page-wrap { padding: 0; }
+    .container { padding-bottom: 1.5rem; }
     .page-header { margin-bottom: 0.25rem; }
     .header-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
-    header h1 { font-size: 1.5rem; color: #f8fafc; }
     .header-actions {
         display: flex; flex-direction: column; align-items: flex-end;
         gap: 0.35rem; flex-shrink: 0;
@@ -1563,7 +1552,6 @@ _WORKBENCH_CSS = """
     }
     .write-toggle-icon { font-size: 0.65rem; color: #94a3b8; }
     .write-summary { flex: 1 1 200px; min-width: 0; }
-    .btn-compact { padding: 0.35rem 0.75rem; font-size: 0.8rem; height: 36px; box-sizing: border-box; }
     .sticky-write-bar[data-expanded="0"] .sticky-write-panel { display: none; }
     .sticky-write-bar[data-expanded="0"] .write-collapse-btn { display: none; }
     .sticky-write-bar[data-expanded="1"] #followup-expand-btn { display: none; }
@@ -1607,5 +1595,15 @@ _WORKBENCH_CSS = """
     .file-chip-img { display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; }
     .file-thumb { max-width: 64px; max-height: 64px; border-radius: 4px; object-fit: cover; }
     .page-wrap:has(.sticky-write-bar[data-expanded="1"]) .container { padding-bottom: 2rem; }
+"""
+
+_WORKBENCH_CSS = f"""
+<style>
+{PAGE_CHROME_CSS}
+{WORKBENCH_BODY_CSS}
+{STANDARD_HEADER_CSS}
+{BTN_CSS}
+{TABLE_SCROLL_CSS}
+{_WORKBENCH_SPECIFIC_CSS}
 </style>
 """

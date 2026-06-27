@@ -42,7 +42,7 @@ from app.overdue.buckets import (
     sql_m3_plus_filter as sql_m3_plus_asset_filter,
     sql_overdue_asset_filter,
 )
-from app.ui_css import TABLE_SCROLL_CSS
+from app.ui_css import BTN_CSS, DASHBOARD_BODY_CSS, PAGE_CHROME_CSS, STANDARD_HEADER_CSS, TABLE_SCROLL_CSS
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -1502,25 +1502,10 @@ def render_overdue_html(
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>逾期管理 · 房地产资产证券化平台</title>
     <style>
-        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
-            min-height: 100vh;
-            color: #e2e8f0;
-            padding: 0.4rem 1rem 2rem;
-            position: relative;
-        }}
-        body.overdue-page .auth-topbar {{
-            position: absolute; top: 0.4rem; right: 1rem;
-            margin: 0; padding: 0; max-width: none; width: auto;
-        }}
-        a {{ color: #38bdf8; text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
-        .container {{ max-width: 1400px; margin: 0 auto; }}
-        .breadcrumb {{ font-size: 0.875rem; color: #94a3b8; margin-bottom: 1.5rem; line-height: 2rem; }}
+        {PAGE_CHROME_CSS}
+        {STANDARD_HEADER_CSS}
+        {BTN_CSS}
         header {{ margin-bottom: 2rem; }}
-        header h1 {{ font-size: 1.75rem; font-weight: 700; color: #f8fafc; }}
         header p {{ margin-top: 0.5rem; color: #94a3b8; font-size: 0.95rem; }}
         .grid {{
             display: grid;
@@ -1603,24 +1588,10 @@ def render_overdue_html(
         .empty {{ color: #64748b; text-align: center; }}
         .card-hint {{ font-size: 0.72rem; color: #64748b; margin-top: 0.35rem; line-height: 1.3; }}
         .tabs {{ display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; }}
-        .tab-btn {{
-            padding: 0.35rem 0.75rem; border-radius: 999px; border: 1px solid rgba(255,255,255,0.15);
-            background: rgba(255,255,255,0.04); color: #94a3b8; cursor: pointer; font-size: 0.82rem;
-        }}
-        .tab-btn.active {{
-            background: rgba(56, 189, 248, 0.2); border-color: rgba(56, 189, 248, 0.45); color: #e2e8f0;
-        }}
         .header-row {{
             display: flex; justify-content: space-between; align-items: flex-start;
             flex-wrap: wrap; gap: 1rem;
         }}
-        .btn-recalc {{
-            padding: 0.45rem 0.9rem; border-radius: 8px; border: 1px solid rgba(56, 189, 248, 0.45);
-            background: rgba(56, 189, 248, 0.15); color: #e2e8f0; cursor: pointer; font-size: 0.85rem;
-            white-space: nowrap;
-        }}
-        .btn-recalc:hover {{ background: rgba(56, 189, 248, 0.28); }}
-        .btn-recalc:disabled {{ opacity: 0.5; cursor: not-allowed; }}
         .recalc-msg {{
             margin-top: 0.75rem; padding: 0.6rem 0.85rem; border-radius: 8px; font-size: 0.85rem;
             background: rgba(52, 211, 153, 0.12); border: 1px solid rgba(52, 211, 153, 0.35); color: #a7f3d0;
@@ -2107,18 +2078,8 @@ def render_risk_workbench_html(data: dict):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>风控工作台 · 房地产资产证券化平台</title>
     <style>
-        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
-            min-height: 100vh; color: #e2e8f0; padding: 0.4rem 1rem 1.5rem;
-            position: relative;
-        }}
-        a {{ color: #38bdf8; text-decoration: none; }}
-        .container {{ max-width: 1400px; margin: 0 auto; }}
-        .breadcrumb {{ font-size: 0.85rem; color: #94a3b8; margin-bottom: 1rem; line-height: 2rem; }}
-        body.risk-page .auth-topbar {{ position: absolute; top: 0.4rem; right: 1rem; margin: 0; padding: 0; max-width: none; width: auto; }}
-        header h1 {{ font-size: 1.6rem; color: #f8fafc; }}
+        {PAGE_CHROME_CSS}
+        {STANDARD_HEADER_CSS}
         header p {{ color: #94a3b8; margin-top: 0.35rem; font-size: 0.9rem; }}
         .kpi-grid {{
             display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -2448,46 +2409,10 @@ def render_asset_pool_detail_html(data, investor_map):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{escape(pool["name"])} · 资产包详情</title>
     <style>
-        * {{
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
-            min-height: 100vh;
-            color: #e2e8f0;
-            padding: 0.4rem 1rem 2rem;
-            position: relative;
-        }}
-        a {{
-            color: #38bdf8;
-            text-decoration: none;
-        }}
-        a:hover {{
-            text-decoration: underline;
-        }}
-        .container {{
-            max-width: 1400px;
-            margin: 0 auto;
-        }}
-        .breadcrumb {{
-            font-size: 0.875rem;
-            color: #94a3b8;
-            margin-bottom: 1.5rem;
-            line-height: 2rem;
-        }}
-        body.pool-page .auth-topbar {{ position: absolute; top: 0.4rem; right: 1rem; margin: 0; padding: 0; max-width: none; width: auto; }}
+        {PAGE_CHROME_CSS}
+        {STANDARD_HEADER_CSS}
         header {{
             margin-bottom: 2rem;
-        }}
-        header h1 {{
-            font-size: 1.75rem;
-            font-weight: 700;
-            letter-spacing: 0.02em;
-            color: #f8fafc;
-            margin-top: 0.5rem;
         }}
         header p {{
             margin-top: 0.5rem;
@@ -2867,22 +2792,9 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>房地产资产证券化平台</title>
     <style>
-        * {{
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
-            min-height: 100vh;
-            color: #e2e8f0;
-            padding: 2rem 1rem 0.75rem;
-        }}
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-        }}
+        {PAGE_CHROME_CSS}
+        {DASHBOARD_BODY_CSS}
+        {STANDARD_HEADER_CSS}
         .page-header {{
             display: flex;
             flex-wrap: wrap;
@@ -2913,12 +2825,6 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             width: 24px;
             height: 24px;
             fill: #fff;
-        }}
-        .brand h1 {{
-            font-size: 1.3rem;
-            font-weight: 700;
-            color: #f8fafc;
-            line-height: 1.25;
         }}
         .brand p {{
             margin-top: 0.15rem;
@@ -3179,11 +3085,11 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         @media (max-width: 560px) {{
             .risk-grid {{ grid-template-columns: 1fr; }}
             .page-header {{ flex-direction: column; align-items: flex-start; }}
-            body {{ padding: 1rem 0.75rem 1.25rem; }}
+            body.dashboard-page {{ padding: 1rem 0.75rem 1.25rem; }}
         }}
     </style>
 </head>
-<body>
+<body class="dashboard-page">
     <div class="container">
         <header class="page-header">
             <div class="brand">

@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from html import escape
 from zoneinfo import ZoneInfo
 
-from app.ui_css import AUTH_TOPBAR_INLINE_CSS, PAGE_CHROME_CSS, TABLE_SCROLL_CSS
+from app.ui_css import BTN_CSS, FORM_FIELD_CSS, PAGE_CHROME_CSS, STANDARD_HEADER_CSS, TABLE_SCROLL_CSS
 
 DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -19,21 +19,16 @@ def _page_shell(title: str, body: str) -> str:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{escape(title)}</title>
     <style>
-        {AUTH_TOPBAR_INLINE_CSS}
         {PAGE_CHROME_CSS}
+        {STANDARD_HEADER_CSS}
+        {FORM_FIELD_CSS}
+        {BTN_CSS}
         h1 {{ font-size: 1.5rem; color: #f8fafc; margin: 0 0 0.5rem; }}
         p.muted {{ color: #94a3b8; margin-bottom: 1rem; font-size: 0.9rem; }}
         .card {{
             background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
             border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem;
         }}
-        label {{ display: block; font-size: 0.85rem; color: #94a3b8; margin: 0.75rem 0 0.25rem; }}
-        .container input, .container select, .container button {{
-            font: inherit; padding: 0.5rem 0.75rem; border-radius: 8px;
-            border: 1px solid rgba(255,255,255,0.15); background: rgba(15,23,42,0.8); color: #f8fafc;
-        }}
-        .container button {{ cursor: pointer; background: #0ea5e9; border-color: #0ea5e9; margin-top: 1rem; }}
-        .container button.secondary {{ background: transparent; margin-left: 0.5rem; }}
         {TABLE_SCROLL_CSS}
         th, td {{ padding: 0.5rem 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.08); text-align: left; }}
         th {{ color: #94a3b8; }}
@@ -73,14 +68,12 @@ def _page_shell(title: str, body: str) -> str:
             margin: 0;
         }}
         .sheet-toolbar {{ display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.75rem 0; }}
-        .sheet-toolbar button {{ margin-top: 0; font-size: 0.82rem; padding: 0.35rem 0.65rem; }}
         .sheet-cb {{ width: auto; margin-right: 0.35rem; }}
         .sheet-confirm-cb {{ width: auto; margin-left: 0.5rem; }}
         tr.row-reject {{ opacity: 0.55; }}
         tr.row-needs_confirm {{ background: rgba(251,191,36,0.06); }}
         .import-bar {{ margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.08); }}
         .filters {{ display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end; }}
-        .filters > div {{ min-width: 140px; }}
         .pager {{
             display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center;
             margin: 1rem 0; color: #94a3b8; font-size: 0.9rem;
@@ -140,12 +133,12 @@ def render_upload_page(trust_products: list[dict]) -> str:
         <select id="trust_product_id" style="width:100%">{options}</select>
         <label>Excel 文件（可多选）</label>
         <input type="file" id="files" multiple accept=".xlsx,.xls" style="width:100%">
-        <button type="button" onclick="runPreview()">预检</button>
+        <button type="button" class="btn-primary" onclick="runPreview()">预检</button>
     </div>
     <div class="card" id="result"><p class="muted">预检结果将显示在此处</p></div>
     <div class="card import-bar" id="importBar" style="display:none">
         <p class="muted">已选 <strong id="selCount">0</strong> 个 Sheet · 仅导入选中项</p>
-        <button type="button" onclick="runImport()">确认导入选中 Sheet</button>
+        <button type="button" class="btn-primary" onclick="runImport()">确认导入选中 Sheet</button>
     </div>
     <script>
     let batchUuid = null;
@@ -269,8 +262,8 @@ def render_upload_page(trust_products: list[dict]) -> str:
         const sheets = data.sheets || [];
         let html = '<p class="' + (ok ? 'ok' : 'err') + '">file_id: ' + (data.file_id || data.batch_uuid || '') + '</p>';
         html += '<div class="sheet-toolbar">';
-        html += '<button type="button" class="secondary" onclick="selectAllImport()">全选 import</button>';
-        html += '<button type="button" class="secondary" onclick="selectExcludeNeedsConfirm()">仅 import（排除 needs_confirm）</button>';
+        html += '<button type="button" class="btn-secondary" onclick="selectAllImport()">全选 import</button>';
+        html += '<button type="button" class="btn-secondary" onclick="selectExcludeNeedsConfirm()">仅 import（排除 needs_confirm）</button>';
         html += '</div>';
         html += '<div class="table-wrap"><table><tr><th>选</th><th>file</th><th>sheet</th><th>type</th><th>rows</th><th>amount</th><th>status</th><th>reason</th></tr>';
         sheets.forEach(s => {{
@@ -647,7 +640,7 @@ def render_records_page(
     <div class="card filters">
         <form id="f" method="get" class="filters" style="width:100%">
             {filter_inputs}
-            <div><button type="submit">筛选</button></div>
+            <div><button type="submit" class="btn-primary">筛选</button></div>
         </form>
         {snapshot_banner}
     </div>

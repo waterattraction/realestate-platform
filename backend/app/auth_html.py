@@ -10,9 +10,14 @@ USER_BAR_CSS = """
     justify-content: flex-end;
     align-items: center;
     gap: 1rem;
-    max-width: 1200px;
-    margin: 0 auto 1rem;
-    padding: 0 0.25rem;
+    position: absolute;
+    top: 0.4rem;
+    right: 1rem;
+    margin: 0;
+    padding: 0;
+    max-width: none;
+    width: auto;
+    z-index: 10;
     font-size: 0.9rem;
     color: #94a3b8;
 }
@@ -48,9 +53,12 @@ def render_user_bar(username: str) -> str:
 
 def inject_user_bar(html: str, username: str) -> str:
     bar = render_user_bar(username)
-    marker = "<body>"
-    if marker in html:
-        return html.replace(marker, f"{marker}\n{bar}", 1)
+    marker = "<body"
+    idx = html.find(marker)
+    if idx >= 0:
+        end = html.find(">", idx)
+        if end >= 0:
+            return html[: end + 1] + "\n" + bar + html[end + 1 :]
     return bar + html
 
 

@@ -14,44 +14,37 @@ alwaysApply: false
 
 | 项 | 规范 |
 |----|------|
-| `body` padding | 默认 **`2rem 1rem`**；工作台类 **`1.5rem 1rem`** |
-| 手机顶边 | **不得小于 `1rem`** |
-| 用户栏 | **独立一行**；`auth_html.inject_user_bar` 或等效 `.auth-topbar`，`margin-bottom: 1rem` |
-| 子页 | **必须有 breadcrumb**（`首页 / 模块 / …`）；**首页除外** |
-| `h1` | 标准页 **1.5–1.75rem**；首页 **1.25–1.35rem** |
-| 用户栏位置 | **禁止** 把用户信息与退出按钮塞进 `page-header` 右侧 |
+| CSS 单源 | 引用 [`ui_css.py`](../backend/app/ui_css.py)：`PAGE_CHROME_CSS`、`STANDARD_HEADER_CSS`、`BTN_CSS`、`TABLE_SCROLL_CSS` |
+| `body` padding（Standard） | **`0.4rem 1rem 2rem`** |
+| `body` padding（Dashboard） | **`2rem 1rem 0.75rem`**（`DASHBOARD_BODY_CSS`） |
+| `body` padding（工作台） | **`0.4rem 1rem 0`**（`WORKBENCH_BODY_CSS`） |
+| `.container` | **max-width 1400px** |
+| 用户栏 | **`auth_html.inject_user_bar`**；`.auth-topbar` **绝对定位**右上角（`USER_BAR_CSS`） |
+| 子页 | **必须有 breadcrumb**（`0.875rem`，`margin-bottom: 1.5rem`）；**首页除外** |
+| `h1` | Standard **1.5rem**；Dashboard 品牌 **1.3rem** |
+| 按钮 | **`.btn-primary` / `.btn-secondary`**；禁止 `.container button` 全局规则 |
 
 ## Dashboard 例外
 
-- **仅 `GET /` 首页** 可使用 Dashboard 紧凑模式。
-- **只允许压缩 KPI 以下内容区**（节间距、chip、mini KPI、风险卡）。
-- **不允许压缩 Chrome**（body 顶边、auth-topbar、品牌 header）来换取单屏。
-- **禁止** 桌面 `body` 顶边 **&lt; 1rem**。
+- **仅 `GET /` 首页** 可使用 Dashboard 紧凑模式（`body.dashboard-page`）。
+- **只允许压缩 KPI 以下内容区**。
+- **不允许** 改动容器宽度或用户栏位置来换取单屏。
 
 ## 禁止项
 
 - 用户栏并入 `page-header`
-- 大块空指标占位（如 **180px**「暂无数据」框）
-- 新页面复制整套漂移 CSS，不对齐 Chrome 五参数
+- 复制漂移 Chrome CSS 而不引用 `ui_css.py`
+- `.container button { … }` 全局样式
 - `body { overflow: hidden }`
-- 表格页不引用 [`ui_css.TABLE_SCROLL_CSS`](../backend/app/ui_css.py)
-
-## 组件速查
-
-- **表格页**：必须 `from app.ui_css import TABLE_SCROLL_CSS` 并写入 `<style>`。
-- **空态**：`—` 或单行 muted；禁止大块占位。
-- **背景 / 语义色**：与标准页统一（见 `ui_layout.md` §6）。
+- 表格页不引用 `TABLE_SCROLL_CSS`
 
 ## 新页 / 改页检查清单
 
 1. 已读 `docs/standards/ui_layout.md`
-2. `body` padding 符合 Standard / 工作台约定；手机顶边 ≥ 1rem
-3. `auth-topbar` 独立一行
+2. 已引用 `PAGE_CHROME_CSS`（及 Dashboard/Workbench 覆盖）
+3. `inject_user_bar` + 绝对定位 auth-topbar
 4. 子页有 breadcrumb（首页无）
-5. `h1` 字号在阶梯内
-6. 表格页含 `TABLE_SCROLL_CSS`
-7. 非首页不得使用 Dashboard 紧凑模式
-8. 无大块空态、无 `overflow: hidden`
+5. 按钮用语义 class；表格页含 `TABLE_SCROLL_CSS`
 
 ## 与数据规范的关系
 
