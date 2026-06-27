@@ -1441,12 +1441,17 @@ def render_overdue_html(
             background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
             min-height: 100vh;
             color: #e2e8f0;
-            padding: 2rem 1rem;
+            padding: 0.4rem 1rem 2rem;
+            position: relative;
+        }}
+        body.overdue-page .auth-topbar {{
+            position: absolute; top: 0.4rem; right: 1rem;
+            margin: 0; padding: 0; max-width: none; width: auto;
         }}
         a {{ color: #38bdf8; text-decoration: none; }}
         a:hover {{ text-decoration: underline; }}
         .container {{ max-width: 1200px; margin: 0 auto; }}
-        .breadcrumb {{ font-size: 0.875rem; color: #94a3b8; margin-bottom: 1.5rem; }}
+        .breadcrumb {{ font-size: 0.875rem; color: #94a3b8; margin-bottom: 1.5rem; line-height: 2rem; }}
         header {{ margin-bottom: 2rem; }}
         header h1 {{ font-size: 1.75rem; font-weight: 700; color: #f8fafc; }}
         header p {{ margin-top: 0.5rem; color: #94a3b8; font-size: 0.95rem; }}
@@ -1567,7 +1572,7 @@ def render_overdue_html(
         }}
     </style>
 </head>
-<body>
+<body class="overdue-page">
     <div class="container">
         <nav class="breadcrumb"><a href="/">首页</a> / 逾期管理</nav>
         <header>
