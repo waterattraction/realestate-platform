@@ -2,6 +2,8 @@
 
 from sqlalchemy.engine import Engine
 
+DEFAULT_DELINQUENCY_BUCKET = "M2_PLUS"
+
 from app.repo.followup_repo import FollowupRepo
 from app.repo.issuance_repo import IssuanceRepo
 from app.repo.marks_repo import MarksRepo
@@ -265,6 +267,140 @@ class OverdueWorkbenchService:
             "queue": queue,
             "selected_asset_id": selected_id,
             "detail": detail,
+        }
+
+    def get_asset_list(
+        self,
+        *,
+        trust_product_id: int | None,
+        data_date: str | None = None,
+    ) -> dict:
+        """Return asset_list dict (asset_code-based) for render.py."""
+        resolved_date = self._monitor.resolve_latest_data_date(trust_product_id, data_date)
+        if resolved_date is None:
+            return {"data_date": None, "items": []}
+
+        rows = self._monitor.fetch_asset_queue(trust_product_id, resolved_date)
+        items = []
+        for row in rows:
+            ac = row["asset_code"]
+            pid = row["trust_product_id"]
+            custodies = list(row.get("custody_asset_codes") or [])
+            remaining = float(row.get("remaining_amount") or 0)
+            overdue_days = row.get("overdue_days")
+
+            if checks_service.is_es_closed(remaining):
+                bucket = "ES"
+            else:
+                bucket = checks_service.calc_risk_level(int(overdue_days or 0), remaining)
+
+            followup_count = sum(
+                self._followup.count_entries_by_custody(pid, c) for c in custodies
+            )
+            primary_custody = custodies[0] if custodies else ac
+            internal_status = self._marks.fetch_mark(
+                pid, primary_custody, resolved_date
+            ).get("internal_status")
+
+            items.append(
+                {
+                    "asset_code": ac,
+                    "trust_product_id": pid,
+                    "trust_product_name": row.get("trust_product_name"),
+                    "overdue_days": overdue_days,
+                    "remaining_amount": remaining,
+                    "delinquency_bucket": bucket,
+                    "followup_count": followup_count,
+                    "internal_status": internal_status,
+                    "custody_asset_codes": custodies,
+                    "primary_custody_asset_code": primary_custody,
+                }
+            )
+        return {"data_date": resolved_date, "items": items}
+
+    def get_workbench_page_dto(
+        self,
+        *,
+        trust_product_id: int | None = None,
+        asset_code: str | None = None,
+        custody_asset_code: str | None = None,
+        delinquency_bucket: str = "M2_PLUS",
+        data_date: str | None = None,
+        list_product_id: int | None = None,
+        list_product_scope_explicit: bool = False,
+        trust_asset_id: int | None = None,
+    ) -> dict:
+        """Build full DTO expected by render.py (asset_code-centric)."""
+        # Resolve effective custody: use provided value, or fall back to asset_code
+        effective_custody = custody_asset_code or asset_code
+        effective_asset_code = asset_code or custody_asset_code
+
+        filters = {
+            "trust_product_id": trust_product_id,
+            "delinquency_bucket": delinquency_bucket,
+            "list_product_id": list_product_id,
+            "list_product_scope_explicit": list_product_scope_explicit,
+        }
+
+        # Get detail DTO using existing method
+        old = self.get_detail(
+            trust_product_id=trust_product_id,
+            custody_asset_code=effective_custody,
+            trust_asset_id=trust_asset_id,
+            data_date=data_date,
+        )
+        resolved_date = old.get("data_date")
+
+        # Determine list scope product id
+        list_pid = list_product_id if list_product_scope_explicit else trust_product_id
+
+        # Get asset list (may be slow on large datasets; acceptable for now)
+        asset_list = self.get_asset_list(
+            trust_product_id=list_pid,
+            data_date=resolved_date,
+        )
+
+        # Collect custody codes from monitor splits
+        old_queue = old.get("queue") or []
+        custody_codes = list(
+            dict.fromkeys(
+                q.get("custody_asset_code")
+                for q in old_queue
+                if q.get("custody_asset_code")
+            )
+        )
+        primary_custody = custody_codes[0] if custody_codes else effective_custody
+
+        # Build nested asset dict for render.py
+        asset_dict: dict = {}
+        if effective_asset_code or effective_custody:
+            asset_dict = {
+                "asset_code": effective_asset_code,
+                "custody_asset_codes": custody_codes,
+                "primary_custody_asset_code": primary_custody,
+                "selected_trust_asset_id": old.get("selected_asset_id"),
+                "selected_split": old.get("detail"),
+                "summary": old.get("summary"),
+                "checks": old.get("checks"),
+                "issuance_records": old.get("issuance_records") or [],
+                "repayment": old.get("repayment") or {},
+                "monitor": old.get("monitor") or {},
+                "trust_mark": old.get("trust_mark"),
+                "timeline": old.get("timeline") or [],
+                "ops": old.get("ops"),
+                "followup_case": old.get("followup_case"),
+            }
+
+        return {
+            "trust_product_id": trust_product_id,
+            "asset_code": effective_asset_code,
+            "primary_custody_asset_code": primary_custody,
+            "custody_asset_codes": custody_codes,
+            "identity_id": old.get("identity_id"),
+            "data_date": resolved_date,
+            "filters": filters,
+            "asset": asset_dict,
+            "asset_list": asset_list,
         }
 
     def get_product_queue(

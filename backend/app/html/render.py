@@ -3,6 +3,11 @@
 from html import escape
 from urllib.parse import quote
 
+from app.field_labels import (
+    ASSET_CODE_LABEL,
+    CUSTODY_ASSET_CODE_LABEL,
+    SOURCE_ASSET_CODE_LABEL,
+)
 from app.html.formatters import (
     fmt_check_result,
     fmt_delinquency_badge,
@@ -15,30 +20,107 @@ from app.overdue.ui_constants import (
     TRUST_MARKER_OPTIONS,
 )
 from app.service.checks_service import RECONCILIATION_BASIS_LABEL
+from app.service.overdue_workbench import DEFAULT_DELINQUENCY_BUCKET
+from app.ui_css import TABLE_SCROLL_CSS
 
 _TIMELINE_PREVIEW = 3
 _REPAYMENT_PREVIEW = 5
 
+_BUCKET_FILTER_OPTIONS = [
+    ("M2_PLUS", "M2+"),
+    ("M2", "M2"),
+    ("M3", "M3"),
+    ("M3_PLUS", "M3+"),
+    ("M1", "M1"),
+    ("ES", "ES（提前结清）"),
+]
+
+
+def _filter_bar_product_id(dto: dict) -> int | None:
+    filters = dto.get("filters") or {}
+    if filters.get("list_product_scope_explicit"):
+        return filters.get("list_product_id")
+    return dto.get("trust_product_id")
+
+
+def _append_list_product_qs(parts: list[str], filters: dict, *, list_filter: int | None) -> None:
+    if filters.get("list_product_scope_explicit"):
+        parts.append(
+            f"list_product_id={list_filter}" if list_filter is not None else "list_product_id="
+        )
+    elif list_filter is None and filters.get("trust_product_id"):
+        parts.append("list_product_id=")
+
+
+def _asset_list_item_href(
+    item: dict,
+    *,
+    filters: dict,
+    bucket: str,
+    data_date: str | None,
+    list_filter: int | None,
+) -> str:
+    ac = item.get("asset_code") or ""
+    pid = item.get("trust_product_id")
+    parts = [f"trust_product_id={pid}", f"asset_code={quote(str(ac))}"]
+    if bucket:
+        parts.append(f"delinquency_bucket={quote(str(bucket))}")
+    if data_date:
+        parts.append(f"data_date={quote(str(data_date))}")
+    if list_filter is None and pid is not None:
+        parts.append("list_product_id=")
+    elif filters.get("list_product_scope_explicit"):
+        parts.append(
+            f"list_product_id={list_filter}" if list_filter is not None else "list_product_id="
+        )
+    return f"/overdue/workbench?{'&'.join(parts)}"
+
+
+def _is_selected_asset_item(
+    item_product_id,
+    item_asset_code,
+    *,
+    selected_product_id: int | None,
+    selected_asset_code: str | None,
+) -> bool:
+    if not selected_asset_code or not selected_product_id:
+        return False
+    return (
+        str(item_asset_code) == str(selected_asset_code)
+        and int(item_product_id) == int(selected_product_id)
+    )
+
 
 def render_overdue_workbench_html(
     dto: dict,
-    trust_product_id: int | None = None,
-    custody_asset_code: str | None = None,
+    *,
     new_followup: bool = False,
 ) -> str:
-    queue = dto.get("queue") or []
-    detail = dto.get("detail")
-    data_date = dto.get("data_date") or "—"
-    resolved_custody = custody_asset_code or dto.get("custody_asset_code")
+    if dto.get("legacy_error"):
+        return _render_legacy_error_page(dto)
 
-    def workbench_qs(trust_asset_id: int | None = None) -> str:
-        parts = []
+    trust_product_id = dto.get("trust_product_id")
+    current_asset_code = dto.get("asset_code")
+    filters = dto.get("filters") or {}
+    delinquency_bucket = filters.get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
+    asset = dto.get("asset") or {}
+    selected_trust_asset_id = asset.get("selected_trust_asset_id")
+
+    def workbench_qs(trust_asset_id: int | None = None, asset_code: str | None = None) -> str:
+        parts: list[str] = []
         if trust_product_id is not None:
             parts.append(f"trust_product_id={trust_product_id}")
-        if resolved_custody:
-            parts.append(f"custody_asset_code={quote(str(resolved_custody))}")
-        if trust_asset_id is not None:
-            parts.append(f"trust_asset_id={trust_asset_id}")
+        ac = asset_code if asset_code is not None else current_asset_code
+        if ac:
+            parts.append(f"asset_code={quote(str(ac))}")
+        if delinquency_bucket:
+            parts.append(f"delinquency_bucket={quote(str(delinquency_bucket))}")
+        if dto.get("data_date"):
+            parts.append(f"data_date={quote(str(dto['data_date']))}")
+        tid = trust_asset_id if trust_asset_id is not None else selected_trust_asset_id
+        if tid is not None:
+            parts.append(f"trust_asset_id={tid}")
+        _append_list_product_qs(parts, filters, list_filter=_filter_bar_product_id(dto))
         return "?" + "&".join(parts) if parts else ""
 
     product_hidden = (
@@ -46,29 +128,39 @@ def render_overdue_workbench_html(
         if trust_product_id is not None
         else ""
     )
-    custody_hidden = (
-        f'<input type="hidden" name="custody_asset_code" value="{escape(resolved_custody)}">'
-        if resolved_custody
+    asset_hidden = (
+        f'<input type="hidden" name="asset_code" value="{escape(str(current_asset_code))}">'
+        if current_asset_code
         else ""
     )
-
-    sidebar_html = _render_sidebar(
-        dto, queue, trust_product_id, resolved_custody, workbench_qs
+    primary_custody = dto.get("primary_custody_asset_code") or ""
+    custody_hidden = (
+        f'<input type="hidden" name="custody_asset_code" value="{escape(primary_custody)}">'
+        if primary_custody
+        else ""
     )
-    panels = _render_panels(dto, detail, resolved_custody)
-    header_actions = _render_header_actions(trust_product_id)
-    top_bar = _render_top_bar(dto, data_date)
-    write_bar = ""
-    if detail:
-        write_bar = _panel_followup_write(
-            product_hidden, custody_hidden, workbench_qs, dto, new_followup=new_followup
-        )
+    bucket_hidden = (
+        f'<input type="hidden" name="delinquency_bucket" value="{escape(delinquency_bucket)}">'
+    )
 
+    sidebar_html = _render_sidebar(dto, trust_product_id, current_asset_code, workbench_qs)
+    detail_html = _render_panels(dto, asset, workbench_qs)
     json_qs = workbench_qs()
     identity_id = dto.get("identity_id")
-    identity_link = ""
-    if identity_id:
-        identity_link = f' · <a href="/asset-workbench/{identity_id}">Asset Workbench</a>'
+    header_actions = _render_header_actions(trust_product_id, json_qs, identity_id)
+    filter_bar = _render_filter_bar(dto, workbench_qs)
+    selection_notice = _render_selection_notice(dto.get("selection_notice"))
+    write_bar = ""
+    if asset.get("selected_split") or asset.get("monitor", {}).get("splits"):
+        write_bar = _panel_followup_write(
+            product_hidden,
+            asset_hidden,
+            custody_hidden,
+            bucket_hidden,
+            workbench_qs,
+            dto,
+            new_followup=new_followup,
+        )
 
     scroll_flag = "1" if new_followup else "0"
 
@@ -77,29 +169,31 @@ def render_overdue_workbench_html(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>逾期跟进工作台 · 房地产资产证券化平台</title>
+    <title>资产逾期跟进工作台 · 房地产资产证券化平台</title>
+    <style>{TABLE_SCROLL_CSS}</style>
     {_WORKBENCH_CSS}
 </head>
-<body data-scroll-followup="{scroll_flag}">
+<body class="workbench-page" data-scroll-followup="{scroll_flag}">
 <div class="page-wrap">
 <div class="container">
     <div class="breadcrumb">
-        <a href="/overdue">逾期管理</a> / 托管房源跟进工作台
+        <a href="/">主页</a> / <a href="/overdue">逾期管理</a> / 资产逾期跟进工作台
     </div>
     <header class="page-header">
         <div class="header-row">
-            <h1>托管房源逾期跟进工作台</h1>
+            <h1>资产逾期跟进工作台</h1>
             {header_actions}
         </div>
-        {top_bar}
-        <p class="muted header-meta">数据只读区 + 底栏录入 · <a href="/overdue/workbench/detail{json_qs}">JSON</a>{identity_link}</p>
+        <p class="header-sub muted">按资产主编号统一管理监控、还款、跟进与风险。</p>
+        {filter_bar}
+        {selection_notice}
     </header>
     <div class="workbench">
         <aside class="sidebar panel">
             {sidebar_html}
         </aside>
-        <main class="workbench-main">
-            <div class="main-body">{panels}</div>
+        <main class="detail-main">
+            {detail_html}
         </main>
     </div>
 </div>
@@ -110,20 +204,120 @@ def render_overdue_workbench_html(
 </html>"""
 
 
-def _render_header_actions(trust_product_id: int | None) -> str:
+def _render_legacy_error_page(dto: dict) -> str:
+    err = dto.get("legacy_error") or {}
+    message = escape(str(err.get("message") or "无法打开工作台"))
+    candidates = err.get("candidates") or []
+    links = ""
+    for cand in candidates:
+        url = escape(str(cand.get("url") or ""))
+        code = escape(str(cand.get("asset_code") or ""))
+        links += f'<li><a href="{url}">{ASSET_CODE_LABEL} {code}</a></li>'
+    list_html = f"<ul>{links}</ul>" if links else ""
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>资产逾期跟进工作台 · 无法解析</title>
+    {_WORKBENCH_CSS}
+</head>
+<body>
+<div class="page-wrap"><div class="container">
+    <div class="breadcrumb">
+        <a href="/">主页</a> / <a href="/overdue">逾期管理</a> / 资产逾期跟进工作台
+    </div>
+    <header class="page-header">
+        <h1>资产逾期跟进工作台</h1>
+        <p class="header-sub muted">按资产主编号统一管理监控、还款、跟进与风险。</p>
+    </header>
+    <div class="panel" style="padding:1.25rem">
+        <p class="warn-text">{message}</p>
+        {list_html}
+        <p style="margin-top:1rem"><a href="/overdue/workbench">返回资产清单</a></p>
+    </div>
+</div></div>
+</body>
+</html>"""
+
+
+def _render_filter_bar(dto: dict, workbench_qs) -> str:
+    filters = dto.get("filters") or {}
+    active_bucket = filters.get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
+    filter_pid = _filter_bar_product_id(dto)
+    data_date = dto.get("data_date") or ""
+    products = dto.get("products") or []
+    current_asset = dto.get("asset_code")
+    detail_pid = dto.get("trust_product_id")
+
+    product_opts = '<option value="">全部信托产品</option>'
+    for p in products:
+        sel = " selected" if filter_pid == p["id"] else ""
+        product_opts += (
+            f'<option value="{p["id"]}"{sel}>{escape(p["name"])}</option>'
+        )
+
+    bucket_opts = ""
+    for val, label in _BUCKET_FILTER_OPTIONS:
+        sel = " selected" if active_bucket == val else ""
+        bucket_opts += f'<option value="{val}"{sel}>{escape(label)}</option>'
+
+    detail_fields = ""
+    if current_asset and detail_pid is not None:
+        detail_fields = (
+            f'<input type="hidden" name="trust_product_id" value="{detail_pid}">'
+            f'<input type="hidden" name="asset_code" value="{escape(str(current_asset))}">'
+        )
+
+    date_hidden = ""
+    if data_date:
+        date_hidden = f'<input type="hidden" name="data_date" value="{escape(str(data_date))}">'
+
+    return f"""<form class="filter-form workbench-filter" method="get" action="/overdue/workbench">
+        <label>信托产品
+            <select name="list_product_id">{product_opts}</select>
+        </label>
+        <label>M 级
+            <select name="delinquency_bucket">{bucket_opts}</select>
+        </label>
+        <span class="filter-readonly-date">
+            <span class="filter-readonly-lbl">数据日期</span>
+            <span class="filter-date-val">{escape(str(data_date) or "—")}</span>
+        </span>
+        {date_hidden}
+        {detail_fields}
+        <button type="submit" class="btn btn-compact">应用筛选</button>
+    </form>"""
+
+
+def _render_selection_notice(notice: dict | None) -> str:
+    if not notice or not notice.get("message"):
+        return ""
+    return (
+        f'<p class="selection-notice muted tiny">{escape(str(notice["message"]))}</p>'
+    )
+
+
+def _render_header_actions(
+    trust_product_id: int | None,
+    json_qs: str,
+    identity_id: int | None = None,
+) -> str:
     back_href = "/overdue"
     if trust_product_id is not None:
         back_href = f"/overdue?trust_product_id={trust_product_id}"
+    extra_links = f'<a class="header-tool-link" href="/overdue/workbench/detail{json_qs}">JSON</a>'
+    if identity_id:
+        extra_links += (
+            f'<a class="header-tool-link" href="/asset-workbench/{identity_id}">'
+            f"Asset Workbench</a>"
+        )
     return f"""<div class="header-actions">
-        <a class="btn btn-ghost" href="{back_href}">返回列表</a>
-        <button type="button" class="btn btn-ghost" onclick="location.reload()">刷新数据</button>
+        <div class="header-tool-links">{extra_links}</div>
+        <div class="header-action-btns">
+            <a class="btn btn-ghost" href="{back_href}">返回列表</a>
+            <button type="button" class="btn btn-ghost" onclick="location.reload()">刷新数据</button>
+        </div>
     </div>"""
-
-
-def _render_top_bar(dto: dict, data_date: str) -> str:
-    summary = dto.get("summary") or {}
-    product = escape(str(summary.get("trust_product_name") or "—"))
-    return f"""<p class="header-sub">产品 <strong>{product}</strong> · 数据日期 {escape(data_date)}</p>"""
 
 
 def _overdue_label(summary: dict) -> str:
@@ -136,129 +330,207 @@ def _overdue_label(summary: dict) -> str:
     return "—"
 
 
-def _render_hero_overdue_card(dto: dict, custody: str | None, checks: dict | None) -> str:
-    summary = dto.get("summary") or {}
-    custody_esc = escape(str(custody or "—"))
+def _fmt_source_asset_code(value) -> str:
+    if value is None or str(value).strip() == "":
+        return "—"
+    return str(value)
+
+
+def _render_summary_card(dto: dict, asset: dict) -> str:
+    """Summary Card only — used as grid-area: summary in detail-grid."""
+    summary = asset.get("summary") or {}
+    checks = asset.get("checks")
+    asset_code = escape(str(asset.get("asset_code") or dto.get("asset_code") or "—"))
+    custodies = asset.get("custody_asset_codes") or dto.get("custody_asset_codes") or []
+    custody_str = "、".join(escape(str(c)) for c in custodies) if custodies else "—"
+    product = escape(str(summary.get("trust_product_name") or "—"))
+    split_count = summary.get("split_count", 0)
     bucket = summary.get("delinquency_bucket")
-    od_label = escape(_overdue_label(summary))
-    internal = escape(str(summary.get("internal_status") or "待跟进"))
-    initial = summary.get("initial_transfer_amount")
-    repaid = summary.get("repaid_amount")
     remaining = summary.get("remaining_amount")
-    formula = (
-        f"初始 {fmt_money(initial)} − 已还 {fmt_money(repaid)} = 剩余 {fmt_money(remaining)}"
-    )
-    od_cls = "hero-stat-warn" if summary.get("overdue_days") and bucket != "ES" else ""
-    checks_inline = _render_hero_checks_inline(checks)
-    return f"""<div class="hero-overdue-card">
-        <div class="hero-main">
-            <div class="hero-remaining-block">
-                <span class="hero-lbl">剩余金额</span>
-                <span class="hero-remaining-val">{fmt_money(remaining)}</span>
-                <span class="hero-formula muted tiny">{formula}</span>
+    overdue_days = summary.get("overdue_days")
+
+    remaining_str = fmt_money(remaining)
+    if bucket == "ES":
+        overdue_str = "提前结清"
+        od_cls = ""
+    elif overdue_days:
+        overdue_str = f"{overdue_days} 天"
+        od_cls = " info-warn"
+    else:
+        overdue_str = "—"
+        od_cls = ""
+
+    if checks:
+        ok = checks["balance_equation"]["passed"] and checks["cross_sheet_repayment"]["passed"]
+        check_status = "通过" if ok else "异常"
+        check_meta_cls = "" if ok else " info-warn"
+    else:
+        check_status = "—"
+        check_meta_cls = ""
+
+    return f"""<div class="card-summary">
+        <div class="detail-primary">
+            <div class="info-group">
+                <span class="info-label">{ASSET_CODE_LABEL}</span>
+                <span class="info-value-xl">{asset_code}</span>
             </div>
-            <div class="hero-stats">
-                <div class="hero-stat"><span class="hero-stat-lbl">托管号</span><span class="hero-stat-val">{custody_esc}</span></div>
-                <div class="hero-stat"><span class="hero-stat-lbl">累计已还</span><span class="hero-stat-val num">{fmt_money(repaid)}</span></div>
-                <div class="hero-stat"><span class="hero-stat-lbl">逾期</span><span class="hero-stat-val {od_cls}">{od_label}</span></div>
-                <div class="hero-stat"><span class="hero-stat-lbl">M 级</span><span class="hero-stat-val">{fmt_delinquency_badge(bucket)}</span></div>
-                <div class="hero-stat"><span class="hero-stat-lbl">内部状态</span><span class="hero-stat-val">{internal}</span></div>
-                <div class="hero-stat"><span class="hero-stat-lbl">分笔</span><span class="hero-stat-val">{summary.get('split_count', 0)} 笔</span></div>
+            <div class="info-group">
+                <span class="info-label">剩余金额</span>
+                <span class="info-value-xl">{remaining_str}</span>
+            </div>
+            <div class="info-group">
+                <span class="info-label">逾期天数</span>
+                <span class="info-value-xl{od_cls}">{overdue_str}</span>
             </div>
         </div>
-        {checks_inline}
+        <div class="detail-secondary">
+            <div class="info-group">
+                <span class="info-label">所属产品</span>
+                <span class="info-value-md">{product}</span>
+            </div>
+            <div class="info-group">
+                <span class="info-label">M 级</span>
+                <span class="info-value-md">{fmt_delinquency_badge(bucket)}</span>
+            </div>
+            <div class="info-group">
+                <span class="info-label">资产分笔数</span>
+                <span class="info-value-md">{split_count} 笔</span>
+            </div>
+        </div>
+        <div class="detail-meta">
+            <div class="info-group">
+                <span class="info-label">{CUSTODY_ASSET_CODE_LABEL}</span>
+                <span class="info-value-sm">{custody_str}</span>
+            </div>
+            <div class="info-group">
+                <span class="info-label">核对状态</span>
+                <span class="info-value-sm{check_meta_cls}">{check_status}</span>
+            </div>
+        </div>
     </div>"""
 
 
-def _hero_check_segment(label: str, passed: bool, tooltip: str, diff) -> str:
-    diff_cls = "hero-check-diff-warn" if not passed else ""
-    return f"""<span class="hero-check-segment" title="{escape(tooltip)}">
-        <span class="hero-check-name">{escape(label)}</span>
-        {fmt_check_result(passed)}
-        <span class="hero-check-diff {diff_cls}">差额 {fmt_money(diff)}</span>
-    </span>"""
+def _render_hero_asset_card(dto: dict, asset: dict) -> str:
+    """Legacy wrapper: Summary + Check in sequence (not used by detail-grid path)."""
+    return _render_summary_card(dto, asset) + "\n" + _render_check_card(asset.get("checks"))
 
 
-def _render_hero_checks_inline(checks: dict | None) -> str:
+def _render_check_card(checks: dict | None) -> str:
+    """Compact Check Card — shows balance equation and cross-sheet repayment results."""
     if not checks:
-        return """<div class="hero-checks-inline">
-            <div class="hero-checks-row muted tiny">金额检查：—</div>
-        </div>"""
+        return '<div class="card-check"><span class="muted tiny">金额核对：—</span></div>'
     bal = checks["balance_equation"]
     cross = checks["cross_sheet_repayment"]
-    bal_tip = (
-        f"剩余 {fmt_money(bal['left_amount'])} vs 初始−已还 {fmt_money(bal['right_amount'])}"
-    )
+    has_anomaly = not (bal["passed"] and cross["passed"])
+    alert_cls = " card-check-alert" if has_anomaly else ""
+    bal_tip = f"剩余 {fmt_money(bal['left_amount'])} vs 初始−已还 {fmt_money(bal['right_amount'])}"
     cross_tip = (
         f"监控已还 {fmt_money(cross['left_amount'])} vs 还款明细 "
         f"{fmt_money(cross['right_amount'])}"
     )
-    has_anomaly = not (bal["passed"] and cross["passed"])
-    alert_cls = " hero-checks-alert" if has_anomaly else ""
-    seg_bal = _hero_check_segment("余额等式", bal["passed"], bal_tip, bal["diff_amount"])
-    seg_cross = _hero_check_segment("跨表已还", cross["passed"], cross_tip, cross["diff_amount"])
-    return f"""<div class="hero-checks-inline{alert_cls}">
-        <div class="hero-checks-row">
-            {seg_bal}
-            <span class="hero-check-sep" aria-hidden="true">·</span>
-            {seg_cross}
-        </div>
-        <p class="hero-check-basis muted tiny">核对基准：{escape(RECONCILIATION_BASIS_LABEL)}</p>
+
+    def check_row(label: str, passed: bool, tip: str, diff) -> str:
+        res_cls = "check-pass" if passed else "check-fail"
+        return (
+            f'<div class="check-row" title="{escape(tip)}">'
+            f'<span class="check-label">{escape(label)}</span>'
+            f'<span class="check-result {res_cls}">{fmt_check_result(passed)}</span>'
+            f'<span class="check-diff">差额 {fmt_money(diff)}</span>'
+            f"</div>"
+        )
+
+    return f"""<div class="card-check{alert_cls}">
+        <div class="card-check-title">资产金额核对</div>
+        {check_row("余额等式", bal["passed"], bal_tip, bal["diff_amount"])}
+        {check_row("跨表已还", cross["passed"], cross_tip, cross["diff_amount"])}
+        <p class="check-basis muted tiny">核对基准：{escape(RECONCILIATION_BASIS_LABEL)}</p>
     </div>"""
 
 
 def _render_sidebar(
     dto: dict,
-    queue: list,
     trust_product_id: int | None,
-    current_custody: str | None,
+    current_asset_code: str | None,
     workbench_qs,
 ) -> str:
-    product_queue_html = _render_product_queue(
-        dto.get("product_queue") or {}, trust_product_id, current_custody
+    asset_list_html = _render_asset_list(
+        dto.get("asset_list") or {},
+        trust_product_id,
+        current_asset_code,
+        dto.get("filters") or {},
     )
-    custody_block = _render_custody_block(
-        queue,
-        dto.get("selected_asset_id"),
-        workbench_qs,
-        current_custody,
-        dto.get("trust_mark") or {},
-        dto.get("summary") or {},
-    )
+    asset_info = _render_asset_info_card(dto, workbench_qs)
+    bucket = (dto.get("filters") or {}).get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
+    bucket_label = dict(_BUCKET_FILTER_OPTIONS).get(bucket, bucket)
     return f"""
         <div class="sidebar-section">
-            <div class="panel-hd">产品跟进清单 M2+</div>
-            <div class="queue-body compact-queue">{product_queue_html}</div>
+            <div class="panel-hd">资产清单 <span class="muted tiny">· {escape(str(bucket_label))}</span></div>
+            <div class="queue-body compact-queue">{asset_list_html}</div>
         </div>
-        <div class="sidebar-section sidebar-custody">
-            {custody_block}
+        <div class="sidebar-section sidebar-asset-info">
+            {asset_info}
         </div>
     """
 
 
-def _render_product_queue(
-    product_queue: dict, trust_product_id: int | None, current_custody: str | None
+def _render_asset_list(
+    asset_list: dict,
+    trust_product_id: int | None,
+    current_asset_code: str | None,
+    filters: dict,
 ) -> str:
-    items = product_queue.get("items") or []
+    items = asset_list.get("items") or []
     if not items:
-        return '<div class="empty">暂无 M2+ 待跟进</div>'
+        return '<div class="empty">暂无符合条件的资产</div>'
+    bucket = filters.get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
+    data_date = asset_list.get("data_date")
+    list_filter = (
+        filters.get("list_product_id")
+        if filters.get("list_product_scope_explicit")
+        else trust_product_id
+    )
     html = ""
     for it in items:
-        custody = it.get("custody_asset_code") or ""
-        active = "active" if custody == current_custody else ""
-        pid = trust_product_id or product_queue.get("trust_product_id")
-        href = f"/overdue/workbench?trust_product_id={pid}&custody_asset_code={quote(str(custody))}"
-        bucket = it.get("delinquency_bucket")
-        bucket_html = fmt_delinquency_badge(bucket) if bucket else "—"
+        ac = it.get("asset_code") or ""
+        pid = it.get("trust_product_id") or trust_product_id
+        active = (
+            "active"
+            if _is_selected_asset_item(
+                pid,
+                ac,
+                selected_product_id=trust_product_id,
+                selected_asset_code=current_asset_code,
+            )
+            else ""
+        )
+        href = _asset_list_item_href(
+            it,
+            filters=filters,
+            bucket=bucket,
+            data_date=data_date,
+            list_filter=list_filter,
+        )
+        bucket_html = fmt_delinquency_badge(it.get("delinquency_bucket"))
+        custodies = it.get("custody_asset_codes") or []
+        if len(custodies) <= 1:
+            custody_hint = escape(str(custodies[0] if custodies else it.get("primary_custody_asset_code") or "—"))
+        else:
+            custody_hint = f"托管 {len(custodies)} 个"
+        product_name = escape(str(it.get("trust_product_name") or ""))
+        product_line = (
+            f'<span>{product_name}</span>' if list_filter is None and product_name else ""
+        )
         html += f"""
-        <a class="queue-item compact {active}" href="{href}">
-            <div class="queue-line1">{escape(str(custody))}</div>
+        <a class="queue-item compact {active}" id="asset-{escape(str(pid))}-{escape(str(ac))}" href="{href}">
+            <div class="queue-line1">{escape(str(ac))}</div>
             <div class="queue-line2">
+                {product_line}
                 <span>逾期 {it.get('overdue_days', '—')} 天</span>
                 <span>{bucket_html}</span>
                 <span>跟进 {it.get('followup_count', 0)} 次</span>
                 <span>{escape(str(it.get('internal_status') or '—'))}</span>
             </div>
+            <div class="queue-line3 muted tiny">{CUSTODY_ASSET_CODE_LABEL} {custody_hint}</div>
         </a>
         """
     return html
@@ -268,52 +540,50 @@ def _last_followup_html(summary: dict) -> str:
     at = summary.get("last_follow_up_at")
     owner = summary.get("last_follow_up_owner")
     if not at and not owner:
-        return '<div class="custody-card-followup muted tiny">最近跟进：—</div>'
+        return '<div class="asset-card-followup muted tiny">最近跟进：—</div>'
     at_esc = escape(str(at or "—"))
     owner_esc = escape(str(owner or "—"))
-    return f'<div class="custody-card-followup muted tiny">最近跟进：{at_esc} · {owner_esc}</div>'
+    return f'<div class="asset-card-followup muted tiny">最近跟进：{at_esc} · {owner_esc}</div>'
 
 
-def _render_custody_block(
-    queue: list,
-    selected_id: int | None,
-    workbench_qs,
-    resolved_custody: str | None,
-    trust_mark: dict,
-    summary: dict,
-) -> str:
-    if not queue:
-        msg = "暂无房源" if resolved_custody else "暂无逾期房源"
-        return f'<div class="panel-hd">当前托管</div><div class="empty">{msg}</div>'
+def _render_asset_info_card(dto: dict, workbench_qs) -> str:
+    asset = dto.get("asset")
+    if not asset:
+        if dto.get("asset_code"):
+            return '<div class="panel-hd">资产信息</div><div class="empty">该资产暂无监控快照</div>'
+        return '<div class="panel-hd">资产信息</div><div class="empty">请从资产清单选择资产。</div>'
 
-    custody_esc = escape(str(resolved_custody or queue[0].get("custody_asset_code") or "—"))
-    split_count = len(queue)
-    bucket = summary.get("delinquency_bucket") or queue[0].get("delinquency_bucket")
-    bucket_html = fmt_delinquency_badge(bucket) if bucket else "—"
-    internal = escape(str(trust_mark.get("internal_status") or summary.get("internal_status") or "待跟进"))
+    summary = asset.get("summary") or {}
+    asset_code = escape(str(asset.get("asset_code") or "—"))
+    custodies = asset.get("custody_asset_codes") or []
+    custody_html = "<br>".join(escape(str(c)) for c in custodies) if custodies else "—"
+    split_count = summary.get("split_count", 0)
+    data_date = escape(str(dto.get("data_date") or "—"))
+    primary = escape(str(asset.get("primary_custody_asset_code") or "—"))
     followup_line = _last_followup_html(summary)
+    multi_hint = ""
+    if len(custodies) > 1 and asset.get("primary_custody_asset_code"):
+        multi_hint = (
+            f'<p class="muted tiny">默认托管号（跟进/标记）：{primary}</p>'
+        )
 
-    if split_count == 1:
-        item = queue[0]
-        recon_flag = "" if item["checks"]["cross_sheet_repayment"]["passed"] else " ⚠"
-        return f"""
-        <div class="panel-hd">当前托管</div>
-        <div class="custody-card">
-            <div class="custody-card-code">{custody_esc}{recon_flag}</div>
-            <div class="custody-card-meta">共 1 笔 · {bucket_html} · {internal}</div>
-            {followup_line}
-        </div>
-        """
+    splits = asset.get("monitor", {}).get("splits") or []
+    selected_id = asset.get("selected_trust_asset_id")
+    split_list = ""
+    if len(splits) > 1:
+        split_list = f'<div class="split-list">{_render_split_list(splits, selected_id, workbench_qs)}</div>'
 
-    list_html = _render_split_list(queue, selected_id, workbench_qs)
     return f"""
-    <div class="panel-hd">当前托管</div>
-    <div class="custody-card custody-card-multi">
-        <div class="custody-card-code">{custody_esc}</div>
-        <div class="custody-card-meta">共 {split_count} 笔 · {bucket_html} · {internal}</div>
+    <div class="panel-hd">资产信息</div>
+    <div class="asset-card">
+        <p><span class="lbl">{ASSET_CODE_LABEL}</span><strong>{asset_code}</strong></p>
+        <p><span class="lbl">{CUSTODY_ASSET_CODE_LABEL}</span>{custody_html}</p>
+        <p><span class="lbl">资产分笔数</span>{split_count}</p>
+        <p><span class="lbl">监控快照</span>{data_date}</p>
         {followup_line}
+        {multi_hint}
     </div>
-    <div class="split-list">{list_html}</div>
+    {split_list}
     """
 
 
@@ -322,8 +592,8 @@ def _render_split_list(queue: list, selected_id: int | None, workbench_qs) -> st
     for item in queue:
         active = "active" if item["trust_asset_id"] == selected_id else ""
         recon_flag = "" if item["checks"]["cross_sheet_repayment"]["passed"] else " ⚠"
+        source = escape(_fmt_source_asset_code(item.get("source_asset_code")))
         custody = escape(str(item.get("custody_asset_code") or "—"))
-        source = escape(str(item.get("source_asset_code") or item.get("asset_code") or "—"))
         od_label = (
             f"提前结清 {item.get('last_payment_date') or '—'}"
             if item.get("delinquency_bucket") == "ES"
@@ -340,12 +610,12 @@ def _render_split_list(queue: list, selected_id: int | None, workbench_qs) -> st
         <a class="queue-item compact split-item {active}"
            href="/overdue/workbench{workbench_qs(item['trust_asset_id'])}">
             <div class="queue-line1">
-                <span class="queue-code"><span title="托管">{custody}</span>
-                <span class="muted">/ {source}</span>{recon_flag}</span>
+                <span class="queue-code" title="{SOURCE_ASSET_CODE_LABEL}">{source}{recon_flag}</span>
                 {badge}
             </div>
             <div class="queue-line2">
                 <span>{od_label}</span>
+                <span class="muted tiny">{CUSTODY_ASSET_CODE_LABEL} {custody}</span>
                 <span>评分 {score}</span>
                 <span>{follow_label}</span>
             </div>
@@ -354,21 +624,27 @@ def _render_split_list(queue: list, selected_id: int | None, workbench_qs) -> st
     return items
 
 
-def _render_panels(dto: dict, detail: dict | None, custody: str | None) -> str:
-    if not detail:
-        return '<div class="empty">请从左侧选择房源</div>'
-    hero = _render_hero_overdue_card(dto, custody, dto.get("checks"))
-    grid = f"""
-    <div class="panel-grid">
-        <div class="grid-monitor">{_panel_monitor(dto.get("monitor") or {}, dto.get("summary") or {}, dto.get("data_date"))}</div>
-        <div class="grid-ops">{_panel_ops(dto.get("ops"), dto.get("summary") or {})}</div>
-        <div class="grid-repayment">{_panel_repayment(dto.get("repayment") or {})}</div>
-        <div class="grid-trust">{_panel_trust_mark(dto.get("trust_mark") or {}, dto)}</div>
-        <div class="grid-timeline">{_panel_timeline(dto.get("timeline") or [])}</div>
-        <div class="grid-issuance">{_panel_issuance(dto.get("issuance_records") or [])}</div>
-    </div>
+def _render_panels(dto: dict, asset: dict, workbench_qs) -> str:
+    """Right-column 4-col detail-grid (3 rows × 4 units).
+
+    Row 1 (2/4 | 2/4): summary | issuance
+    Row 2 (1/4 | 1/4 | 2/4): check | monitor | repayment
+    Row 3 (1/4 | 2/4 | 1/4): trust | timeline | ops
     """
-    return hero + grid
+    if not asset or not (asset.get("selected_split") or asset.get("monitor", {}).get("splits")):
+        if dto.get("asset_code") and dto.get("view_mode") == "detail":
+            return '<div class="empty">该资产主编号暂无监控分笔数据</div>'
+        return '<div class="empty">请从资产清单选择资产。</div>'
+    return f"""<div class="detail-grid">
+        <div class="grid-summary">{_render_summary_card(dto, asset)}</div>
+        <div class="grid-issuance">{_panel_issuance(asset.get("issuance_records") or [])}</div>
+        <div class="grid-check">{_render_check_card(asset.get("checks"))}</div>
+        <div class="grid-monitor">{_panel_monitor(asset.get("monitor") or {}, asset.get("summary") or {}, dto.get("data_date"))}</div>
+        <div class="grid-repay">{_panel_repayment(asset.get("repayment") or {})}</div>
+        <div class="grid-trust">{_panel_trust_mark(asset.get("trust_mark") or {}, dto, asset)}</div>
+        <div class="grid-timeline">{_panel_timeline(asset.get("timeline") or [])}</div>
+        <div class="grid-ops">{_panel_ops(asset.get("ops"), asset.get("summary") or {})}</div>
+    </div>"""
 
 
 def _panel_issuance(records: list) -> str:
@@ -404,30 +680,30 @@ def _panel_repayment(rep: dict) -> str:
     preview_rows = ""
     for it in items[:_REPAYMENT_PREVIEW]:
         preview_rows += f"""<tr>
-            <td>{escape(str(it.get('period_no') or '—'))}</td>
+            <td>{escape(str(it.get('custody_asset_code') or '—'))}</td>
             <td>{escape(str(it.get('repayment_date') or '—'))}</td>
             <td class="num">{fmt_money(it.get('actual_repayment_amount'))}</td>
-            <td>{escape(str(it.get('source_asset_code') or it.get('asset_code') or '—'))}</td>
         </tr>"""
     if not preview_rows:
-        preview_rows = '<tr><td colspan="4" class="empty">缺少还款明细，逾期天数可能无法重算</td></tr>'
+        preview_rows = (
+            f'<tr><td colspan="3" class="empty">缺少还款明细，逾期天数可能无法重算</td></tr>'
+        )
     preview_table = f"""<div class="table-wrap"><table>
-        <thead><tr><th>期次</th><th>还款日</th><th>实还</th><th>分笔</th></tr></thead>
+        <thead><tr><th>{CUSTODY_ASSET_CODE_LABEL}</th><th>还款日</th><th>实还</th></tr></thead>
         <tbody>{preview_rows}</tbody></table></div>"""
     rest_block = ""
     if len(items) > _REPAYMENT_PREVIEW:
         rest_rows = ""
         for it in items[_REPAYMENT_PREVIEW:50]:
             rest_rows += f"""<tr>
-                <td>{escape(str(it.get('period_no') or '—'))}</td>
+                <td>{escape(str(it.get('custody_asset_code') or '—'))}</td>
                 <td>{escape(str(it.get('repayment_date') or '—'))}</td>
                 <td class="num">{fmt_money(it.get('actual_repayment_amount'))}</td>
-                <td>{escape(str(it.get('source_asset_code') or it.get('asset_code') or '—'))}</td>
             </tr>"""
         rest_block = f"""<details class="repayment-details">
             <summary class="muted tiny">查看全部还款明细（{len(items)} 条）</summary>
             <div class="table-wrap"><table>
-            <thead><tr><th>期次</th><th>还款日</th><th>实还</th><th>分笔</th></tr></thead>
+            <thead><tr><th>{CUSTODY_ASSET_CODE_LABEL}</th><th>还款日</th><th>实还</th></tr></thead>
             <tbody>{rest_rows}</tbody></table></div>
         </details>"""
     return f"""<div class="info-card">
@@ -443,13 +719,13 @@ def _panel_repayment(rep: dict) -> str:
 
 
 def _panel_monitor(mon: dict, summary: dict, data_date: str | None) -> str:
-    custody = mon.get("custody") or {}
+    asset_agg = mon.get("asset") or {}
     splits = mon.get("splits") or []
     rows = ""
     for s in splits:
         sod = s.get("overdue_days")
         rows += f"""<tr>
-            <td>{escape(str(s.get('source_asset_code') or s.get('asset_code') or '—'))}</td>
+            <td>{escape(str(s.get('custody_asset_code') or '—'))}</td>
             <td class="num">{fmt_money(s.get('initial_transfer_amount'))}</td>
             <td class="num">{fmt_money(s.get('repaid_amount'))}</td>
             <td class="num">{fmt_money(s.get('remaining_amount'))}</td>
@@ -457,24 +733,24 @@ def _panel_monitor(mon: dict, summary: dict, data_date: str | None) -> str:
             <td>{fmt_delinquency_badge(s.get('delinquency_bucket'))}</td>
         </tr>"""
     table = f"""<div class="table-wrap"><table>
-        <thead><tr><th>分笔</th><th>初始</th><th>已还</th><th>剩余</th><th>逾期天</th><th>M级</th></tr></thead>
+        <thead><tr><th>{CUSTODY_ASSET_CODE_LABEL}</th><th>初始</th><th>已还</th><th>剩余</th><th>逾期天</th><th>M级</th></tr></thead>
         <tbody>{rows or '<tr><td colspan="6" class="empty">无</td></tr>'}</tbody></table></div>"""
     return f"""<div class="info-card info-card-primary">
         <h3 class="info-card-title">当前监控</h3>
         <div class="info-card-body">
-            <p class="muted tiny">分笔 {custody.get('split_count', 0)} 笔 · 数据日期 {escape(str(data_date or '—'))}</p>
-            <p class="muted tiny monitor-summary">托管汇总：初始 {fmt_money(custody.get('initial_transfer_amount'))}
-                · 已还 {fmt_money(custody.get('repaid_amount'))}
-                · 剩余 {fmt_money(custody.get('remaining_amount'))}
+            <p class="muted tiny">分笔 {asset_agg.get('split_count', 0)} 笔 · 数据日期 {escape(str(data_date or '—'))}</p>
+            <p class="muted tiny monitor-summary">资产汇总：初始 {fmt_money(asset_agg.get('initial_transfer_amount'))}
+                · 已还 {fmt_money(asset_agg.get('repaid_amount'))}
+                · 剩余 {fmt_money(asset_agg.get('remaining_amount'))}
                 · 逾期 {escape(_overdue_label(summary))}</p>
             {table}
         </div>
     </div>"""
 
 
-def _panel_trust_mark(mark: dict, dto: dict) -> str:
+def _panel_trust_mark(mark: dict, dto: dict, asset: dict) -> str:
     pid = dto.get("trust_product_id")
-    custody = dto.get("custody_asset_code")
+    custody = asset.get("primary_custody_asset_code") or ""
     data_date = dto.get("data_date")
     marker = mark.get("trust_marker") or "未标记"
     internal = mark.get("internal_status") or "待跟进"
@@ -495,6 +771,7 @@ def _panel_trust_mark(mark: dict, dto: dict) -> str:
                 <p><span class="lbl">内部状态</span><strong>{escape(internal)}</strong></p>
                 <p><span class="lbl">备注</span>{note}</p>
             </div>
+            <p class="muted tiny">标注挂在默认托管号 {escape(str(custody or '—'))} 上</p>
             <div class="mark-edit muted tiny">修改标注</div>
             <p><span class="lbl">信托标记</span>
             <select class="mark-select" data-field="trust_marker"
@@ -591,18 +868,34 @@ def _followup_status_options(current: str | None) -> str:
 
 
 def _panel_followup_write(
-    product_hidden, custody_hidden, workbench_qs, dto, *, new_followup: bool = False
+    product_hidden,
+    asset_hidden,
+    custody_hidden,
+    bucket_hidden,
+    workbench_qs,
+    dto,
+    *,
+    new_followup: bool = False,
 ) -> str:
     data_date = escape(str(dto.get("data_date") or ""))
-    case = dto.get("followup_case") or {}
+    asset = dto.get("asset") or {}
+    case = asset.get("followup_case") or {}
     current_status = case.get("status") or "in_progress"
     status_label = escape(FOLLOWUP_STATUS_LABELS.get(current_status, current_status))
     owner_val = escape(case.get("owner_name") or "")
     owner_display = owner_val if owner_val else "—"
-    summary = dto.get("summary") or {}
+    summary = asset.get("summary") or {}
     internal = escape(str(summary.get("internal_status") or "待跟进"))
+    asset_code = escape(str(dto.get("asset_code") or asset.get("asset_code") or ""))
+    primary = escape(str(dto.get("primary_custody_asset_code") or ""))
+    custodies = dto.get("custody_asset_codes") or []
+    multi_hint = ""
+    if len(custodies) > 1 and primary:
+        multi_hint = (
+            f'<p class="muted tiny warn-text">当前跟进与标记暂挂在默认托管号 {primary} 上。</p>'
+        )
     expanded = "1" if new_followup else "0"
-    last_entry = dto.get("timeline") or []
+    last_entry = asset.get("timeline") or []
     last_reason = ""
     last_plan = ""
     for ev in last_entry:
@@ -616,7 +909,7 @@ def _panel_followup_write(
         <div class="sticky-write-collapsed">
             <button type="button" class="write-toggle" id="followup-expand" aria-expanded="{"true" if new_followup else "false"}">
                 <span class="write-toggle-icon" aria-hidden="true">▶</span>
-                <span class="sticky-write-title">本次跟进（新增）</span>
+                <span class="sticky-write-title">记录跟进 · {ASSET_CODE_LABEL} {asset_code}</span>
             </button>
             <span class="write-summary muted tiny">案件状态：{status_label} · 负责人：{owner_display} · 内部状态：{internal}</span>
             <button type="button" class="btn primary btn-compact" id="followup-expand-btn">展开录入</button>
@@ -624,12 +917,15 @@ def _panel_followup_write(
         </div>
         <div class="sticky-write-panel" id="followup-write-panel">
             <div class="sticky-write-inner">
+                {multi_hint}
                 <p class="muted tiny">跟进时间于保存时自动生成 · 每次保存追加一条跟进记录（V2.2 entries）</p>
                 <form class="followup-form" id="followup-form" method="post" enctype="multipart/form-data"
                       action="/overdue/workbench/followups/entries{workbench_qs()}">
                     <input type="hidden" name="redirect_to_workbench" value="1">
                     {product_hidden}
+                    {asset_hidden}
                     {custody_hidden}
+                    {bucket_hidden}
                     <input type="hidden" name="data_date" value="{data_date}">
                     <div class="followup-form-grid">
                         <label>案件状态
@@ -694,6 +990,29 @@ document.addEventListener('DOMContentLoaded', function() {
 
     if (document.body.dataset.scrollFollowup === '1') {
         expandWriteBar();
+    }
+
+    var activeQueueItem = document.querySelector('.compact-queue .queue-item.active');
+    if (activeQueueItem) {
+        activeQueueItem.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+    }
+
+    var filterForm = document.querySelector('.workbench-filter');
+    if (filterForm) {
+        filterForm.addEventListener('submit', function() {
+            var productSel = filterForm.querySelector('[name="list_product_id"]');
+            if (productSel && !productSel.value) {
+                var emptyList = document.createElement('input');
+                emptyList.type = 'hidden';
+                emptyList.name = 'list_product_id';
+                emptyList.value = '';
+                filterForm.appendChild(emptyList);
+                ['asset_code', 'custody_asset_code', 'trust_asset_id'].forEach(function(name) {
+                    var el = filterForm.querySelector('[name="' + name + '"]');
+                    if (el) el.remove();
+                });
+            }
+        });
     }
 
     document.querySelectorAll('.mark-select').forEach(function(sel) {
@@ -765,16 +1084,23 @@ _WORKBENCH_CSS = """
     .page-header { margin-bottom: 0.25rem; }
     .header-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
     header h1 { font-size: 1.5rem; color: #f8fafc; }
-    .header-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+    .header-actions {
+        display: flex; flex-direction: column; align-items: flex-end;
+        gap: 0.35rem; flex-shrink: 0;
+    }
+    .header-tool-links {
+        display: flex; gap: 0.65rem; font-size: 0.8rem;
+    }
+    .header-tool-link { color: #38bdf8; }
+    .header-action-btns { display: flex; gap: 0.5rem; }
     .header-sub { color: #94a3b8; margin-top: 0.35rem; font-size: 0.9rem; }
-    .header-meta { margin-top: 0.5rem; font-size: 0.85rem; }
     .ok-text { color: #4ade80; }
     .warn-text { color: #f87171; }
     .workbench {
-        display: grid; grid-template-columns: 270px 1fr; gap: 1rem;
+        display: grid; grid-template-columns: 300px 1fr; gap: 1rem;
         margin-top: 1rem; align-items: start;
     }
-    @media (max-width: 900px) { .workbench { grid-template-columns: 1fr; } }
+    @media (max-width: 960px) { .workbench { grid-template-columns: 1fr; } }
     .panel {
         background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
         border-radius: 12px; overflow: hidden;
@@ -783,99 +1109,131 @@ _WORKBENCH_CSS = """
         padding: 0.65rem 0.85rem; border-bottom: 1px solid rgba(255,255,255,0.08);
         font-weight: 600; font-size: 0.85rem;
     }
-    .main-body { display: flex; flex-direction: column; gap: 1rem; }
-    .hero-overdue-card {
-        background: rgba(255,255,255,0.06); border: 1px solid rgba(56,189,248,0.3);
-        border-radius: 12px; padding: 1rem 1.15rem;
-        display: flex; flex-direction: column; gap: 0.65rem;
-    }
-    .hero-main { display: flex; flex-wrap: wrap; gap: 1.25rem; align-items: flex-start; }
-    .hero-remaining-block { flex: 1 1 200px; min-width: 180px; }
-    .hero-lbl { display: block; font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.25rem; }
-    .hero-remaining-val { font-size: 2rem; font-weight: 700; color: #38bdf8; font-variant-numeric: tabular-nums; line-height: 1.2; }
-    .hero-formula { display: block; margin-top: 0.35rem; }
-    .hero-stats {
-        display: flex; flex-wrap: wrap; gap: 0.65rem 1rem; flex: 2 1 320px;
-    }
-    .hero-stat { min-width: 72px; }
-    .hero-stat-lbl { display: block; font-size: 0.68rem; color: #94a3b8; }
-    .hero-stat-val { font-size: 0.88rem; font-weight: 600; }
-    .hero-stat-warn { color: #f87171; }
-    .hero-checks-inline {
-        border-top: 1px solid rgba(255,255,255,0.08);
-        padding-top: 0.55rem;
-        text-align: right;
-    }
-    .hero-checks-inline.hero-checks-alert {
-        background: rgba(239,68,68,0.06);
-        margin: 0 -0.35rem -0.15rem;
-        padding: 0.55rem 0.35rem 0.15rem;
-        border-radius: 0 0 10px 10px;
-        border-left: 3px solid #f87171;
-    }
-    .hero-checks-row {
-        display: flex; flex-wrap: wrap; align-items: center;
-        justify-content: flex-end; gap: 0.35rem 0.5rem;
-        font-size: 0.78rem; line-height: 1.4;
-    }
-    .hero-check-segment { display: inline-flex; align-items: center; gap: 0.35rem; flex-wrap: nowrap; }
-    .hero-check-name { color: #94a3b8; font-weight: 500; white-space: nowrap; }
-    .hero-check-segment .badge { font-size: 0.7rem; padding: 0.1rem 0.35rem; }
-    .hero-check-diff { font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .hero-check-diff-warn { color: #f87171; font-weight: 600; }
-    .hero-check-sep { color: #64748b; user-select: none; }
-    .hero-check-basis { margin-top: 0.25rem; text-align: right; font-size: 0.68rem; }
-    .panel-grid {
+    .detail-main { min-width: 0; }
+    /* ── Detail Grid: 4-column, 3-row named-area layout ──────── */
+    .detail-grid {
         display: grid;
-        grid-template-columns: 2fr 1fr 1fr;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         grid-template-areas:
-            "monitor monitor ops"
-            "repayment trust timeline"
-            "issuance issuance issuance";
-        gap: 1rem;
+            "summary   summary   issuance  issuance"
+            "check     monitor   repay     repay"
+            "trust     timeline  timeline  ops";
+        gap: 16px;
+        align-items: start;
     }
-    .grid-monitor { grid-area: monitor; }
-    .grid-ops { grid-area: ops; }
-    .grid-repayment { grid-area: repayment; }
-    .grid-trust { grid-area: trust; }
-    .grid-timeline { grid-area: timeline; }
+    .grid-summary  { grid-area: summary; }
     .grid-issuance { grid-area: issuance; }
-    @media (max-width: 1100px) {
-        .panel-grid {
-            grid-template-columns: 1fr 1fr;
-            grid-template-areas:
-                "monitor monitor"
-                "ops ops"
-                "repayment trust"
-                "timeline timeline"
-                "issuance issuance";
-        }
-        .hero-checks-row { justify-content: flex-start; }
-        .hero-check-basis { text-align: left; }
-        .hero-checks-inline { text-align: left; }
-    }
-    @media (max-width: 700px) {
-        .panel-grid {
+    .grid-check    { grid-area: check; }
+    .grid-monitor  { grid-area: monitor; }
+    .grid-repay    { grid-area: repay; }
+    .grid-trust    { grid-area: trust; }
+    .grid-timeline { grid-area: timeline; }
+    .grid-ops      { grid-area: ops; }
+    @media (max-width: 960px) {
+        .detail-grid {
             grid-template-columns: 1fr;
             grid-template-areas:
-                "monitor"
-                "ops"
-                "repayment"
-                "trust"
-                "timeline"
-                "issuance";
+                "summary" "issuance"
+                "check" "monitor" "repay"
+                "trust" "timeline" "ops";
         }
     }
+    /* ── Summary Card (Detail · Level A) ──────────────────────── */
+    .card-summary {
+        background: rgba(255,255,255,0.06); border: 1px solid rgba(56,189,248,0.2);
+        border-radius: 12px; padding: 16px;
+    }
+    /* Info group: label on top, value below — vertical reading */
+    .info-group { display: flex; flex-direction: column; gap: 2px; }
+    .info-label { font-size: 12px; color: #94a3b8; line-height: 1.2; }
+    /* Level 1 — Primary (3 key numbers) */
+    .detail-primary {
+        display: flex; flex-wrap: wrap; gap: 8px 24px;
+        padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.08);
+        margin-bottom: 12px;
+    }
+    .info-value-xl {
+        font-size: 22px; font-weight: 700; color: #f8fafc;
+        font-variant-numeric: tabular-nums; line-height: 1.2;
+    }
+    /* Level 2 — Business (product / M级 / split count) */
+    .detail-secondary {
+        display: flex; flex-wrap: wrap; gap: 8px 24px;
+        padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.06);
+        margin-bottom: 10px;
+    }
+    .info-value-md { font-size: 15px; font-weight: 600; color: #e2e8f0; line-height: 1.3; }
+    /* Level 3 — Metadata (custody code / check status) */
+    .detail-meta { display: flex; flex-wrap: wrap; gap: 6px 24px; }
+    .info-value-sm { font-size: 13px; color: #94a3b8; line-height: 1.3; }
+    .info-warn { color: #f87171; }
+    /* ── Check Card (Detail · Level B) ───────────────────────── */
+    .card-check {
+        background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px; padding: 12px 16px;
+    }
+    .card-check-alert { border-color: rgba(248,113,113,0.35); background: rgba(239,68,68,0.05); }
+    .card-check-title {
+        font-size: 11px; font-weight: 600; color: #64748b;
+        text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px;
+    }
+    .check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 4px; }
+    .check-label { color: #94a3b8; min-width: 60px; }
+    .check-result { font-weight: 600; }
+    .check-pass { color: #34d399; }
+    .check-fail { color: #f87171; }
+    .check-diff { color: #64748b; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .check-basis { margin-top: 6px; }
+    /* kept for sidebar asset-info card */
+    .hero-lbl { display: block; font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.25rem; }
     .sidebar-section + .sidebar-section { border-top: 1px solid rgba(255,255,255,0.08); }
-    .sidebar-custody { padding-bottom: 0.5rem; }
+    .sidebar-asset-info { padding-bottom: 0.5rem; }
     .compact-queue { max-height: 42vh; overflow-y: auto; }
+    .queue-line3 { font-size: 0.68rem; margin-top: 0.15rem; }
+    .workbench-filter {
+        display: flex; flex-wrap: wrap; gap: 0.65rem 1rem; align-items: flex-end;
+        margin-top: 0.75rem; padding: 0.65rem 0.85rem;
+        background: rgba(0,0,0,0.15); border-radius: 8px;
+    }
+    .workbench-filter label { font-size: 0.8rem; color: #94a3b8; }
+    .workbench-filter select {
+        display: block; margin-top: 0.2rem; padding: 0.35rem;
+        height: 36px; box-sizing: border-box;
+        border-radius: 6px; border: 1px solid rgba(255,255,255,0.15);
+        background: rgba(0,0,0,0.25); color: #e2e8f0;
+    }
+    .filter-readonly-date {
+        display: flex; flex-direction: column; font-size: 0.8rem; color: #94a3b8;
+        align-self: flex-end; padding-bottom: 0.15rem;
+    }
+    .filter-readonly-lbl { margin-bottom: 0.2rem; }
+    .filter-date-val {
+        font-size: 0.9rem; color: #e2e8f0; font-weight: 500;
+        padding: 0.35rem 0; white-space: nowrap;
+    }
+    .selection-notice {
+        margin-top: 0.5rem; padding: 0.45rem 0.75rem;
+        background: rgba(56,189,248,0.08); border: 1px solid rgba(56,189,248,0.2);
+        border-radius: 8px; color: #bae6fd;
+    }
+    .asset-card {
+        padding: 0.75rem; margin: 0.5rem 0.75rem;
+        background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.15);
+        border-radius: 10px; font-size: 0.85rem;
+    }
+    .asset-card p { margin-bottom: 0.35rem; }
+    .asset-card-followup { margin-top: 0.4rem; }
     .split-list { max-height: 200px; overflow-y: auto; }
     .queue-item {
         display: block; padding: 0.55rem 0.75rem;
         border-bottom: 1px solid rgba(255,255,255,0.06);
         color: inherit; text-decoration: none;
     }
-    .queue-item:hover, .queue-item.active { background: rgba(56,189,248,0.08); }
+    .queue-item:hover { background: rgba(56,189,248,0.08); }
+    .queue-item.active {
+        background: rgba(56,189,248,0.16);
+        box-shadow: inset 3px 0 0 #38bdf8;
+    }
     .queue-line1 {
         font-size: 0.82rem; font-weight: 500; line-height: 1.3; word-break: break-all;
         display: flex; justify-content: space-between; align-items: flex-start; gap: 0.35rem;
@@ -928,9 +1286,8 @@ _WORKBENCH_CSS = """
     .badge { display: inline-block; padding: 0.15rem 0.45rem; border-radius: 4px; font-size: 0.75rem; border: 1px solid rgba(255,255,255,0.15); }
     .ok-badge { background: rgba(34,197,94,0.15); color: #4ade80; }
     .fail-badge { background: rgba(239,68,68,0.15); color: #f87171; }
-    .table-wrap { overflow-x: auto; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-    th, td { padding: 0.4rem 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.06); text-align: left; }
+    table { font-size: 0.8rem; }
+    th, td { padding: 0.4rem 0.5rem; border-bottom: 1px solid rgba(255,255,255,0.06); text-align: left; vertical-align: middle; }
     th { color: #94a3b8; font-weight: 500; }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
     .sticky-write-bar {
@@ -950,7 +1307,7 @@ _WORKBENCH_CSS = """
     }
     .write-toggle-icon { font-size: 0.65rem; color: #94a3b8; }
     .write-summary { flex: 1 1 200px; min-width: 0; }
-    .btn-compact { padding: 0.35rem 0.75rem; font-size: 0.8rem; }
+    .btn-compact { padding: 0.35rem 0.75rem; font-size: 0.8rem; height: 36px; box-sizing: border-box; }
     .sticky-write-bar[data-expanded="0"] .sticky-write-panel { display: none; }
     .sticky-write-bar[data-expanded="0"] .write-collapse-btn { display: none; }
     .sticky-write-bar[data-expanded="1"] #followup-expand-btn { display: none; }
@@ -978,8 +1335,9 @@ _WORKBENCH_CSS = """
     .btn {
         padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);
         background: rgba(255,255,255,0.08); color: #e2e8f0; cursor: pointer; font-size: 0.85rem;
+        height: 36px; box-sizing: border-box; display: inline-flex; align-items: center;
     }
-    .btn.primary { background: #0284c7; border-color: #0284c7; font-weight: 600; }
+    .btn.primary { background: #0ea5e9; border-color: #0ea5e9; font-weight: 600; }
     .btn-ghost { display: inline-block; text-align: center; }
     .mark-select {
         padding: 0.35rem; border-radius: 6px; background: rgba(0,0,0,0.2);

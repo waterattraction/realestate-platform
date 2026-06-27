@@ -3605,27 +3605,44 @@ def overdue_workbench_data(
 def overdue_workbench_page(
     page_user: Annotated[dict, Depends(get_page_user)],
     trust_product_id: str | None = None,
-    trust_asset_id: str | None = None,
-    data_date: str | None = None,
+    asset_code: str | None = None,
     custody_asset_code: str | None = None,
+    delinquency_bucket: str | None = None,
+    data_date: str | None = None,
+    list_product_id: str | None = None,
+    trust_asset_id: str | None = None,
     new_followup: str | None = None,
 ):
     from app.html.render import render_overdue_workbench_html
-    from app.service.overdue_workbench import build_overdue_workbench_service
+    from app.service.overdue_workbench import (
+        DEFAULT_DELINQUENCY_BUCKET,
+        build_overdue_workbench_service,
+    )
 
+    svc = build_overdue_workbench_service(engine)
     pid = query_utils.parse_optional_int(trust_product_id)
     aid = query_utils.parse_optional_int(trust_asset_id)
+    list_pid = query_utils.parse_optional_int(list_product_id)
+    ac = query_utils.clean_optional_str(asset_code)
     custody = query_utils.clean_optional_str(custody_asset_code)
-    dto = build_overdue_workbench_service(engine).get_detail(
+    bucket = query_utils.clean_optional_str(delinquency_bucket) or DEFAULT_DELINQUENCY_BUCKET
+    list_scope_explicit = list_product_id is not None
+
+    dto = svc.get_workbench_page_dto(
         trust_product_id=pid,
+        asset_code=ac,
         custody_asset_code=custody,
-        trust_asset_id=aid,
+        delinquency_bucket=bucket,
         data_date=query_utils.parse_optional_date(data_date),
+        list_product_id=list_pid,
+        list_product_scope_explicit=list_scope_explicit,
+        trust_asset_id=aid,
     )
+    with engine.connect() as conn:
+        dto["products"] = fetch_trust_products(conn)
+
     html = render_overdue_workbench_html(
         dto,
-        pid,
-        custody_asset_code=custody,
         new_followup=bool(query_utils.parse_optional_int(new_followup)),
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))

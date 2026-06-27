@@ -167,3 +167,52 @@ class MonitorRepo:
                 },
             ).fetchall()
         return rows_to_dicts(rows)
+
+    def fetch_asset_queue(
+        self,
+        trust_product_id: int | None,
+        data_date: str,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Return one row per asset_code for the workbench left-column list."""
+        pid_clause = (
+            "AND m.trust_product_id = :trust_product_id"
+            if trust_product_id is not None
+            else ""
+        )
+        params: dict = {
+            "data_date": data_date,
+            "overdue_min_days": OVERDUE_ASSET_MIN_DAYS,
+            "limit": limit,
+        }
+        if trust_product_id is not None:
+            params["trust_product_id"] = trust_product_id
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    f"""
+                    SELECT
+                        m.asset_code,
+                        m.trust_product_id,
+                        tp.name AS trust_product_name,
+                        MAX(m.overdue_days)     AS overdue_days,
+                        SUM(m.remaining_amount) AS remaining_amount,
+                        COUNT(*)                AS split_count,
+                        ARRAY_AGG(
+                            DISTINCT COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                            ORDER BY COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                        ) AS custody_asset_codes
+                    FROM trust_asset_monitor_records m
+                    INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
+                    INNER JOIN trust_products tp ON tp.id = m.trust_product_id
+                    WHERE m.data_date = :data_date
+                      AND m.overdue_days >= :overdue_min_days
+                      {pid_clause}
+                    GROUP BY m.asset_code, m.trust_product_id, tp.name
+                    ORDER BY MAX(m.overdue_days) DESC
+                    LIMIT :limit
+                    """
+                ),
+                params,
+            ).fetchall()
+        return rows_to_dicts(rows)
