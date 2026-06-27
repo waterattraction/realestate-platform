@@ -111,7 +111,7 @@ INTERNAL_STATUS_DEFAULT = "待跟进"
 CUSTODY_LIST_HEADERS = [
     "托管房源号",
     "信托产品",
-    "asset_code（兼容）",
+    "资产主编号",
     "等级",
     "逾期天数 / 提前结清日期",
     "最后回款日",
@@ -268,6 +268,7 @@ def _monitor_custody_ctes(monitor_filter: str) -> str:
                 d.trust_product_id,
                 d.data_date,
                 d.custody_asset_code,
+                MIN(d.asset_code) AS asset_code,
                 COUNT(*) AS row_count,
                 COUNT(DISTINCT d.source_asset_code) AS source_asset_count,
                 SUM(d.initial_transfer_amount) AS initial_transfer_amount,
@@ -376,7 +377,7 @@ def _settlement_date_from_row(row) -> str | None:
 def _custody_item_from_row(row) -> dict:
     remaining = float(row.remaining_amount)
     source_codes = list(row.source_asset_codes) if row.source_asset_codes else []
-    asset_code = source_codes[0] if source_codes else row.custody_asset_code
+    asset_code = getattr(row, "asset_code", None) or row.custody_asset_code
     settlement_date = _settlement_date_from_row(row)
     raw_last_payment = (
         str(row.raw_last_payment_date)
