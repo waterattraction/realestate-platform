@@ -1251,17 +1251,17 @@ document.addEventListener('DOMContentLoaded', function() {
         var sel = item.querySelector('.sf-select');
         if (!display || !sel) return;
         display.addEventListener('dblclick', function() {
-            display.style.display = 'none';
-            sel.style.display = '';
+            sel.style.display = 'block';   // overlay on top; do NOT hide display
             sel.focus();
         });
         sel.addEventListener('change', function() {
+            display.textContent = this.options[this.selectedIndex].text;
+            sel.style.display = 'none';
             var form = document.getElementById('sf-form');
             if (form) form.submit();
         });
         sel.addEventListener('blur', function() {
             sel.style.display = 'none';
-            display.style.display = '';
         });
     });
     var form = document.getElementById('followup-form');
@@ -1334,16 +1334,19 @@ _WORKBENCH_CSS = """
         display: flex; flex-wrap: wrap; gap: 3px 4px; align-items: center;
         padding: 6px 0.85rem 8px; border-bottom: 1px solid rgba(255,255,255,0.06);
     }
-    .sf-item { display: inline-flex; align-items: center; }
+    .sf-item { display: inline-flex; align-items: center; position: relative; }
     .sf-display {
         font-size: 12px; color: #e2e8f0; cursor: default; user-select: none;
         border-bottom: 1px dashed rgba(255,255,255,0.18); padding: 1px 0;
     }
     .sf-display:hover { border-bottom-color: rgba(99,179,237,0.55); color: #93c5fd; }
     .sf-select {
-        display: none; font-size: 12px; color: #e2e8f0; height: 26px;
-        max-width: 116px; background: rgba(0,0,0,0.25);
-        border: 1px solid rgba(255,255,255,0.12); border-radius: 5px;
+        display: none;
+        position: absolute; top: -2px; left: -4px; z-index: 200;
+        font-size: 12px; color: #e2e8f0; height: 26px;
+        min-width: 80px; max-width: 140px;
+        background: rgba(15,23,42,0.97);
+        border: 1px solid rgba(99,179,237,0.4); border-radius: 5px;
         padding: 0 4px; cursor: pointer; outline: none; box-sizing: border-box;
     }
     .sf-sep { color: #475569; padding: 0 2px; font-size: 11px; line-height: 1; }
