@@ -47,10 +47,26 @@ class IssuanceRepo:
     def fetch_by_product_custody(
         self, trust_product_id: int, custody_asset_code: str
     ) -> list[dict]:
+        return self.fetch_by_product_custodies(trust_product_id, [custody_asset_code])
+
+    def fetch_by_product_custodies(
+        self, trust_product_id: int, custody_asset_codes: list[str]
+    ) -> list[dict]:
+        """Fetch issuance records for multiple custody codes under one product.
+
+        Results are ordered by custody_asset_code then issue_date DESC so the
+        caller can group by custody_asset_code without re-sorting.
+        """
+        if not custody_asset_codes:
+            return []
+        placeholders = ", ".join(f":c{i}" for i in range(len(custody_asset_codes)))
+        params: dict = {"trust_product_id": trust_product_id}
+        for i, code in enumerate(custody_asset_codes):
+            params[f"c{i}"] = code
         with self._engine.connect() as conn:
             rows = conn.execute(
                 text(
-                    """
+                    f"""
                     SELECT
                         i.id,
                         i.trust_product_id,
@@ -82,13 +98,10 @@ class IssuanceRepo:
                         i.source_row_number
                     FROM trust_product_issuance_asset_records i
                     WHERE i.trust_product_id = :trust_product_id
-                      AND i.custody_asset_code = :custody_asset_code
-                    ORDER BY i.issue_date DESC, i.id DESC
+                      AND i.custody_asset_code IN ({placeholders})
+                    ORDER BY i.custody_asset_code, i.issue_date DESC, i.id DESC
                     """
                 ),
-                {
-                    "trust_product_id": trust_product_id,
-                    "custody_asset_code": custody_asset_code,
-                },
+                params,
             ).fetchall()
         return rows_to_dicts(rows)

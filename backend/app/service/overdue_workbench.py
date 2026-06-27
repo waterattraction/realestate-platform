@@ -371,6 +371,19 @@ class OverdueWorkbenchService:
         )
         primary_custody = custody_codes[0] if custody_codes else effective_custody
 
+        # Fetch issuance records for ALL custody codes under this asset
+        all_issuance: list[dict] = []
+        if trust_product_id and custody_codes:
+            all_issuance = self._issuance.fetch_by_product_custodies(
+                trust_product_id, custody_codes
+            )
+        elif trust_product_id and effective_custody:
+            all_issuance = self._issuance.fetch_by_product_custodies(
+                trust_product_id, [effective_custody]
+            )
+        else:
+            all_issuance = old.get("issuance_records") or []
+
         # Build nested asset dict for render.py
         asset_dict: dict = {}
         if effective_asset_code or effective_custody:
@@ -382,7 +395,7 @@ class OverdueWorkbenchService:
                 "selected_split": old.get("detail"),
                 "summary": old.get("summary"),
                 "checks": old.get("checks"),
-                "issuance_records": old.get("issuance_records") or [],
+                "issuance_records": all_issuance,
                 "repayment": old.get("repayment") or {},
                 "monitor": old.get("monitor") or {},
                 "trust_mark": old.get("trust_mark"),

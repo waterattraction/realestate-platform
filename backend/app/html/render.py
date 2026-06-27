@@ -675,23 +675,85 @@ def _panel_issuance(records: list) -> str:
     if not records:
         inner = '<p class="empty">暂无发行明细 · <a href="/issuance/records">发行记录</a></p>'
     else:
-        cards = ""
+        # Group by custody_asset_code (preserving insertion order = custody_code order)
+        groups: dict[str, list] = {}
         for rec in records:
-            issue = escape(str(rec.get("issue_date") or "—"))
-            cards += f"""
-            <div class="sub-card">
-                <p class="sub-hd">发行日 {issue}</p>
-                <p><span class="lbl">合同</span>{escape(str(rec.get('contract_name') or '—'))}</p>
-                <p><span class="lbl">债务人</span>{escape(str(rec.get('debtor_name') or '—'))}</p>
-                <p><span class="lbl">地址</span>{escape(str(rec.get('property_address') or '—'))}</p>
-                <p><span class="lbl">城市</span>{escape(str(rec.get('city') or '—'))}</p>
-                <p><span class="lbl">转让价款</span>{fmt_money(rec.get('receivable_transfer_amount'))}</p>
-                <p><span class="lbl">合同金额</span>{fmt_money(rec.get('receivable_contract_amount'))}</p>
-                <p><span class="lbl">代扣租比</span>{escape(str(rec.get('rent_withholding_ratio') or '—'))}</p>
-                <p class="muted tiny">来源 {escape(str(rec.get('source_file_name') or ''))}</p>
-            </div>
-            """
-        inner = cards
+            key = rec.get("custody_asset_code") or "—"
+            groups.setdefault(key, []).append(rec)
+
+        group_blocks = ""
+        for custody_code, recs in groups.items():
+            rec_cards = ""
+            for rec in recs:
+                issue = escape(str(rec.get("issue_date") or "—"))
+                city = escape(str(rec.get("city") or ""))
+                addr = escape(str(rec.get("property_address") or ""))
+                debtor = escape(str(rec.get("debtor_name") or "—"))
+                contract = escape(str(rec.get("contract_name") or "—"))
+                signing = rec.get("signing_date")
+                rental_end = rec.get("rental_contract_end_date")
+
+                location_parts = []
+                if city:
+                    location_parts.append(f"城市：{city}")
+                if addr:
+                    location_parts.append(f"地址：{addr}")
+                location_line = " · ".join(location_parts) if location_parts else "—"
+
+                date_parts = []
+                if signing:
+                    date_parts.append(f"签约日 {escape(str(signing))}")
+                if rental_end:
+                    date_parts.append(f"租约到期 {escape(str(rental_end))}")
+                date_line = " · ".join(date_parts)
+
+                price_parts = []
+                contract_amt = rec.get("receivable_contract_amount")
+                transfer_amt = rec.get("receivable_transfer_amount")
+                rental_price = rec.get("rental_price")
+                per_period = rec.get("calculated_rent_withholding_per_period")
+                ratio = rec.get("rent_withholding_ratio")
+                discount = rec.get("asset_transfer_discount_rate")
+                if contract_amt is not None:
+                    price_parts.append(f"合同金额 {fmt_money(contract_amt)}")
+                if transfer_amt is not None:
+                    price_parts.append(f"转让价款 {fmt_money(transfer_amt)}")
+                if rental_price is not None:
+                    price_parts.append(f"出房价格 {fmt_money(rental_price)}")
+                if per_period is not None:
+                    price_parts.append(f"每期代扣 {fmt_money(per_period)}")
+                if ratio is not None:
+                    price_parts.append(f"代扣比 {escape(str(ratio))}")
+                if discount is not None:
+                    price_parts.append(f"折价率 {escape(str(discount))}")
+                price_line = " · ".join(price_parts) if price_parts else "—"
+
+                source = escape(str(rec.get("source_file_name") or ""))
+
+                rec_cards += f"""<div class="issuance-record">
+                    <p class="issuance-issue-date">发行日 {issue}</p>
+                    <p class="issuance-line">{location_line}</p>
+                    <p class="issuance-line">债务人：{debtor} · 合同：{contract}</p>
+                    <p class="issuance-line">{price_line}</p>
+                    {f'<p class="issuance-line">{date_line}</p>' if date_line else ''}
+                    {f'<p class="muted tiny">来源 {source}</p>' if source else ''}
+                </div>"""
+
+            multi = len(recs) > 1
+            group_label = f'<span class="issuance-custody">{escape(custody_code)}</span>'
+            if multi:
+                group_blocks += f"""<details class="issuance-group">
+                    <summary class="issuance-group-hd">{group_label} · {len(recs)} 条发行记录</summary>
+                    {rec_cards}
+                </details>"""
+            else:
+                group_blocks += f"""<div class="issuance-group">
+                    <p class="issuance-group-hd">{group_label}</p>
+                    {rec_cards}
+                </div>"""
+
+        inner = group_blocks
+
     return f"""<details class="info-card info-card-folded">
         <summary class="info-card-title">发行信息（{count} 条）</summary>
         <div class="info-card-body">{inner}</div>
@@ -1296,6 +1358,24 @@ _WORKBENCH_CSS = """
     .mark-edit { margin-bottom: 0.35rem; }
     .sub-card { background: rgba(0,0,0,0.15); padding: 0.65rem; border-radius: 8px; margin-bottom: 0.5rem; }
     .sub-hd { font-weight: 600; margin-bottom: 0.35rem; }
+    /* Issuance panel */
+    .issuance-group { margin-bottom: 10px; }
+    .issuance-group-hd {
+        font-size: 12px; font-weight: 600; color: #64748b;
+        text-transform: uppercase; letter-spacing: 0.05em;
+        cursor: pointer; padding: 4px 0; margin-bottom: 6px;
+        list-style: none;
+    }
+    .issuance-group-hd::-webkit-details-marker { display: none; }
+    .issuance-group > summary.issuance-group-hd::before { content: "▶ "; font-size: 10px; }
+    details.issuance-group[open] > summary.issuance-group-hd::before { content: "▼ "; }
+    .issuance-custody { color: #94a3b8; font-variant-numeric: tabular-nums; }
+    .issuance-record {
+        background: rgba(0,0,0,0.15); border-radius: 8px;
+        padding: 8px 12px; margin-bottom: 6px;
+    }
+    .issuance-issue-date { font-size: 13px; font-weight: 700; color: #e2e8f0; margin-bottom: 4px; }
+    .issuance-line { font-size: 12px; color: #94a3b8; line-height: 1.7; word-break: break-all; }
     .monitor-summary { margin-bottom: 0.5rem; }
     .repayment-details, .timeline-more { margin-top: 0.5rem; }
     .timeline-more-summary { cursor: pointer; color: #38bdf8; font-size: 0.85rem; }
