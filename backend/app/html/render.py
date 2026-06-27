@@ -459,16 +459,12 @@ def _render_sidebar(
         current_asset_code,
         dto.get("filters") or {},
     )
-    asset_info = _render_asset_info_card(dto, workbench_qs)
     bucket = (dto.get("filters") or {}).get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
     bucket_label = dict(_BUCKET_FILTER_OPTIONS).get(bucket, bucket)
     return f"""
         <div class="sidebar-section">
             <div class="panel-hd">资产清单 <span class="muted tiny">· {escape(str(bucket_label))}</span></div>
             <div class="queue-body compact-queue">{asset_list_html}</div>
-        </div>
-        <div class="sidebar-section sidebar-asset-info">
-            {asset_info}
         </div>
     """
 
@@ -1188,7 +1184,7 @@ _WORKBENCH_CSS = """
     .hero-lbl { display: block; font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.25rem; }
     .sidebar-section + .sidebar-section { border-top: 1px solid rgba(255,255,255,0.08); }
     .sidebar-asset-info { padding-bottom: 0.5rem; }
-    .compact-queue { max-height: 42vh; overflow-y: auto; }
+    .compact-queue { max-height: 72vh; overflow-y: auto; }
     .queue-line3 { font-size: 0.68rem; margin-top: 0.15rem; }
     .workbench-filter {
         display: flex; flex-wrap: wrap; gap: 0.65rem 1rem; align-items: flex-end;
