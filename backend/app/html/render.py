@@ -148,8 +148,12 @@ def render_overdue_workbench_html(
     json_qs = workbench_qs()
     identity_id = dto.get("identity_id")
     header_actions = _render_header_actions(trust_product_id, json_qs, identity_id)
-    filter_bar = _render_filter_bar(dto, workbench_qs)
     selection_notice = _render_selection_notice(dto.get("selection_notice"))
+    data_date_display = escape(str(dto.get("data_date") or ""))
+    data_date_span = (
+        f' <span class="header-data-date">· 数据日期 {data_date_display}</span>'
+        if data_date_display else ""
+    )
     write_bar = ""
     if asset.get("selected_split") or asset.get("monitor", {}).get("splits"):
         write_bar = _panel_followup_write(
@@ -184,8 +188,7 @@ def render_overdue_workbench_html(
             <h1>资产逾期跟进工作台</h1>
             {header_actions}
         </div>
-        <p class="header-sub muted">按资产主编号统一管理监控、还款、跟进与风险。</p>
-        {filter_bar}
+        <p class="header-sub muted">按资产主编号统一管理监控、还款、跟进与风险。{data_date_span}</p>
         {selection_notice}
     </header>
     <div class="workbench">
@@ -238,6 +241,43 @@ def _render_legacy_error_page(dto: dict) -> str:
 </div></div>
 </body>
 </html>"""
+
+
+def _render_sidebar_filter(dto: dict) -> str:
+    """Compact filter form rendered inside the sidebar below the panel-hd."""
+    filters = dto.get("filters") or {}
+    active_bucket = filters.get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
+    filter_pid = _filter_bar_product_id(dto)
+    data_date = dto.get("data_date") or ""
+    products = dto.get("products") or []
+    current_asset = dto.get("asset_code")
+    detail_pid = dto.get("trust_product_id")
+
+    product_opts = '<option value="">全部产品</option>'
+    for p in products:
+        sel = " selected" if filter_pid == p["id"] else ""
+        product_opts += f'<option value="{p["id"]}"{sel}>{escape(p["name"])}</option>'
+
+    bucket_opts = ""
+    for val, label in _BUCKET_FILTER_OPTIONS:
+        sel = " selected" if active_bucket == val else ""
+        bucket_opts += f'<option value="{val}"{sel}>{escape(label)}</option>'
+
+    detail_fields = ""
+    if current_asset and detail_pid is not None:
+        detail_fields = (
+            f'<input type="hidden" name="trust_product_id" value="{detail_pid}">'
+            f'<input type="hidden" name="asset_code" value="{escape(str(current_asset))}">'
+        )
+
+    date_hidden = f'<input type="hidden" name="data_date" value="{escape(str(data_date))}">' if data_date else ""
+
+    return f"""<form class="sidebar-filter" method="get" action="/overdue/workbench">
+        <select name="list_product_id" class="sidebar-filter-select">{product_opts}</select>
+        <select name="delinquency_bucket" class="sidebar-filter-select">{bucket_opts}</select>
+        {date_hidden}{detail_fields}
+        <button type="submit" class="btn btn-compact sidebar-filter-btn">应用</button>
+    </form>"""
 
 
 def _render_filter_bar(dto: dict, workbench_qs) -> str:
@@ -501,9 +541,11 @@ def _render_sidebar(
     )
     bucket = (dto.get("filters") or {}).get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
     bucket_label = dict(_BUCKET_FILTER_OPTIONS).get(bucket, bucket)
+    sidebar_filter = _render_sidebar_filter(dto)
     return f"""
         <div class="sidebar-section">
             <div class="panel-hd">资产清单 <span class="muted tiny">· {escape(str(bucket_label))}</span></div>
+            {sidebar_filter}
             <div class="queue-body compact-queue" id="asset-queue">{asset_list_html}</div>
             <script>
             (function(){{
@@ -1233,6 +1275,19 @@ _WORKBENCH_CSS = """
     .header-tool-link { color: #38bdf8; }
     .header-action-btns { display: flex; gap: 0.5rem; }
     .header-sub { color: #94a3b8; margin-top: 0.35rem; font-size: 0.9rem; }
+    .header-data-date { font-size: 12px; color: #475569; font-weight: 400; white-space: nowrap; }
+    /* Sidebar compact filter form */
+    .sidebar-filter {
+        display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+        padding: 6px 0.85rem 8px; border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    .sidebar-filter-select {
+        font-size: 12px; color: #e2e8f0; height: 28px; max-width: 116px;
+        background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 5px; padding: 0 4px; cursor: pointer; outline: none;
+        box-sizing: border-box; flex-shrink: 1; min-width: 0;
+    }
+    .sidebar-filter-btn { height: 28px; padding: 0 10px; font-size: 12px; flex-shrink: 0; }
     .ok-text { color: #4ade80; }
     .warn-text { color: #f87171; }
     .workbench {
@@ -1326,27 +1381,6 @@ _WORKBENCH_CSS = """
     .sidebar-asset-info { padding-bottom: 0.5rem; }
     .compact-queue { max-height: 72vh; overflow-y: auto; }
     .queue-line3 { font-size: 0.68rem; margin-top: 0.15rem; }
-    .workbench-filter {
-        display: flex; flex-wrap: wrap; gap: 0.65rem 1rem; align-items: flex-end;
-        margin-top: 0.75rem; padding: 0.65rem 0.85rem;
-        background: rgba(0,0,0,0.15); border-radius: 8px;
-    }
-    .workbench-filter label { font-size: 0.8rem; color: #94a3b8; }
-    .workbench-filter select {
-        display: block; margin-top: 0.2rem; padding: 0.35rem;
-        height: 36px; box-sizing: border-box;
-        border-radius: 6px; border: 1px solid rgba(255,255,255,0.15);
-        background: rgba(0,0,0,0.25); color: #e2e8f0;
-    }
-    .filter-readonly-date {
-        display: flex; flex-direction: column; font-size: 0.8rem; color: #94a3b8;
-        align-self: flex-end; padding-bottom: 0.15rem;
-    }
-    .filter-readonly-lbl { margin-bottom: 0.2rem; }
-    .filter-date-val {
-        font-size: 0.9rem; color: #e2e8f0; font-weight: 500;
-        padding: 0.35rem 0; white-space: nowrap;
-    }
     .selection-notice {
         margin-top: 0.5rem; padding: 0.45rem 0.75rem;
         background: rgba(56,189,248,0.08); border: 1px solid rgba(56,189,248,0.2);
