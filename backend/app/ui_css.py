@@ -8,10 +8,11 @@ PAGE_CHROME_CSS = """
             background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
             min-height: 100vh;
             color: #e2e8f0;
-            padding: 2rem 1rem;
+            padding: 0.4rem 1rem 2rem;
+            position: relative;
         }
         .container {
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
         }
         a {
@@ -25,6 +26,7 @@ PAGE_CHROME_CSS = """
             font-size: 0.875rem;
             color: #94a3b8;
             margin-bottom: 1.5rem;
+            line-height: 2rem;
         }
 """
 

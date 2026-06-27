@@ -25,6 +25,7 @@ def _page_shell(title: str, body: str, username: str | None = None) -> str:
     <title>{escape(title)}</title>
     <style>
         {user_css}
+        .auth-topbar {{ position: absolute; top: 0.4rem; right: 1rem; margin: 0; padding: 0; max-width: none; width: auto; }}
         {PAGE_CHROME_CSS}
         h1 {{ font-size: 1.5rem; color: #f8fafc; margin: 0 0 0.5rem; }}
         p.muted {{ color: #94a3b8; margin-bottom: 1rem; font-size: 0.9rem; }}

@@ -1514,7 +1514,7 @@ def render_overdue_html(
         }}
         a {{ color: #38bdf8; text-decoration: none; }}
         a:hover {{ text-decoration: underline; }}
-        .container {{ max-width: 1200px; margin: 0 auto; }}
+        .container {{ max-width: 1400px; margin: 0 auto; }}
         .breadcrumb {{ font-size: 0.875rem; color: #94a3b8; margin-bottom: 1.5rem; line-height: 2rem; }}
         header {{ margin-bottom: 2rem; }}
         header h1 {{ font-size: 1.75rem; font-weight: 700; color: #f8fafc; }}
@@ -2108,11 +2108,13 @@ def render_risk_workbench_html(data: dict):
         body {{
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
-            min-height: 100vh; color: #e2e8f0; padding: 1.5rem 1rem;
+            min-height: 100vh; color: #e2e8f0; padding: 0.4rem 1rem 1.5rem;
+            position: relative;
         }}
         a {{ color: #38bdf8; text-decoration: none; }}
-        .container {{ max-width: 1200px; margin: 0 auto; }}
-        .breadcrumb {{ font-size: 0.85rem; color: #94a3b8; margin-bottom: 1rem; }}
+        .container {{ max-width: 1400px; margin: 0 auto; }}
+        .breadcrumb {{ font-size: 0.85rem; color: #94a3b8; margin-bottom: 1rem; line-height: 2rem; }}
+        body.risk-page .auth-topbar {{ position: absolute; top: 0.4rem; right: 1rem; margin: 0; padding: 0; max-width: none; width: auto; }}
         header h1 {{ font-size: 1.6rem; color: #f8fafc; }}
         header p {{ color: #94a3b8; margin-top: 0.35rem; font-size: 0.9rem; }}
         .kpi-grid {{
@@ -2176,7 +2178,7 @@ def render_risk_workbench_html(data: dict):
         footer {{ margin-top: 1.5rem; text-align: center; font-size: 0.8rem; color: #64748b; }}
     </style>
 </head>
-<body>
+<body class="risk-page">
     <div class="container">
         <nav class="breadcrumb"><a href="/">首页</a> / 信托资产风险中台 / 工作台</nav>
         <header>
@@ -2453,7 +2455,8 @@ def render_asset_pool_detail_html(data, investor_map):
             background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #334155 100%);
             min-height: 100vh;
             color: #e2e8f0;
-            padding: 2rem 1rem;
+            padding: 0.4rem 1rem 2rem;
+            position: relative;
         }}
         a {{
             color: #38bdf8;
@@ -2463,14 +2466,16 @@ def render_asset_pool_detail_html(data, investor_map):
             text-decoration: underline;
         }}
         .container {{
-            max-width: 960px;
+            max-width: 1400px;
             margin: 0 auto;
         }}
         .breadcrumb {{
             font-size: 0.875rem;
             color: #94a3b8;
             margin-bottom: 1.5rem;
+            line-height: 2rem;
         }}
+        body.pool-page .auth-topbar {{ position: absolute; top: 0.4rem; right: 1rem; margin: 0; padding: 0; max-width: none; width: auto; }}
         header {{
             margin-bottom: 2rem;
         }}
@@ -2652,7 +2657,7 @@ def render_asset_pool_detail_html(data, investor_map):
         }}
     </style>
 </head>
-<body>
+<body class="pool-page">
     <div class="container">
         <nav class="breadcrumb">
             <a href="/">首页</a> / 资产包 / {escape(pool["code"])}
