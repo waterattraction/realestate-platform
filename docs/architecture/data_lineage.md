@@ -35,7 +35,7 @@ Excel 文件
 
 **关键表**：`trust_product_issuance_asset_records`、`trust_product_aliases`。
 
-## 监控（Monitor / Ingestion）
+## 监控（Monitor / Assetinfo）
 
 | 阶段 | 组件 | 输入 | 输出 |
 |------|------|------|------|

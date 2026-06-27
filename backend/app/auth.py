@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);
 """
 
-INGESTION_RUNS_DDL = """
+ASSETINFO_RUNS_DDL = """
 CREATE TABLE IF NOT EXISTS assetinfo_pipeline_runs (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     trust_product_id    BIGINT NOT NULL REFERENCES trust_products (id),
@@ -136,7 +136,7 @@ def decode_access_token(token: str) -> dict:
 
 
 def ensure_auth_schema(conn: Connection) -> None:
-    for ddl in (USERS_DDL, INGESTION_RUNS_DDL):
+    for ddl in (USERS_DDL, ASSETINFO_RUNS_DDL):
         for statement in ddl.strip().split(";"):
             stmt = statement.strip()
             if stmt:
