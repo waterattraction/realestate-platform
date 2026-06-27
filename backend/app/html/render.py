@@ -1312,9 +1312,15 @@ _WORKBENCH_CSS = """
         min-height: 100vh; color: #e2e8f0;
     }
     a { color: #38bdf8; text-decoration: none; }
-    .page-wrap { padding: 1.5rem 1rem 0; padding-bottom: 0; }
+    .page-wrap { padding: 0.4rem 1rem 0; padding-bottom: 0; }
     .container { max-width: 1400px; margin: 0 auto; padding-bottom: 1.5rem; }
-    .breadcrumb { font-size: 0.85rem; color: #94a3b8; margin-bottom: 1rem; }
+    .breadcrumb { font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.75rem; line-height: 2rem; }
+    /* Auth topbar floats to top-right, breadcrumb aligns on same visual row */
+    body.workbench-page { position: relative; }
+    body.workbench-page .auth-topbar {
+        position: absolute; top: 0.4rem; right: 1rem;
+        margin: 0; padding: 0; max-width: none; width: auto;
+    }
     .page-header { margin-bottom: 0.25rem; }
     .header-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
     header h1 { font-size: 1.5rem; color: #f8fafc; }
