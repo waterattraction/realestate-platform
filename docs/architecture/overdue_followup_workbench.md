@@ -188,7 +188,7 @@ Panel ⑥ 只读展示；与底栏录入区视觉隔离。
 
 ### 6.2 附件（Phase 3）
 
-`trust_overdue_followup_attachments` → `entry_id`；目录 `{INGESTION_UPLOAD_DIR}/followups/{case_id}/{entry_id}/`；单文件 10MB，单次最多 10 个；鉴权下载。
+`trust_overdue_followup_attachments` → `entry_id`；目录 `{ASSET_UPLOAD_DIR}/followups/{case_id}/{entry_id}/`；单文件 10MB，单次最多 10 个；鉴权下载。
 
 ### 6.3 旧表 `trust_overdue_followups`
 

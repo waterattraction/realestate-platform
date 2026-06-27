@@ -12,7 +12,7 @@
 
 ## 表用途
 
-跟进 entry 的图片/文件附件元数据；文件落盘于 `{INGESTION_UPLOAD_DIR}/followups/{case_id}/{entry_id}/`。
+跟进 entry 的图片/文件附件元数据；文件落盘于 `{ASSET_UPLOAD_DIR}/followups/{case_id}/{entry_id}/`。
 
 ## 字段清单
 
@@ -21,7 +21,7 @@
 | id | 附件 ID | BIGINT | 是 | 系统 | 主键；下载路由 | |
 | entry_id | 跟进记录 ID | BIGINT | 是 | 系统 | FK | |
 | file_name | 原始文件名 | VARCHAR(500) | 是 | 上传 | 展示/下载 | |
-| stored_path | 相对存储路径 | VARCHAR(1000) | 是 | 系统 | 相对 `INGESTION_UPLOAD_DIR` | |
+| stored_path | 相对存储路径 | VARCHAR(1000) | 是 | 系统 | 相对 `ASSET_UPLOAD_DIR` | |
 | content_type | MIME | VARCHAR(128) | 否 | 上传 | | |
 | file_size | 字节大小 | BIGINT | 否 | 系统 | | 单文件 ≤10MB |
 | attachment_type | 类型 | VARCHAR(16) | 是 | 系统 | image / file | |

@@ -79,7 +79,7 @@ COL_REMAINING = cleanse.COL_ALIASES["remaining_amount"]
 
 
 def upload_root() -> Path:
-    root = Path(os.getenv("INGESTION_UPLOAD_DIR", "/data/uploads"))
+    root = Path(os.getenv("ASSET_UPLOAD_DIR", "/data/uploads"))
     root.mkdir(parents=True, exist_ok=True)
     return root
 

@@ -1,4 +1,4 @@
-"""Save followup attachment files under INGESTION_UPLOAD_DIR/followups/."""
+"""Save followup attachment files under ASSET_UPLOAD_DIR/followups/."""
 
 import os
 from pathlib import Path
@@ -13,7 +13,7 @@ FILE_EXTENSIONS = IMAGE_EXTENSIONS | {".pdf", ".doc", ".docx", ".xls", ".xlsx", 
 
 
 def upload_root() -> Path:
-    return Path(os.getenv("INGESTION_UPLOAD_DIR", "/data/uploads"))
+    return Path(os.getenv("ASSET_UPLOAD_DIR", "/data/uploads"))
 
 
 def entry_dir(case_id: int, entry_id: int) -> Path:

@@ -25,7 +25,7 @@ ISSUANCE_SHEET_KEYWORDS = ("发行", "入池", "合同", "资产明细")
 
 
 def upload_root() -> Path:
-    root = Path(os.getenv("INGESTION_UPLOAD_DIR", "/data/uploads")) / "issuance"
+    root = Path(os.getenv("ASSET_UPLOAD_DIR", "/data/uploads")) / "issuance"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
