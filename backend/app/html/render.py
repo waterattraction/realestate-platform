@@ -30,7 +30,8 @@ from app.ui_css import (
 )
 
 _TIMELINE_PREVIEW = 3
-_REPAYMENT_PREVIEW = 5
+_REPAYMENT_PREVIEW = 3
+_PANEL_PREVIEW_ROWS = 3
 
 _BUCKET_FILTER_OPTIONS = [
     ("M2_PLUS", "M2+"),
@@ -195,10 +196,10 @@ def render_overdue_workbench_html(
         </aside>
         <main class="detail-main">
             {detail_html}
+            {write_bar}
         </main>
     </div>
 </div>
-{write_bar}
 </div>
 {_WORKBENCH_SCRIPTS}
 </body>
@@ -407,50 +408,131 @@ def _fmt_source_asset_code(value) -> str:
     return str(value)
 
 
+def _fmt_date_only(value) -> str:
+    if value is None:
+        return "—"
+    text = str(value).strip()
+    if not text or text == "—":
+        return "—"
+    return text[:10]
+
+
+def _summary_tip_body(*lines: str) -> str:
+    return "<br>".join(escape(l) for l in lines if l is not None and str(l).strip())
+
+
+def _summary_chip(inner_html: str, tip_lines: list[str], *, extra_class: str = "") -> str:
+    tips = [str(l) for l in tip_lines if l is not None and str(l).strip()]
+    body = _summary_tip_body(*tips) if tips else "—"
+    cls = "summary-chip has-tip"
+    if extra_class:
+        cls += f" {extra_class}"
+    return (
+        f'<span class="{cls}">'
+        f'{inner_html}<span class="tip-panel" role="tooltip">{body}</span></span>'
+    )
+
+
+def _summary_sep() -> str:
+    return '<span class="summary-sep" aria-hidden="true">·</span>'
+
+
+def _sum_withholding_total(issuance_records: list) -> float | None:
+    total = 0.0
+    found = False
+    for rec in issuance_records:
+        amt = rec.get("total_rent_withholding_amount")
+        if amt is not None:
+            total += float(amt)
+            found = True
+    return total if found else None
+
+
+def _sum_contract_total(issuance_records: list) -> float | None:
+    total = 0.0
+    found = False
+    for rec in issuance_records:
+        amt = rec.get("receivable_contract_amount")
+        if amt is not None:
+            total += float(amt)
+            found = True
+    return total if found else None
+
+
+def _resolve_withholding_amount(issuance_records: list) -> tuple[float | None, str]:
+    """Return (amount, source) where source is withholding | contract | none."""
+    withholding = _sum_withholding_total(issuance_records)
+    if withholding is not None:
+        return withholding, "withholding"
+    contract = _sum_contract_total(issuance_records)
+    if contract is not None:
+        return contract, "contract"
+    return None, "none"
+
+
+def _render_editable_mark_chip(
+    display_text: str,
+    field: str,
+    pid,
+    ac_raw,
+    data_date,
+    options_html: str,
+    tip_lines: list[str],
+) -> str:
+    inner = f"""<span class="mark-inline-group">
+        <span class="mark-display">{escape(display_text)}</span>
+        <select class="mark-select summary-select mark-edit-hidden" data-field="{field}"
+                data-product="{pid}" data-asset-code="{escape(str(ac_raw))}" data-date="{escape(str(data_date))}">
+            {options_html}
+        </select>
+    </span>"""
+    return _summary_chip(inner, tip_lines, extra_class="summary-chip-editable")
+
+
 def _render_summary_card(dto: dict, asset: dict) -> str:
-    """Summary Card — 3-tier: Primary / Metadata / Followup."""
+    """Summary Card — 4 scan lines with hover detail chips."""
     summary = asset.get("summary") or {}
     checks = asset.get("checks")
     trust_mark = asset.get("trust_mark") or {}
     followup_case = asset.get("followup_case") or {}
     timeline = asset.get("timeline") or []
+    issuance_records = asset.get("issuance_records") or []
+    repayment = asset.get("repayment") or {}
+    ops = asset.get("ops") or {}
+    monitor = asset.get("monitor") or {}
+    splits = monitor.get("splits") or []
 
-    asset_code = escape(str(asset.get("asset_code") or dto.get("asset_code") or "—"))
+    asset_code_raw = asset.get("asset_code") or dto.get("asset_code") or "—"
+    asset_code = escape(str(asset_code_raw))
     custodies = asset.get("custody_asset_codes") or dto.get("custody_asset_codes") or []
-    custody_str = "、".join(escape(str(c)) for c in custodies) if custodies else "—"
+    custody_str = "、".join(str(c) for c in custodies) if custodies else "—"
 
     bucket = summary.get("delinquency_bucket")
     remaining = summary.get("remaining_amount")
+    repaid = summary.get("repaid_amount")
+    initial = summary.get("initial_transfer_amount")
     overdue_days = summary.get("overdue_days")
-    remaining_str = fmt_money(remaining)
 
     if bucket == "ES":
         overdue_str = "提前结清"
         od_cls = ""
-    elif overdue_days:
-        overdue_str = f"{overdue_days} 天"
-        od_cls = " info-warn"
+    elif overdue_days is not None:
+        overdue_str = f"{overdue_days}天"
+        od_cls = " summary-warn"
     else:
         overdue_str = "—"
         od_cls = ""
 
-    # Metadata — check results
-    if checks:
-        bal = checks["balance_equation"]
-        cross = checks["cross_sheet_repayment"]
-        bal_txt = f'<span class="check-icon-pass">✓</span>' if bal["passed"] else f'<span class="check-icon-fail">⚠ 差额 {fmt_money(bal["diff_amount"])}</span>'
-        cross_txt = f'<span class="check-icon-pass">✓</span>' if cross["passed"] else f'<span class="check-icon-fail">⚠ 差额 {fmt_money(cross["diff_amount"])}</span>'
-    else:
-        bal_txt = "—"
-        cross_txt = "—"
-
-    # Followup tier — editable selects
     pid = dto.get("trust_product_id")
-    ac_raw = asset.get("asset_code") or dto.get("asset_code") or ""
+    ac_raw = asset_code_raw if asset_code_raw != "—" else ""
     data_date = dto.get("data_date") or ""
+    data_date_str = escape(str(data_date or "—"))
     current_marker = trust_mark.get("trust_marker") or "未标记"
     current_internal = trust_mark.get("internal_status") or "待跟进"
+    marker_note = trust_mark.get("marker_note")
     followup_count = len([e for e in timeline if e.get("event_type") == "followup"])
+    product_name = summary.get("trust_product_name") or "—"
+    risk_score = summary.get("risk_score")
 
     marker_opts = "".join(
         f'<option value="{escape(m)}"{" selected" if m == current_marker else ""}>{escape(m)}</option>'
@@ -461,61 +543,216 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         for s in INTERNAL_STATUS_OPTIONS
     )
 
-    return f"""<div class="card-summary">
-        <div class="detail-primary">
-            <div class="info-group">
-                <span class="info-label">{ASSET_CODE_LABEL}</span>
-                <span class="info-value-xl">{asset_code}</span>
-            </div>
-            <div class="info-group">
-                <span class="info-label">剩余金额</span>
-                <span class="info-value-xl">{remaining_str}</span>
-            </div>
-            <div class="info-group">
-                <span class="info-label">M 级</span>
-                <span class="info-value-xl">{fmt_delinquency_badge(bucket)}</span>
-            </div>
-            <div class="info-group">
-                <span class="info-label">逾期天数</span>
-                <span class="info-value-xl{od_cls}">{overdue_str}</span>
-            </div>
-        </div>
-        <div class="detail-meta">
-            <div class="info-group">
-                <span class="info-label">{CUSTODY_ASSET_CODE_LABEL}</span>
-                <span class="info-value-sm">{custody_str}</span>
-            </div>
-            <div class="info-group">
-                <span class="info-label">余额等式</span>
-                <span class="info-value-sm">{bal_txt}</span>
-            </div>
-            <div class="info-group">
-                <span class="info-label">跨表已还</span>
-                <span class="info-value-sm">{cross_txt}</span>
-            </div>
-        </div>
-        <div class="detail-followup">
-            <div class="info-group mark-inline-group">
-                <span class="info-label">信托标记</span>
-                <span class="mark-display" title="双击修改">{escape(current_marker)}</span>
-                <select class="mark-select summary-select mark-edit-hidden" data-field="trust_marker"
-                        data-product="{pid}" data-asset-code="{escape(str(ac_raw))}" data-date="{escape(str(data_date))}">
-                    {marker_opts}
-                </select>
-            </div>
-            <div class="info-group mark-inline-group">
-                <span class="info-label">跟进状态</span>
-                <span class="mark-display" title="双击修改">{escape(current_internal)}</span>
-                <select class="mark-select summary-select mark-edit-hidden" data-field="internal_status"
-                        data-product="{pid}" data-asset-code="{escape(str(ac_raw))}" data-date="{escape(str(data_date))}">
-                    {status_opts}
-                </select>
-            </div>
-            <div class="info-group">
-                <span class="info-label">跟进记录数</span>
-                <span class="info-value-sm">{followup_count} 条</span>
-            </div>
-        </div>
+    asset_tip = [
+        f"{CUSTODY_ASSET_CODE_LABEL}：{custody_str}",
+        f"信托产品：{product_name}",
+    ]
+
+    m_tip = [f"逾期阶段：{bucket or '—'}"]
+    if risk_score is not None:
+        m_tip.append(f"风险分：{risk_score}")
+
+    od_tip = []
+    if bucket == "ES":
+        od_tip.append("资产已提前结清")
+    elif overdue_days is not None:
+        od_tip.append(f"汇总逾期：{overdue_days} 天")
+        for s in splits:
+            sod = s.get("overdue_days")
+            if sod is not None:
+                od_tip.append(
+                    f"{s.get('custody_asset_code') or '—'}：{sod} 天"
+                )
+
+    marker_tip = ["双击可修改信托标记"]
+    if marker_note:
+        marker_tip.append(f"备注：{marker_note}")
+
+    withholding, wh_source = _resolve_withholding_amount(issuance_records)
+
+    wh_tip: list[str] = []
+    if wh_source == "withholding":
+        wh_tip.append(f"发行 {len(issuance_records)} 条 · 总代扣 {fmt_money(withholding)}")
+        for rec in issuance_records[:3]:
+            per = rec.get("calculated_rent_withholding_per_period")
+            periods = rec.get("withholding_periods_at_pooling")
+            parts: list[str] = []
+            if periods is not None:
+                parts.append(f"代扣 {periods} 期")
+            if per is not None:
+                parts.append(f"每期 {fmt_money(per)}")
+            if parts:
+                wh_tip.append(f"{rec.get('custody_asset_code') or '—'}：{' · '.join(parts)}")
+    elif wh_source == "contract":
+        wh_tip.append(f"发行总代扣缺失，暂用合同金额 {fmt_money(withholding)}")
+        for rec in issuance_records[:3]:
+            contract_amt = rec.get("receivable_contract_amount")
+            if contract_amt is not None:
+                wh_tip.append(
+                    f"{rec.get('custody_asset_code') or '—'}：合同 {fmt_money(contract_amt)}"
+                )
+
+    repayment_items = repayment.get("items") or []
+    recent_repay = repayment.get("recent_repayment_date")
+    recent_repay_str = _fmt_date_only(recent_repay)
+    repaid_tip: list[str] = [f"还款明细 {len(repayment_items)} 条"]
+    for item in repayment_items[:3]:
+        repaid_tip.append(
+            f"{_fmt_date_only(item.get('repayment_date'))} · {fmt_money(item.get('actual_repayment_amount'))}"
+        )
+
+    remain_tip = [
+        f"{fmt_money(initial)} − {fmt_money(repaid)} = {fmt_money(remaining)}",
+        "（监控初始 − 已还 = 剩余）",
+    ]
+
+    if checks:
+        bal = checks["balance_equation"]
+        cross = checks["cross_sheet_repayment"]
+        bal_passed = bal["passed"]
+        cross_passed = cross["passed"]
+        bal_label = "余额✓" if bal_passed else "余额⚠"
+        cross_label = "还款✓" if cross_passed else "还款⚠"
+        bal_cls = "check-ok" if bal_passed else "check-bad"
+        cross_cls = "check-ok" if cross_passed else "check-bad"
+        bal_tip = [
+            f"剩余 {fmt_money(bal['left_amount'])} vs 初始−已还 {fmt_money(bal['right_amount'])}",
+            f"差额 {fmt_money(bal['diff_amount'])}",
+            f"核对基准：{RECONCILIATION_BASIS_LABEL}",
+        ]
+        cross_tip = [
+            f"监控已还 {fmt_money(cross['left_amount'])} vs 还款明细 {fmt_money(cross['right_amount'])}",
+            f"差额 {fmt_money(cross['diff_amount'])}",
+            f"核对基准：{RECONCILIATION_BASIS_LABEL}",
+        ]
+    else:
+        bal_label = cross_label = "—"
+        bal_cls = cross_cls = ""
+        bal_tip = cross_tip = []
+
+    last_at = summary.get("last_follow_up_at") or followup_case.get("last_follow_up_at")
+    last_owner = summary.get("last_follow_up_owner") or followup_case.get("owner_name")
+    status_tip = ["双击可修改跟进状态"]
+    if last_at or last_owner:
+        status_tip.append(
+            f"最近跟进：{_fmt_date_only(last_at)} · {last_owner or '—'}"
+        )
+    if followup_case.get("overdue_reason"):
+        status_tip.append(f"原因：{followup_case.get('overdue_reason')}")
+
+    count_tip = [f"跟进记录 {followup_count} 条"]
+    for ev in timeline:
+        if ev.get("event_type") != "followup":
+            continue
+        count_tip.append(
+            f"{_fmt_date_only(ev.get('occurred_at'))} · {ev.get('title') or '—'}"
+        )
+        if len(count_tip) >= 4:
+            break
+
+    actions = ops.get("recommended_actions") or []
+    first_action = actions[0].get("label") if actions else None
+    sla = ops.get("sla") or {}
+
+    line4_tip: list[str] = ["── 监控 ──", f"数据日期：{data_date or '—'}"]
+    for s in splits:
+        sod = s.get("overdue_days")
+        line4_tip.append(
+            f"{s.get('custody_asset_code') or '—'} · "
+            f"逾期 {sod if sod is not None else '—'}天 · "
+            f"{s.get('delinquency_bucket') or '—'}"
+        )
+    if not splits:
+        line4_tip.append("暂无监控分笔")
+
+    line4_tip.append("── 还款 ──")
+    if repayment_items:
+        for item in repayment_items[:3]:
+            line4_tip.append(
+                f"{_fmt_date_only(item.get('repayment_date'))} · {fmt_money(item.get('actual_repayment_amount'))}"
+            )
+    else:
+        line4_tip.append("暂无还款明细")
+
+    line4_tip.append("── Ops ──")
+    ops_detail_count = 0
+    if ops.get("bucket") or ops.get("risk_level"):
+        line4_tip.append(
+            f"逾期阶段 {ops.get('bucket') or '—'} · 风险 {ops.get('risk_level') or '—'}"
+        )
+        ops_detail_count += 1
+    if sla.get("due_date"):
+        sla_state = "已超期" if sla.get("is_breached") else "正常"
+        line4_tip.append(f"SLA 截止 {_fmt_date_only(sla.get('due_date'))}（{sla_state}）")
+        ops_detail_count += 1
+    for action in actions[:5]:
+        line4_tip.append(str(action.get("label") or action.get("action_type") or "—"))
+        ops_detail_count += 1
+    if ops_detail_count == 0:
+        line4_tip.append("暂无 Ops 建议")
+
+    anomaly_cls = " card-summary-anomaly" if summary.get("has_check_anomaly") else ""
+    ops_short = escape(str(first_action)) if first_action else "暂无建议"
+    sla_badge = ""
+    if sla.get("is_breached"):
+        sla_badge = ' <span class="badge fail-badge tiny-badge">SLA超期</span>'
+    elif sla.get("due_date"):
+        sla_badge = ' <span class="badge ok-badge tiny-badge">SLA正常</span>'
+
+    od_inner = f'<span class="summary-warn">{escape(overdue_str)}</span>' if od_cls else escape(overdue_str)
+
+    line1 = (
+        f"{_summary_chip(asset_code, asset_tip)}"
+        f"{_summary_sep()}"
+        f"{_summary_chip(fmt_delinquency_badge(bucket), m_tip)}"
+        f"{_summary_sep()}"
+        f"{_summary_chip(od_inner, od_tip or ['—'])}"
+        f"{_summary_sep()}"
+        f"{_render_editable_mark_chip(current_marker, 'trust_marker', pid, ac_raw, data_date, marker_opts, marker_tip)}"
+    )
+
+    wh_display = fmt_money(withholding) if withholding is not None else "—"
+    remain_inner = f'剩余 <span class="summary-em">{fmt_money(remaining)}</span>'
+    line2 = (
+        f"{_summary_chip(f'总代扣 {wh_display}', wh_tip or ['—'])}"
+        f"{_summary_sep()}"
+        f"{_summary_chip(f'已还 {fmt_money(repaid)}', repaid_tip)}"
+        f"{_summary_sep()}"
+        f'{_summary_chip(remain_inner, remain_tip, extra_class="summary-chip-em")}'
+    )
+
+    if checks:
+        bal_inner = f'<span class="{bal_cls}">{escape(bal_label)}</span>'
+        cross_inner = f'<span class="{cross_cls}">{escape(cross_label)}</span>'
+        line3 = (
+            f"{_render_editable_mark_chip(current_internal, 'internal_status', pid, ac_raw, data_date, status_opts, status_tip)}"
+            f"{_summary_sep()}"
+            f"{_summary_chip(f'{followup_count}条', count_tip)}"
+            f"{_summary_sep()}"
+            f"{_summary_chip(bal_inner, bal_tip)}"
+            f"{_summary_sep()}"
+            f"{_summary_chip(cross_inner, cross_tip)}"
+        )
+    else:
+        line3 = (
+            f"{_render_editable_mark_chip(current_internal, 'internal_status', pid, ac_raw, data_date, status_opts, status_tip)}"
+            f"{_summary_sep()}"
+            f"{_summary_chip(f'{followup_count}条', count_tip)}"
+            f"{_summary_sep()}余额 —{_summary_sep()}还款 —"
+        )
+
+    line4_inner = (
+        f"监控 {data_date_str}{_summary_sep()}"
+        f"末次还款 {recent_repay_str}{_summary_sep()}"
+        f"建议：{ops_short}{sla_badge}"
+    )
+    line4 = _summary_chip(line4_inner, line4_tip, extra_class="summary-chip-line")
+
+    return f"""<div class="card-summary card-summary-v2{anomaly_cls}">
+        <div class="summary-line">{line1}</div>
+        <div class="summary-line summary-line-money">{line2}</div>
+        <div class="summary-line summary-line-checks">{line3}</div>
+        <div class="summary-line summary-line-monitor">{line4}</div>
     </div>"""
 
 
@@ -673,7 +910,6 @@ def _render_asset_info_card(dto: dict, workbench_qs) -> str:
     asset_code = escape(str(asset.get("asset_code") or "—"))
     custodies = asset.get("custody_asset_codes") or []
     custody_html = "<br>".join(escape(str(c)) for c in custodies) if custodies else "—"
-    split_count = summary.get("split_count", 0)
     data_date = escape(str(dto.get("data_date") or "—"))
     primary = escape(str(asset.get("primary_custody_asset_code") or "—"))
     followup_line = _last_followup_html(summary)
@@ -694,7 +930,6 @@ def _render_asset_info_card(dto: dict, workbench_qs) -> str:
     <div class="asset-card">
         <p><span class="lbl">{ASSET_CODE_LABEL}</span><strong>{asset_code}</strong></p>
         <p><span class="lbl">{CUSTODY_ASSET_CODE_LABEL}</span>{custody_html}</p>
-        <p><span class="lbl">资产分笔数</span>{split_count}</p>
         <p><span class="lbl">监控快照</span>{data_date}</p>
         {followup_line}
         {multi_hint}
@@ -741,12 +976,7 @@ def _render_split_list(queue: list, selected_id: int | None, workbench_qs) -> st
 
 
 def _render_panels(dto: dict, asset: dict, workbench_qs) -> str:
-    """Right-column 4-col detail-grid (3 rows × 4 units).
-
-    Row 1 (2/4 | 2/4): summary | issuance
-    Row 2 (1/4 | 1/4 | 2/4): check | monitor | repayment
-    Row 3 (1/4 | 2/4 | 1/4): trust | timeline | ops
-    """
+    """Right-column detail-grid: summary | issuance, repay | timeline, ops."""
     if not asset or not (asset.get("selected_split") or asset.get("monitor", {}).get("splits")):
         if dto.get("asset_code"):
             return '<div class="empty">该资产主编号暂无监控分笔数据</div>'
@@ -754,9 +984,14 @@ def _render_panels(dto: dict, asset: dict, workbench_qs) -> str:
     return f"""<div class="detail-grid">
         <div class="grid-summary">{_render_summary_card(dto, asset)}</div>
         <div class="grid-issuance">{_panel_issuance(asset.get("issuance_records") or [])}</div>
-        <div class="grid-monitor">{_panel_monitor(asset.get("monitor") or {}, asset.get("summary") or {}, dto.get("data_date"))}</div>
         <div class="grid-repay">{_panel_repayment(asset.get("repayment") or {})}</div>
-        <div class="grid-timeline">{_panel_timeline(asset.get("timeline") or [])}</div>
+        <div class="grid-timeline">{_panel_timeline(
+            asset.get("timeline") or [],
+            asset.get("followup_case"),
+            asset.get("summary") or {},
+            asset.get("trust_mark") or {},
+            asset.get("followup_entries") or [],
+        )}</div>
         <div class="grid-ops">{_panel_ops(asset.get("ops"), asset.get("summary") or {})}</div>
     </div>"""
 
@@ -851,51 +1086,121 @@ def _panel_issuance(records: list) -> str:
     </details>"""
 
 
+def _repayment_table_row(it: dict) -> str:
+    return f"""<tr>
+        <td>{escape(str(it.get('custody_asset_code') or '—'))}</td>
+        <td>{escape(_fmt_date_only(it.get('repayment_date')))}</td>
+        <td class="num">{fmt_money(it.get('actual_repayment_amount'))}</td>
+    </tr>"""
+
+
+def _build_panel_preview_table(
+    *,
+    colgroup_html: str,
+    thead_html: str,
+    items: list,
+    row_fn,
+    colspan: int,
+    expand_summary: str,
+    empty_message: str | None = None,
+) -> str:
+    preview_items = items[:_PANEL_PREVIEW_ROWS]
+    rows: list[str] = []
+    for i in range(_PANEL_PREVIEW_ROWS):
+        if i < len(preview_items):
+            rows.append(row_fn(preview_items[i]))
+        elif i == 0 and not preview_items and empty_message:
+            rows.append(f'<tr><td colspan="{colspan}" class="empty">{escape(empty_message)}</td></tr>')
+        else:
+            rows.append(f'<tr class="row-pad"><td colspan="{colspan}">&nbsp;</td></tr>')
+
+    expand_block = ""
+    if len(items) > _PANEL_PREVIEW_ROWS:
+        more_rows = "".join(row_fn(it) for it in items[_PANEL_PREVIEW_ROWS:50])
+        expand_block = f"""<details class="panel-expand">
+            <summary class="panel-expand-summary muted tiny">{escape(expand_summary)}</summary>
+            <div class="table-wrap panel-expand-table">
+                <table class="panel-fixed-rows">
+                    {colgroup_html}
+                    <tbody>{more_rows}</tbody>
+                </table>
+            </div>
+        </details>"""
+
+    return f"""<div class="table-wrap">
+        <table class="panel-fixed-rows">
+            {colgroup_html}
+            {thead_html}
+            <tbody class="panel-preview">{"".join(rows)}</tbody>
+        </table>
+    </div>
+    {expand_block}"""
+
+
+def _followup_status_label(status: str | None) -> str:
+    if not status:
+        return "—"
+    return FOLLOWUP_STATUS_LABELS.get(status, status)
+
+
+def _followup_panel_summary(
+    events: list,
+    followup_case: dict | None,
+    summary: dict,
+    trust_mark: dict,
+    followup_entries: list | None = None,
+) -> str:
+    entries = followup_entries or []
+    if entries:
+        status_label = _followup_status_label(entries[0].get("status_snapshot"))
+    else:
+        case_status = (followup_case or {}).get("status")
+        if case_status:
+            status_label = _followup_status_label(case_status)
+        else:
+            status_label = (trust_mark or {}).get("internal_status") or "—"
+    last_at = _fmt_date_only(summary.get("last_follow_up_at"))
+    followup_count = len([e for e in events if e.get("event_type") == "followup"])
+    return (
+        f"跟进记录状态 {escape(str(status_label))} · "
+        f"最近跟进 {escape(last_at)} · "
+        f"跟进记录 {followup_count} 条"
+    )
+
+
 def _panel_repayment(rep: dict) -> str:
     items = rep.get("items") or []
-    preview_rows = ""
-    for it in items[:_REPAYMENT_PREVIEW]:
-        preview_rows += f"""<tr>
-            <td>{escape(str(it.get('custody_asset_code') or '—'))}</td>
-            <td>{escape(str(it.get('repayment_date') or '—'))}</td>
-            <td class="num">{fmt_money(it.get('actual_repayment_amount'))}</td>
-        </tr>"""
-    if not preview_rows:
-        preview_rows = (
-            f'<tr><td colspan="3" class="empty">缺少还款明细，逾期天数可能无法重算</td></tr>'
-        )
-    preview_table = f"""<div class="table-wrap"><table>
-        <thead><tr><th>{CUSTODY_ASSET_CODE_LABEL}</th><th>还款日</th><th>实还</th></tr></thead>
-        <tbody>{preview_rows}</tbody></table></div>"""
-    rest_block = ""
-    if len(items) > _REPAYMENT_PREVIEW:
-        rest_rows = ""
-        for it in items[_REPAYMENT_PREVIEW:50]:
-            rest_rows += f"""<tr>
-                <td>{escape(str(it.get('custody_asset_code') or '—'))}</td>
-                <td>{escape(str(it.get('repayment_date') or '—'))}</td>
-                <td class="num">{fmt_money(it.get('actual_repayment_amount'))}</td>
-            </tr>"""
-        rest_block = f"""<details class="repayment-details">
-            <summary class="muted tiny">查看全部还款明细（{len(items)} 条）</summary>
-            <div class="table-wrap"><table>
-            <thead><tr><th>{CUSTODY_ASSET_CODE_LABEL}</th><th>还款日</th><th>实还</th></tr></thead>
-            <tbody>{rest_rows}</tbody></table></div>
-        </details>"""
-    return f"""<div class="info-card">
+    colgroup = """<colgroup>
+        <col class="col-repay-custody">
+        <col class="col-repay-date">
+        <col class="col-repay-amt">
+    </colgroup>"""
+    thead = f"""<thead><tr>
+        <th>{CUSTODY_ASSET_CODE_LABEL}</th><th>还款日</th><th>实还</th>
+    </tr></thead>"""
+    table_html = _build_panel_preview_table(
+        colgroup_html=colgroup,
+        thead_html=thead,
+        items=items,
+        row_fn=_repayment_table_row,
+        colspan=3,
+        expand_summary=f"查看全部还款明细（{len(items)} 条）",
+        empty_message="缺少还款明细，逾期天数可能无法重算",
+    )
+    recent = _fmt_date_only(rep.get("recent_repayment_date"))
+    return f"""<div class="info-card panel-dual">
         <h3 class="info-card-title">还款情况</h3>
         <div class="info-card-body">
-            <p>累计实还 <strong>{fmt_money(rep.get('total_repaid'))}</strong>
-            · 最近还款日 {escape(str(rep.get('recent_repayment_date') or '—'))}
+            <p class="panel-summary-line">累计实还 <strong>{fmt_money(rep.get('total_repaid'))}</strong>
+            · 最近还款日 {escape(recent)}
             · 期次 {rep.get('period_count', 0)}</p>
-            {preview_table}
-            {rest_block}
+            {table_html}
         </div>
     </div>"""
 
 
 def _panel_monitor(mon: dict, summary: dict, data_date: str | None) -> str:
-    asset_agg = mon.get("asset") or {}
+    asset_agg = mon.get("custody") or mon.get("asset") or {}
     splits = mon.get("splits") or []
     rows = ""
     for s in splits:
@@ -914,11 +1219,7 @@ def _panel_monitor(mon: dict, summary: dict, data_date: str | None) -> str:
     return f"""<div class="info-card info-card-primary">
         <h3 class="info-card-title">当前监控</h3>
         <div class="info-card-body">
-            <p class="muted tiny">分笔 {asset_agg.get('split_count', 0)} 笔 · 数据日期 {escape(str(data_date or '—'))}</p>
-            <p class="muted tiny monitor-summary">资产汇总：初始 {fmt_money(asset_agg.get('initial_transfer_amount'))}
-                · 已还 {fmt_money(asset_agg.get('repaid_amount'))}
-                · 剩余 {fmt_money(asset_agg.get('remaining_amount'))}
-                · 逾期 {escape(_overdue_label(summary))}</p>
+            <p class="muted tiny">数据日期 {escape(str(data_date or '—'))}</p>
             {table}
         </div>
     </div>"""
@@ -991,46 +1292,111 @@ def _panel_ops(ops: dict | None, summary: dict) -> str:
     </div>"""
 
 
-def _timeline_row(ev: dict) -> str:
+def _timeline_type_label(ev: dict) -> str:
+    if ev.get("event_type") == "repayment":
+        return "还款"
+    if ev.get("event_type") == "followup":
+        return "跟进"
+    return "—"
+
+
+def _truncate_summary(text: str | None, max_len: int = 24) -> str:
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "…"
+
+
+def _timeline_summary(ev: dict) -> str:
     legacy = ""
     if ev.get("legacy"):
         legacy = f' <span class="badge">{escape(ev.get("legacy_label") or "历史")}</span>'
-    att_html = ""
-    for att in ev.get("attachments") or []:
-        aid = att.get("id")
-        fname = escape(str(att.get("file_name") or ""))
-        att_html += f' <a href="/overdue/workbench/attachments/{aid}">{fname}</a>'
-    return f"""<tr>
-        <td>{escape(str(ev.get('occurred_at') or '—'))}</td>
-        <td>{escape(str(ev.get('event_type') or '—'))}</td>
-        <td>{escape(str(ev.get('title') or '—'))}{legacy}{att_html}</td>
-        <td>{escape(str(ev.get('owner_name') or ev.get('amount') or '—'))}</td>
+
+    if ev.get("event_type") == "repayment":
+        period = ev.get("period_no")
+        custody = str(ev.get("custody_asset_code") or "")
+        tail = custody[-4:] if len(custody) >= 4 else custody
+        if period is not None and str(period) != "—":
+            summary = f"期次 {period}"
+            if tail:
+                summary += f" · {tail}"
+            return escape(summary)
+        return escape(f"还款 · {_fmt_date_only(ev.get('occurred_at'))}")
+
+    status = _followup_status_label(ev.get("status_snapshot"))
+    snippet = _truncate_summary(ev.get("overdue_reason"))
+    if not snippet:
+        snippet = _truncate_summary(ev.get("follow_up_plan"))
+    if not snippet and ev.get("owner_name"):
+        snippet = _truncate_summary(f"负责人 {ev.get('owner_name')}")
+    if snippet:
+        return f"{escape(status)} · {escape(snippet)}{legacy}"
+    return f"{escape(status)}{legacy}"
+
+
+def _timeline_detail_cell(ev: dict) -> str:
+    if ev.get("event_type") == "repayment":
+        return f'<span class="num">{fmt_money(ev.get("amount"))}</span>'
+
+    entry_id = ev.get("entry_id")
+    label = escape(str(ev.get("owner_name") or "查看"))
+    if entry_id:
+        pane_id = f"followup-pane-entry-{entry_id}"
+        return (
+            f'<button type="button" class="timeline-goto-entry timeline-detail-link" '
+            f'data-entry-pane="{pane_id}">{label} ▾</button>'
+        )
+    return label
+
+
+def _timeline_rows(ev: dict) -> str:
+    return f"""<tr class="timeline-main-row">
+        <td>{escape(_fmt_date_only(ev.get('occurred_at')))}</td>
+        <td>{escape(_timeline_type_label(ev))}</td>
+        <td>{_timeline_summary(ev)}</td>
+        <td>{_timeline_detail_cell(ev)}</td>
     </tr>"""
 
 
-def _panel_timeline(events: list) -> str:
-    if not events:
-        return """<div class="info-card"><h3 class="info-card-title">跟进历史（最近 3 条）</h3>
-            <p class="empty">暂无事件</p></div>"""
-    preview = events[:_TIMELINE_PREVIEW]
-    preview_rows = "".join(_timeline_row(ev) for ev in preview)
-    table_head = """<thead><tr><th>时间</th><th>类型</th><th>摘要</th><th>详情</th></tr></thead>"""
-    preview_table = f"""<div class="table-wrap"><table>
-        {table_head}<tbody>{preview_rows}</tbody></table></div>"""
-    rest = events[_TIMELINE_PREVIEW:]
-    rest_block = ""
-    if rest:
-        rest_rows = "".join(_timeline_row(ev) for ev in rest)
-        rest_block = f"""<details class="timeline-more">
-            <summary class="timeline-more-summary">查看全部 {len(events)} 条</summary>
-            <div class="table-wrap"><table>
-            {table_head}<tbody>{rest_rows}</tbody></table></div>
-        </details>"""
-    return f"""<div class="info-card">
-        <h3 class="info-card-title">跟进历史（最近 {_TIMELINE_PREVIEW} 条）</h3>
+def _timeline_row(ev: dict) -> str:
+    return _timeline_rows(ev)
+
+
+def _panel_timeline(
+    events: list,
+    followup_case: dict | None = None,
+    summary: dict | None = None,
+    trust_mark: dict | None = None,
+    followup_entries: list | None = None,
+) -> str:
+    summary = summary or {}
+    trust_mark = trust_mark or {}
+    colgroup = """<colgroup>
+        <col class="col-tl-time">
+        <col class="col-tl-type">
+        <col class="col-tl-title">
+        <col class="col-tl-detail">
+    </colgroup>"""
+    thead = """<thead><tr><th>时间</th><th>类型</th><th>摘要</th><th>详情</th></tr></thead>"""
+    table_html = _build_panel_preview_table(
+        colgroup_html=colgroup,
+        thead_html=thead,
+        items=events,
+        row_fn=_timeline_row,
+        colspan=4,
+        expand_summary=f"查看全部 {len(events)} 条",
+        empty_message="暂无事件",
+    )
+    summary_line = _followup_panel_summary(
+        events, followup_case, summary, trust_mark, followup_entries
+    )
+    return f"""<div class="info-card panel-dual">
+        <h3 class="info-card-title">跟进历史</h3>
         <div class="info-card-body">
-            {preview_table}
-            {rest_block}
+            <p class="panel-summary-line">{summary_line}</p>
+            {table_html}
         </div>
     </div>"""
 
@@ -1041,6 +1407,118 @@ def _followup_status_options(current: str | None) -> str:
         selected = " selected" if value == current else ""
         options += f'<option value="{value}"{selected}>{escape(label)}</option>'
     return options
+
+
+def _followup_entry_tab_label(entry: dict) -> str:
+    return f"{_fmt_date_only(entry.get('created_at'))} · {_followup_status_label(entry.get('status_snapshot'))}"
+
+
+def _followup_entry_is_editable(entry: dict) -> bool:
+    return entry.get("status_snapshot") == "in_progress"
+
+
+def _render_followup_entry_readonly(entry: dict) -> str:
+    eid = int(entry["id"])
+    att_parts = []
+    for att in entry.get("attachments") or []:
+        aid = att.get("id")
+        fname = escape(str(att.get("file_name") or ""))
+        att_parts.append(f'<a href="/overdue/workbench/attachments/{aid}">{fname}</a>')
+    att_html = " ".join(att_parts) if att_parts else "—"
+
+    def ro_field(label: str, value) -> str:
+        text = escape(str(value)) if value not in (None, "") else "—"
+        return f'<p><span class="lbl">{escape(label)}</span>{text}</p>'
+
+    cite_attrs = (
+        f'data-status="{escape(str(entry.get("status_snapshot") or ""))}" '
+        f'data-owner="{escape(str(entry.get("owner_name") or ""))}" '
+        f'data-reason="{escape(str(entry.get("overdue_reason") or ""))}" '
+        f'data-plan="{escape(str(entry.get("follow_up_plan") or ""))}" '
+        f'data-feedback="{escape(str(entry.get("trust_feedback") or ""))}" '
+        f'data-note="{escape(str(entry.get("note") or ""))}"'
+    )
+    return f"""<div class="followup-readonly">
+        <p class="readonly-hint muted tiny">历史记录只读 · 如需补充请切换至「＋ 新建跟进」</p>
+        {ro_field("跟进时间", _fmt_date_only(entry.get("created_at")))}
+        {ro_field("跟进记录状态", _followup_status_label(entry.get("status_snapshot")))}
+        {ro_field("负责人", entry.get("owner_name"))}
+        {ro_field("逾期原因", entry.get("overdue_reason"))}
+        {ro_field("跟进方案", entry.get("follow_up_plan"))}
+        {ro_field("信托反馈", entry.get("trust_feedback"))}
+        {ro_field("补充说明", entry.get("note"))}
+        <p><span class="lbl">附件</span>{att_html}</p>
+        <button type="button" class="btn btn-compact entry-cite-btn" {cite_attrs}>引用此条到新建</button>
+    </div>"""
+
+
+def _render_followup_entry_editable(
+    entry: dict,
+    product_hidden: str,
+    asset_hidden: str,
+    bucket_hidden: str,
+    workbench_qs,
+    data_date: str,
+) -> str:
+    eid = int(entry["id"])
+    status = entry.get("status_snapshot") or "in_progress"
+    owner_val = escape(entry.get("owner_name") or "")
+    reason = escape(str(entry.get("overdue_reason") or ""))
+    plan = escape(str(entry.get("follow_up_plan") or ""))
+    feedback = escape(str(entry.get("trust_feedback") or ""))
+    note = escape(str(entry.get("note") or ""))
+    created = escape(_fmt_date_only(entry.get("created_at")))
+
+    att_parts = []
+    for att in entry.get("attachments") or []:
+        aid = att.get("id")
+        fname = escape(str(att.get("file_name") or ""))
+        att_parts.append(f'<a href="/overdue/workbench/attachments/{aid}">{fname}</a>')
+    att_html = " ".join(att_parts) if att_parts else "—"
+
+    return f"""<div class="followup-editable">
+        <p class="readonly-hint muted tiny">跟进中记录可修改 · 保存后更新本条（不新增记录）</p>
+        <p class="muted tiny">跟进时间 {created} · 已有附件 {att_html}</p>
+        <form class="followup-form followup-edit-form" method="post" enctype="multipart/form-data"
+              action="/overdue/workbench/followups/entries/{eid}{workbench_qs()}">
+            <input type="hidden" name="redirect_to_workbench" value="1">
+            {product_hidden}
+            {asset_hidden}
+            {bucket_hidden}
+            <input type="hidden" name="data_date" value="{data_date}">
+            <div class="followup-form-grid">
+                <label>跟进记录状态
+                    <select name="status">{_followup_status_options(status)}</select>
+                </label>
+                <label>负责人 <input name="owner_name" value="{owner_val}"></label>
+                <label>逾期原因<textarea name="overdue_reason" rows="2">{reason}</textarea></label>
+                <label>跟进方案<textarea name="follow_up_plan" rows="2">{plan}</textarea></label>
+                <label>信托反馈<textarea name="trust_feedback" rows="2">{feedback}</textarea></label>
+                <label>补充说明<textarea name="note" rows="2">{note}</textarea></label>
+                <label class="span-2">追加附件（图片/PDF 等，最多 10 个）
+                    <input type="file" name="files" class="followup-edit-files" multiple>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="btn primary">保存修改</button>
+            </div>
+        </form>
+    </div>"""
+
+
+def _render_followup_entry_panel(
+    entry: dict,
+    product_hidden: str,
+    asset_hidden: str,
+    bucket_hidden: str,
+    workbench_qs,
+    data_date: str,
+) -> str:
+    if _followup_entry_is_editable(entry):
+        return _render_followup_entry_editable(
+            entry, product_hidden, asset_hidden, bucket_hidden, workbench_qs, data_date
+        )
+    return _render_followup_entry_readonly(entry)
 
 
 def _panel_followup_write(
@@ -1056,21 +1534,40 @@ def _panel_followup_write(
     asset = dto.get("asset") or {}
     case = asset.get("followup_case") or {}
     current_status = case.get("status") or "in_progress"
-    status_label = escape(FOLLOWUP_STATUS_LABELS.get(current_status, current_status))
     owner_val = escape(case.get("owner_name") or "")
-    owner_display = owner_val if owner_val else "—"
-    summary = asset.get("summary") or {}
-    internal = escape(str(summary.get("internal_status") or "待跟进"))
     asset_code = escape(str(dto.get("asset_code") or asset.get("asset_code") or ""))
     expanded = "1" if new_followup else "0"
-    last_entry = asset.get("timeline") or []
+    followup_entries = asset.get("followup_entries") or []
+
     last_reason = ""
     last_plan = ""
-    for ev in last_entry:
-        if ev.get("event_type") == "followup" and not ev.get("legacy"):
-            last_reason = ev.get("overdue_reason") or ""
-            last_plan = ev.get("follow_up_plan") or ""
-            break
+    if followup_entries:
+        last_reason = followup_entries[0].get("overdue_reason") or ""
+        last_plan = followup_entries[0].get("follow_up_plan") or ""
+    else:
+        for ev in asset.get("timeline") or []:
+            if ev.get("event_type") == "followup" and not ev.get("legacy"):
+                last_reason = ev.get("overdue_reason") or ""
+                last_plan = ev.get("follow_up_plan") or ""
+                break
+
+    entry_tabs = (
+        '<button type="button" class="entry-tab active" data-pane="followup-pane-new">'
+        "＋ 新建跟进</button>"
+    )
+    entry_panes = ""
+    for entry in followup_entries:
+        eid = int(entry["id"])
+        pane_id = f"followup-pane-entry-{eid}"
+        entry_tabs += (
+            f'<button type="button" class="entry-tab" data-pane="{pane_id}">'
+            f"{escape(_followup_entry_tab_label(entry))}</button>"
+        )
+        entry_panes += (
+            f'<div class="followup-pane" id="{pane_id}">'
+            f"{_render_followup_entry_panel(entry, product_hidden, asset_hidden, bucket_hidden, workbench_qs, data_date)}"
+            f"</div>"
+        )
 
     return f"""
     <div class="sticky-write-bar" id="followup-entry-form" data-expanded="{expanded}">
@@ -1079,39 +1576,44 @@ def _panel_followup_write(
                 <span class="write-toggle-icon" aria-hidden="true">▶</span>
                 <span class="sticky-write-title">记录跟进 · {ASSET_CODE_LABEL} {asset_code}</span>
             </button>
-            <span class="write-summary muted tiny">案件状态：{status_label} · 负责人：{owner_display} · 内部状态：{internal}</span>
-            <button type="button" class="btn primary btn-compact" id="followup-expand-btn">展开录入</button>
-            <button type="button" class="btn btn-compact write-collapse-btn" id="followup-collapse">收起</button>
+            <span class="sticky-write-actions">
+                <button type="button" class="btn primary btn-compact" id="followup-expand-btn">展开录入</button>
+                <button type="button" class="btn btn-compact write-collapse-btn" id="followup-collapse">收起</button>
+            </span>
         </div>
         <div class="sticky-write-panel" id="followup-write-panel">
             <div class="sticky-write-inner">
                 <p class="muted tiny">跟进时间于保存时自动生成 · 每次保存追加一条跟进记录（V2.2 entries）</p>
-                <form class="followup-form" id="followup-form" method="post" enctype="multipart/form-data"
-                      action="/overdue/workbench/followups/entries{workbench_qs()}">
-                    <input type="hidden" name="redirect_to_workbench" value="1">
-                    {product_hidden}
-                    {asset_hidden}
-                    {bucket_hidden}
-                    <input type="hidden" name="data_date" value="{data_date}">
-                    <div class="followup-form-grid">
-                        <label>案件状态
-                            <select name="status">{_followup_status_options(current_status)}</select>
-                        </label>
-                        <label>负责人 <input name="owner_name" value="{owner_val}"></label>
-                        <label>逾期原因<textarea name="overdue_reason" rows="2">{escape(str(last_reason))}</textarea></label>
-                        <label>跟进方案<textarea name="follow_up_plan" rows="2">{escape(str(last_plan))}</textarea></label>
-                        <label>信托反馈<textarea name="trust_feedback" rows="2"></textarea></label>
-                        <label>补充说明<textarea name="note" rows="2"></textarea></label>
-                        <label class="span-2">附件（图片/PDF 等，最多 10 个）
-                            <input type="file" name="files" id="followup-files" multiple>
-                        </label>
-                        <div class="span-2 file-preview" id="file-preview"></div>
-                    </div>
-                    <div class="form-actions">
-                        <button type="submit" class="btn primary">保存本次跟进</button>
-                        <button type="button" class="btn" id="followup-clear">清空</button>
-                    </div>
-                </form>
+                <div class="entry-tabs" role="tablist">{entry_tabs}</div>
+                <div class="followup-pane active" id="followup-pane-new">
+                    <form class="followup-form" id="followup-form" method="post" enctype="multipart/form-data"
+                          action="/overdue/workbench/followups/entries{workbench_qs()}">
+                        <input type="hidden" name="redirect_to_workbench" value="1">
+                        {product_hidden}
+                        {asset_hidden}
+                        {bucket_hidden}
+                        <input type="hidden" name="data_date" value="{data_date}">
+                        <div class="followup-form-grid">
+                            <label>跟进记录状态
+                                <select name="status">{_followup_status_options(current_status)}</select>
+                            </label>
+                            <label>负责人 <input name="owner_name" value="{owner_val}"></label>
+                            <label>逾期原因<textarea name="overdue_reason" rows="2">{escape(str(last_reason))}</textarea></label>
+                            <label>跟进方案<textarea name="follow_up_plan" rows="2">{escape(str(last_plan))}</textarea></label>
+                            <label>信托反馈<textarea name="trust_feedback" rows="2"></textarea></label>
+                            <label>补充说明<textarea name="note" rows="2"></textarea></label>
+                            <label class="span-2">附件（图片/PDF 等，最多 10 个）
+                                <input type="file" name="files" id="followup-files" multiple>
+                            </label>
+                            <div class="span-2 file-preview" id="file-preview"></div>
+                        </div>
+                        <div class="form-actions" id="followup-form-actions">
+                            <button type="submit" class="btn primary">保存本次跟进</button>
+                            <button type="button" class="btn" id="followup-clear">清空</button>
+                        </div>
+                    </form>
+                </div>
+                {entry_panes}
             </div>
         </div>
     </div>
@@ -1157,6 +1659,57 @@ document.addEventListener('DOMContentLoaded', function() {
     if (document.body.dataset.scrollFollowup === '1') {
         expandWriteBar();
     }
+
+    function switchFollowupPane(paneId) {
+        document.querySelectorAll('.followup-pane').forEach(function(pane) {
+            pane.classList.toggle('active', pane.id === paneId);
+        });
+        document.querySelectorAll('.entry-tab').forEach(function(tab) {
+            tab.classList.toggle('active', tab.dataset.pane === paneId);
+        });
+        var formActions = document.getElementById('followup-form-actions');
+        if (formActions) {
+            formActions.style.display = paneId === 'followup-pane-new' ? '' : 'none';
+        }
+    }
+
+    document.querySelectorAll('.entry-tab').forEach(function(tab) {
+        tab.addEventListener('click', function() {
+            switchFollowupPane(tab.dataset.pane);
+        });
+    });
+
+    document.querySelectorAll('.entry-cite-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var form = document.getElementById('followup-form');
+            if (!form) return;
+            var status = form.querySelector('[name="status"]');
+            var owner = form.querySelector('[name="owner_name"]');
+            var reason = form.querySelector('[name="overdue_reason"]');
+            var plan = form.querySelector('[name="follow_up_plan"]');
+            var feedback = form.querySelector('[name="trust_feedback"]');
+            var note = form.querySelector('[name="note"]');
+            if (status && btn.dataset.status) status.value = btn.dataset.status;
+            if (owner) owner.value = btn.dataset.owner || '';
+            if (reason) reason.value = btn.dataset.reason || '';
+            if (plan) plan.value = btn.dataset.plan || '';
+            if (feedback) feedback.value = btn.dataset.feedback || '';
+            if (note) note.value = btn.dataset.note || '';
+            switchFollowupPane('followup-pane-new');
+            if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+    });
+
+    switchFollowupPane('followup-pane-new');
+
+    document.querySelectorAll('.timeline-goto-entry').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var paneId = btn.dataset.entryPane;
+            if (paneId) switchFollowupPane(paneId);
+            expandWriteBar();
+            if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+    });
 
     var activeQueueItem = document.querySelector('.compact-queue .queue-item.active');
     if (activeQueueItem) {
@@ -1341,21 +1894,25 @@ _WORKBENCH_SPECIFIC_CSS = """
         padding: 0.65rem 0.85rem; border-bottom: 1px solid rgba(255,255,255,0.08);
         font-weight: 600; font-size: 0.85rem;
     }
-    .detail-main { min-width: 0; }
-    /* ── Detail Grid: 4-column, 3-row named-area layout ──────── */
+    .detail-main {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+    }
+    /* ── Detail Grid: summary | issuance, repay | timeline, ops ─ */
     .detail-grid {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
         grid-template-areas:
             "summary   summary   issuance  issuance"
-            "monitor   repay     repay     repay"
-            "timeline  timeline  timeline  ops";
+            "repay     repay     timeline  timeline"
+            "ops       ops       ops       ops";
         gap: 16px;
-        align-items: start;
+        align-items: stretch;
     }
     .grid-summary  { grid-area: summary; }
     .grid-issuance { grid-area: issuance; }
-    .grid-monitor  { grid-area: monitor; }
     .grid-repay    { grid-area: repay; }
     .grid-timeline { grid-area: timeline; }
     .grid-ops      { grid-area: ops; }
@@ -1364,19 +1921,81 @@ _WORKBENCH_SPECIFIC_CSS = """
             grid-template-columns: 1fr;
             grid-template-areas:
                 "summary" "issuance"
-                "monitor" "repay"
-                "timeline" "ops";
+                "repay" "timeline"
+                "ops";
         }
     }
-    /* ── Summary Card (Detail · Level A) ──────────────────────── */
+    .panel-dual { height: 100%; display: flex; flex-direction: column; }
+    .panel-dual .info-card-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .panel-summary-line {
+        margin: 0 0 0.65rem; font-size: 0.875rem; line-height: 1.45;
+        min-height: 2.5rem;
+    }
+    .panel-fixed-rows {
+        width: 100%; table-layout: fixed; border-collapse: collapse;
+    }
+    .panel-fixed-rows th,
+    .panel-fixed-rows td {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .panel-fixed-rows tbody tr { height: 2rem; }
+    .panel-fixed-rows tbody tr.row-pad td {
+        color: transparent; border-color: rgba(255,255,255,0.04);
+    }
+    .col-repay-custody { width: 38%; }
+    .col-repay-date { width: 28%; }
+    .col-repay-amt { width: 34%; }
+    .col-tl-time { width: 22%; }
+    .col-tl-type { width: 12%; }
+    .col-tl-title { width: 44%; }
+    .col-tl-detail { width: 22%; }
+    .timeline-goto-entry, .timeline-detail-link {
+        background: none; border: none; color: #38bdf8; cursor: pointer;
+        padding: 0; font: inherit; font-size: inherit;
+    }
+    .timeline-goto-entry:hover, .timeline-detail-link:hover { text-decoration: underline; }
+    .panel-expand { margin-top: 0.5rem; }
+    .panel-expand-summary { cursor: pointer; color: #38bdf8; font-size: 0.85rem; }
+    .panel-expand-table { margin-top: 0; }
+    .panel-expand-table table { border-top: none; }
+    /* ── Summary Card (4-line scan + hover tips) ─────────────── */
     .card-summary {
         background: rgba(255,255,255,0.06); border: 1px solid rgba(56,189,248,0.2);
-        border-radius: 12px; padding: 16px;
+        border-radius: 12px; padding: 12px 14px;
     }
-    /* Info group: label on top, value below — vertical reading */
+    .card-summary-anomaly { border-left: 3px solid #f87171; }
+    .card-summary-v2 .summary-line {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px;
+        font-size: 13px; color: #cbd5e1; line-height: 1.5;
+    }
+    .card-summary-v2 .summary-line + .summary-line {
+        margin-top: 8px; padding-top: 8px;
+        border-top: 1px solid rgba(255,255,255,0.06);
+    }
+    .summary-line-money { font-variant-numeric: tabular-nums; }
+    .summary-em { font-weight: 700; color: #f8fafc; font-size: 15px; }
+    .summary-sep { color: #64748b; user-select: none; padding: 0 1px; }
+    .summary-warn { color: #f87171; font-weight: 600; }
+    .summary-chip { position: relative; display: inline-flex; align-items: center; max-width: 100%; }
+    .summary-chip.has-tip { cursor: help; border-bottom: 1px dotted rgba(148,163,184,0.35); }
+    .summary-chip.has-tip:hover { border-bottom-color: rgba(56,189,248,0.55); color: #e2e8f0; }
+    .summary-chip .tip-panel {
+        display: none; position: absolute; left: 0; top: calc(100% + 6px); z-index: 60;
+        min-width: 210px; max-width: 340px; padding: 8px 10px;
+        background: #1e293b; border: 1px solid rgba(56,189,248,0.25); border-radius: 8px;
+        font-size: 12px; line-height: 1.45; color: #e2e8f0; font-weight: 400;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.35); white-space: normal;
+    }
+    .summary-chip.has-tip:hover .tip-panel,
+    .summary-chip.has-tip:focus-within .tip-panel { display: block; }
+    .summary-chip-editable .mark-display { font-size: 13px; }
+    .summary-chip-line { max-width: 100%; }
+    .check-ok { color: #34d399; font-weight: 600; }
+    .check-bad { color: #f87171; font-weight: 600; }
+    .tiny-badge { font-size: 10px; padding: 1px 6px; margin-left: 4px; vertical-align: middle; }
+    /* legacy summary tiers (hero wrapper) */
     .info-group { display: flex; flex-direction: column; gap: 2px; }
     .info-label { font-size: 12px; color: #94a3b8; line-height: 1.2; }
-    /* Level 1 — Primary (3 key numbers) */
     .detail-primary {
         display: flex; flex-wrap: wrap; gap: 8px 24px;
         padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.08);
@@ -1386,18 +2005,9 @@ _WORKBENCH_SPECIFIC_CSS = """
         font-size: 22px; font-weight: 700; color: #f8fafc;
         font-variant-numeric: tabular-nums; line-height: 1.2;
     }
-    .info-value-md { font-size: 15px; font-weight: 600; color: #e2e8f0; line-height: 1.3; }
-    /* Level 2 — Metadata (custody / check results) */
-    .detail-meta {
-        display: flex; flex-wrap: wrap; gap: 6px 24px;
-        padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.06);
-        margin-bottom: 10px;
-    }
     .info-value-sm { font-size: 13px; color: #94a3b8; line-height: 1.3; }
     .check-icon-pass { color: #34d399; font-weight: 600; }
     .check-icon-fail { color: #f87171; font-weight: 600; }
-    /* Level 3 — Followup (marker / case status / count) */
-    .detail-followup { display: flex; flex-wrap: wrap; gap: 6px 24px; align-items: center; }
     .info-warn { color: #f87171; }
     .summary-select {
         font-size: 12px; color: #e2e8f0; background: rgba(255,255,255,0.07);
@@ -1503,8 +2113,6 @@ _WORKBENCH_SPECIFIC_CSS = """
     .issuance-issue-date { font-size: 13px; font-weight: 700; color: #e2e8f0; margin-bottom: 4px; }
     .issuance-line { font-size: 12px; color: #94a3b8; line-height: 1.7; word-break: break-all; }
     .monitor-summary { margin-bottom: 0.5rem; }
-    .repayment-details, .timeline-more { margin-top: 0.5rem; }
-    .timeline-more-summary { cursor: pointer; color: #38bdf8; font-size: 0.85rem; }
     .muted { color: #94a3b8; }
     .tiny { font-size: 0.75rem; }
     .lbl { color: #94a3b8; font-size: 0.8rem; margin-right: 0.35rem; }
@@ -1518,30 +2126,52 @@ _WORKBENCH_SPECIFIC_CSS = """
     .num { text-align: right; font-variant-numeric: tabular-nums; }
     .sticky-write-bar {
         position: sticky; bottom: 0; z-index: 30;
-        background: rgba(15,23,42,0.96); border-top: 1px solid rgba(56,189,248,0.25);
-        backdrop-filter: blur(8px); margin-top: 1rem;
+        width: 100%;
+        background: rgba(15,23,42,0.96); border: 1px solid rgba(56,189,248,0.25);
+        border-radius: 12px;
+        backdrop-filter: blur(8px); margin-top: auto;
         box-shadow: 0 -4px 24px rgba(0,0,0,0.35);
+        overflow: hidden;
     }
     .sticky-write-collapsed {
-        display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;
-        max-width: 1400px; margin: 0 auto; padding: 0.55rem 1rem;
+        display: flex; align-items: center; justify-content: space-between; gap: 0.65rem;
+        padding: 0.55rem 0.85rem;
     }
+    .sticky-write-actions { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
     .write-toggle {
         display: inline-flex; align-items: center; gap: 0.35rem;
         background: none; border: none; color: #f8fafc; cursor: pointer;
         font-size: 0.95rem; font-weight: 600; padding: 0;
+        min-width: 0; flex: 1 1 auto;
     }
     .write-toggle-icon { font-size: 0.65rem; color: #94a3b8; }
-    .write-summary { flex: 1 1 200px; min-width: 0; }
     .sticky-write-bar[data-expanded="0"] .sticky-write-panel { display: none; }
     .sticky-write-bar[data-expanded="0"] .write-collapse-btn { display: none; }
     .sticky-write-bar[data-expanded="1"] #followup-expand-btn { display: none; }
     .sticky-write-panel { border-top: 1px solid rgba(255,255,255,0.06); }
     .sticky-write-inner {
-        max-width: 1400px; margin: 0 auto; padding: 0.85rem 1rem 1rem;
+        padding: 0.85rem 0.85rem 1rem;
         max-height: 45vh; overflow-y: auto;
     }
     .sticky-write-title { font-size: 0.95rem; color: #f8fafc; }
+    .entry-tabs {
+        display: flex; flex-wrap: nowrap; gap: 0.35rem;
+        overflow-x: auto; margin: 0.5rem 0 0.65rem;
+        padding-bottom: 0.15rem;
+    }
+    .entry-tab {
+        flex-shrink: 0; padding: 0.35rem 0.7rem; border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.04);
+        color: #94a3b8; cursor: pointer; font-size: 0.8rem; white-space: nowrap;
+    }
+    .entry-tab.active {
+        background: rgba(56,189,248,0.2); border-color: rgba(56,189,248,0.45); color: #e2e8f0;
+    }
+    .followup-pane { display: none; }
+    .followup-pane.active { display: block; }
+    .followup-readonly p { margin-bottom: 0.45rem; font-size: 0.85rem; }
+    .readonly-hint { margin-bottom: 0.65rem !important; }
+    .entry-cite-btn { margin-top: 0.35rem; }
     .followup-form-grid {
         display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 0.75rem;
         margin: 0.5rem 0;
@@ -1575,7 +2205,6 @@ _WORKBENCH_SPECIFIC_CSS = """
     }
     .file-chip-img { display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; }
     .file-thumb { max-width: 64px; max-height: 64px; border-radius: 4px; object-fit: cover; }
-    .page-wrap:has(.sticky-write-bar[data-expanded="1"]) .container { padding-bottom: 2rem; }
 """
 
 _WORKBENCH_CSS = f"""

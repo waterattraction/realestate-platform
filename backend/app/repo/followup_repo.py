@@ -295,6 +295,109 @@ class FollowupRepo:
             "status": status,
         }
 
+    def update_in_progress_entry(
+        self,
+        *,
+        entry_id: int,
+        trust_product_id: int,
+        asset_code: str,
+        status: str,
+        owner_name: str | None,
+        overdue_reason: str | None,
+        follow_up_plan: str | None,
+        trust_feedback: str | None,
+        note: str | None,
+        updated_by: str | None,
+    ) -> dict:
+        valid_status = {"open", "in_progress", "resolved", "closed"}
+        if status not in valid_status:
+            raise ValueError(f"Invalid status: {status}")
+
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT e.id, e.case_id, e.status_snapshot
+                    FROM trust_overdue_followup_entries e
+                    INNER JOIN trust_overdue_followup_cases c ON c.id = e.case_id
+                    WHERE e.id = :entry_id
+                      AND c.trust_product_id = :trust_product_id
+                      AND c.asset_code = :asset_code
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "entry_id": entry_id,
+                    "trust_product_id": trust_product_id,
+                    "asset_code": asset_code,
+                },
+            ).fetchone()
+            if row is None:
+                raise ValueError("Followup entry not found")
+            if row.status_snapshot != "in_progress":
+                raise ValueError("Only in_progress followup entries can be edited")
+
+            case_id = int(row.case_id)
+            conn.execute(
+                text(
+                    """
+                    UPDATE trust_overdue_followup_entries
+                    SET status_snapshot = :status,
+                        owner_name = :owner_name,
+                        overdue_reason = :overdue_reason,
+                        follow_up_plan = :follow_up_plan,
+                        trust_feedback = :trust_feedback,
+                        note = :note
+                    WHERE id = :entry_id
+                    """
+                ),
+                {
+                    "entry_id": entry_id,
+                    "status": status,
+                    "owner_name": owner_name,
+                    "overdue_reason": overdue_reason,
+                    "follow_up_plan": follow_up_plan,
+                    "trust_feedback": trust_feedback,
+                    "note": note,
+                },
+            )
+
+            latest = conn.execute(
+                text(
+                    """
+                    SELECT id FROM trust_overdue_followup_entries
+                    WHERE case_id = :case_id
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """
+                ),
+                {"case_id": case_id},
+            ).fetchone()
+            if latest and int(latest.id) == entry_id:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE trust_overdue_followup_cases
+                        SET status = :status,
+                            owner_name = :owner_name,
+                            updated_by = :updated_by,
+                            closed_at = CASE
+                                WHEN :status IN ('resolved', 'closed') THEN NOW()
+                                ELSE NULL
+                            END
+                        WHERE id = :case_id
+                        """
+                    ),
+                    {
+                        "case_id": case_id,
+                        "status": status,
+                        "owner_name": owner_name,
+                        "updated_by": updated_by,
+                    },
+                )
+
+        return {"case_id": case_id, "entry_id": entry_id, "status": status}
+
     def insert_attachments(
         self,
         entry_id: int,

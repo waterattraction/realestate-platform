@@ -221,6 +221,10 @@ class OverdueWorkbenchService:
         timeline = _build_timeline(
             repayment_items, followup_history, entry_list, attachments_by_entry
         )
+        followup_entries = []
+        for entry in entry_list:
+            eid = int(entry["id"])
+            followup_entries.append({**entry, "attachments": attachments_by_entry.get(eid, [])})
         trust_mark = self._marks.fetch_mark(
             trust_product_id, resolved_asset, resolved_date
         )
@@ -291,6 +295,7 @@ class OverdueWorkbenchService:
             "trust_mark": trust_mark,
             "ops": ops,
             "followup_case": followup_case,
+            "followup_entries": followup_entries,
             "timeline": timeline,
             "product_queue": product_queue,
             "queue": queue,
@@ -414,6 +419,7 @@ class OverdueWorkbenchService:
                 "timeline": old.get("timeline") or [],
                 "ops": old.get("ops"),
                 "followup_case": old.get("followup_case"),
+                "followup_entries": old.get("followup_entries") or [],
             }
 
         return {
@@ -494,6 +500,7 @@ def _build_timeline(
                 "occurred_at": occurred,
                 "title": f"还款 期次 {item.get('period_no') or '—'}",
                 "amount": item.get("actual_repayment_amount"),
+                "period_no": item.get("period_no"),
                 "source_asset_code": item.get("source_asset_code") or item.get("asset_code"),
                 "custody_asset_code": item.get("custody_asset_code"),
                 "legacy": False,
@@ -507,9 +514,12 @@ def _build_timeline(
                 "event_type": "followup",
                 "occurred_at": entry.get("created_at"),
                 "title": f"跟进 · {entry.get('status_snapshot') or '—'}",
+                "status_snapshot": entry.get("status_snapshot"),
                 "owner_name": entry.get("owner_name"),
                 "overdue_reason": entry.get("overdue_reason"),
                 "follow_up_plan": entry.get("follow_up_plan"),
+                "trust_feedback": entry.get("trust_feedback"),
+                "note": entry.get("note"),
                 "entry_type": entry.get("entry_type"),
                 "entry_id": eid,
                 "attachments": entry_attachments,
@@ -525,10 +535,14 @@ def _build_timeline(
                 "event_type": "followup",
                 "occurred_at": occurred,
                 "title": f"跟进 · {fu.get('status') or '—'}",
+                "status_snapshot": fu.get("status"),
                 "owner_name": fu.get("owner_name"),
                 "overdue_reason": fu.get("overdue_reason"),
                 "follow_up_plan": fu.get("follow_up_plan"),
-                "asset_code": fu.get("asset_code"),
+                "trust_feedback": fu.get("trust_feedback"),
+                "note": None,
+                "entry_id": None,
+                "attachments": [],
                 "legacy": True,
                 "legacy_label": "历史台账",
             }
