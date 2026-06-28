@@ -354,6 +354,9 @@ def _apply_custody_list_filters(item: dict, filters: dict | None) -> bool:
         return False
     if has_followup == "no" and int(item.get("followup_count") or 0) > 0:
         return False
+    asset_q = (filters.get("asset_code") or "").strip().lower()
+    if asset_q and asset_q not in (item.get("asset_code") or "").lower():
+        return False
     custody_q = (filters.get("custody_asset_code") or "").strip().lower()
     if custody_q and custody_q not in item["custody_asset_code"].lower():
         return False
@@ -638,6 +641,7 @@ def fetch_overdue_overview(
     trust_marker: str | None = None,
     internal_status: str | None = None,
     has_followup: str | None = None,
+    asset_code: str | None = None,
     custody_asset_code: str | None = None,
 ):
     list_filters = {
@@ -646,6 +650,7 @@ def fetch_overdue_overview(
         "trust_marker": trust_marker,
         "internal_status": internal_status,
         "has_followup": has_followup,
+        "asset_code": asset_code,
         "custody_asset_code": custody_asset_code,
     }
     monitor_filter, params = _latest_monitor_filter(trust_product_id, data_date)
@@ -750,6 +755,7 @@ def fetch_overdue_overview(
                 mc.trust_product_id,
                 tp.name AS trust_product_name,
                 mc.data_date,
+                mc.asset_code,
                 mc.custody_asset_code,
                 mc.source_asset_count,
                 mc.initial_transfer_amount,
@@ -970,6 +976,7 @@ def fetch_overdue_checks(conn, trust_product_id: int | None = None, data_date: s
                 mc.trust_product_id,
                 tp.name AS trust_product_name,
                 mc.data_date,
+                mc.asset_code,
                 mc.custody_asset_code,
                 mc.source_asset_count,
                 mc.initial_transfer_amount,
@@ -1408,7 +1415,7 @@ def render_overdue_html(
             if key == active_bucket:
                 default_tab_idx = idx
                 break
-    elif (filters or {}).get("custody_asset_code") or any(
+    elif (filters or {}).get("asset_code") or (filters or {}).get("custody_asset_code") or any(
         (filters or {}).get(k)
         for k in (
             "trust_product_id",
@@ -1473,6 +1480,7 @@ def render_overdue_html(
 
     followup_yes = " selected" if f.get("has_followup") == "yes" else ""
     followup_no = " selected" if f.get("has_followup") == "no" else ""
+    asset_q = escape(f.get("asset_code") or "")
     custody_q = escape(f.get("custody_asset_code") or "")
 
     filter_bar = f"""
@@ -1495,6 +1503,9 @@ def render_overdue_html(
                     <option value="yes"{followup_yes}>有台账</option>
                     <option value="no"{followup_no}>无台账</option>
                 </select>
+            </label>
+            <label>资产主编号
+                <input type="text" name="asset_code" value="{asset_q}" placeholder="模糊匹配">
             </label>
             <label>托管房源号
                 <input type="text" name="custody_asset_code" value="{custody_q}" placeholder="模糊匹配">
@@ -3150,6 +3161,7 @@ def overdue_overview(
     trust_marker: str | None = None,
     internal_status: str | None = None,
     has_followup: str | None = None,
+    asset_code: str | None = None,
     custody_asset_code: str | None = None,
 ):
     pid = query_utils.parse_optional_int(trust_product_id)
@@ -3163,6 +3175,7 @@ def overdue_overview(
             trust_marker=query_utils.clean_optional_str(trust_marker),
             internal_status=query_utils.clean_optional_str(internal_status),
             has_followup=query_utils.clean_optional_str(has_followup),
+            asset_code=query_utils.clean_optional_str(asset_code),
             custody_asset_code=query_utils.clean_optional_str(custody_asset_code),
         )
 
@@ -3273,6 +3286,7 @@ def overdue_dashboard(
     trust_marker: str | None = None,
     internal_status: str | None = None,
     has_followup: str | None = None,
+    asset_code: str | None = None,
     custody_asset_code: str | None = None,
 ):
     pid = query_utils.parse_optional_int(trust_product_id)
@@ -3280,6 +3294,7 @@ def overdue_dashboard(
     parsed_trust_marker = query_utils.clean_optional_str(trust_marker)
     parsed_internal_status = query_utils.clean_optional_str(internal_status)
     parsed_has_followup = query_utils.clean_optional_str(has_followup)
+    parsed_asset = query_utils.clean_optional_str(asset_code)
     parsed_custody = query_utils.clean_optional_str(custody_asset_code)
     filters = {
         "trust_product_id": pid,
@@ -3287,6 +3302,7 @@ def overdue_dashboard(
         "trust_marker": parsed_trust_marker,
         "internal_status": parsed_internal_status,
         "has_followup": parsed_has_followup,
+        "asset_code": parsed_asset,
         "custody_asset_code": parsed_custody,
     }
     with engine.connect() as conn:
@@ -3297,6 +3313,7 @@ def overdue_dashboard(
             trust_marker=parsed_trust_marker,
             internal_status=parsed_internal_status,
             has_followup=parsed_has_followup,
+            asset_code=parsed_asset,
             custody_asset_code=parsed_custody,
         )
         recon_data = fetch_reconciliation(conn, pid)
