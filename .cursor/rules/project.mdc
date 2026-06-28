@@ -33,15 +33,12 @@ Use these names consistently in UI copy, FastAPI `title`, HTML `<title>`, commen
 
 | Entity | 中文 | Table |
 |--------|------|-------|
-| Projects | 项目 | `projects` |
 | Asset Pools | 资产包 | `asset_pools` |
 | Trust Products | 信托产品 | `trust_products` |
-| Investors | 投资人 | `investors` |
-| Investments | 投资记录 | `investments` |
 
-关联表：`project_asset_pools`（Project ↔ Asset Pool，多对多）
+业务链：`Asset Pools → Trust Products` → 底层资产（监控/回款/发行模块）
 
-业务链：`Projects → Asset Pools → Trust Products → Investments ← Investors`
+> 已 DROP：`projects`、`project_asset_pools`、`investors`、`investments`（见 `db/migrations/20260629_*`、`20260630_*`）。
 
 ## 项目结构
 
@@ -58,7 +55,7 @@ docker-compose.yml    # postgres (5432) + backend (8000)
 ## API 现状
 
 - `GET /` — HTML Dashboard
-- `GET /projects`, `/asset-pools`, `/trust-products`, `/investors`, `/investments`
+- `GET /asset-pools`, `/trust-products`
 - `GET /asset-pools/{id}/overview` — 资产包聚合视图
 
 ## 本地开发

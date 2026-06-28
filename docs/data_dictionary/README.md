@@ -8,12 +8,8 @@
 
 | 文档 | 表名 | 模块 |
 |------|------|------|
-| [projects.md](projects.md) | `projects` | 基础 |
 | [asset_pools.md](asset_pools.md) | `asset_pools` | 基础 |
-| [project_asset_pools.md](project_asset_pools.md) | `project_asset_pools` | 基础 |
 | [trust_products.md](trust_products.md) | `trust_products` | 信托 |
-| [investors.md](investors.md) | `investors` | 基础 |
-| [investments.md](investments.md) | `investments` | 基础 |
 | [trust_assets.md](trust_assets.md) | `trust_assets` | 底层资产 |
 | [issuance_assets.md](issuance_assets.md) | `trust_product_issuance_asset_records` | 发行 |
 | [issuance_import_runs.md](issuance_import_runs.md) | `issuance_import_runs` | 发行审计 |

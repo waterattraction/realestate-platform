@@ -50,8 +50,7 @@
 | `code` | — | `code` | 产品编码 |
 | `name` | `trust_product_name` | `name` | 产品名称 |
 | `status` | — | `status` | draft / raising / active / … |
-| `targetAmount` | — | `target_amount` | 目标规模 |
-| `raisedAmount` | — | `raised_amount` | 已募集 |
+| `expectedReturnRate` | — | `expected_return_rate` | 预期收益率（可选） |
 
 ### 业务含义
 
@@ -83,7 +82,7 @@
 
 ### 业务含义
 
-入池资产集合，关联 Project 与 TrustProduct。
+入池资产集合，关联 TrustProduct。
 
 ### 开放
 

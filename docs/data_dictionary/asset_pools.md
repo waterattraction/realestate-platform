@@ -12,7 +12,7 @@
 
 ## 表用途
 
-证券化资产包主数据；通过 `project_asset_pools` 关联项目，通过 `trust_products.asset_pool_id` 关联信托产品。
+证券化资产包主数据；通过 `trust_products.asset_pool_id` 关联信托产品。
 
 ## 生命周期
 

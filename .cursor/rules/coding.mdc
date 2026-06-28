@@ -42,7 +42,7 @@ def list_items():
 
 ```python
 # ✅ Parameterized query
-conn.execute(text("SELECT * FROM projects WHERE id = :id"), {"id": project_id})
+conn.execute(text("SELECT * FROM trust_products WHERE id = :id"), {"id": product_id})
 ```
 
 ## PostgreSQL

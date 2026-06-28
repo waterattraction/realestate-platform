@@ -47,8 +47,7 @@
 
 ## 上游来源
 
-- 监控/还款 Excel 导入（`/assetinfo`）
-- 种子：`db/modules/overdue/seed.sql`
+- 监控/还款/发行 Excel 导入（`/assetinfo`、`/issuance`）
 
 ## 下游使用模块
 

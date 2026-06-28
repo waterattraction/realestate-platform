@@ -2233,41 +2233,6 @@ def fetch_asset_pool_overview(conn, asset_pool_id: int):
     if pool_row is None:
         return None
 
-    project_rows = conn.execute(
-        text("""
-            SELECT
-                p.id,
-                p.code,
-                p.name,
-                p.city,
-                p.status,
-                p.total_budget,
-                p.planned_start_date,
-                p.planned_end_date
-            FROM projects p
-            INNER JOIN project_asset_pools pap ON pap.project_id = p.id
-            WHERE pap.asset_pool_id = :asset_pool_id
-            ORDER BY p.id
-        """),
-        {"asset_pool_id": asset_pool_id},
-    )
-
-    projects = []
-    total_project_budget = 0.0
-    for row in project_rows:
-        budget = float(row.total_budget)
-        total_project_budget += budget
-        projects.append({
-            "id": row.id,
-            "code": row.code,
-            "name": row.name,
-            "city": row.city,
-            "status": row.status,
-            "total_budget": budget,
-            "planned_start_date": str(row.planned_start_date) if row.planned_start_date else None,
-            "planned_end_date": str(row.planned_end_date) if row.planned_end_date else None,
-        })
-
     trust_product_rows = conn.execute(
         text("""
             SELECT
@@ -2275,11 +2240,7 @@ def fetch_asset_pool_overview(conn, asset_pool_id: int):
                 code,
                 name,
                 status,
-                target_amount,
-                raised_amount,
-                expected_return_rate,
-                open_date,
-                close_date
+                expected_return_rate
             FROM trust_products
             WHERE asset_pool_id = :asset_pool_id
             ORDER BY id
@@ -2288,58 +2249,14 @@ def fetch_asset_pool_overview(conn, asset_pool_id: int):
     )
 
     trust_products = []
-    trust_product_ids = []
-    total_raised_amount = 0.0
     for row in trust_product_rows:
-        raised = float(row.raised_amount)
-        total_raised_amount += raised
-        trust_product_ids.append(row.id)
         trust_products.append({
             "id": row.id,
             "code": row.code,
             "name": row.name,
             "status": row.status,
-            "target_amount": float(row.target_amount),
-            "raised_amount": raised,
             "expected_return_rate": float(row.expected_return_rate) if row.expected_return_rate else None,
-            "open_date": str(row.open_date) if row.open_date else None,
-            "close_date": str(row.close_date) if row.close_date else None,
-            "investments": [],
         })
-
-    if trust_product_ids:
-        investment_rows = conn.execute(
-            text("""
-                SELECT
-                    i.id,
-                    i.investor_id,
-                    i.trust_product_id,
-                    i.subscription_no,
-                    i.amount,
-                    i.status,
-                    i.invested_at
-                FROM investments i
-                INNER JOIN trust_products tp ON tp.id = i.trust_product_id
-                WHERE tp.asset_pool_id = :asset_pool_id
-                ORDER BY i.trust_product_id, i.id
-            """),
-            {"asset_pool_id": asset_pool_id},
-        )
-
-        investments_by_product = {tp_id: [] for tp_id in trust_product_ids}
-        for row in investment_rows:
-            investments_by_product[row.trust_product_id].append({
-                "id": row.id,
-                "investor_id": row.investor_id,
-                "trust_product_id": row.trust_product_id,
-                "subscription_no": row.subscription_no,
-                "amount": float(row.amount),
-                "status": row.status,
-                "invested_at": str(row.invested_at) if row.invested_at else None,
-            })
-
-        for tp in trust_products:
-            tp["investments"] = investments_by_product[tp["id"]]
 
     return {
         "asset_pool": {
@@ -2349,47 +2266,17 @@ def fetch_asset_pool_overview(conn, asset_pool_id: int):
             "status": pool_row.status,
             "appraised_value": float(pool_row.appraised_value),
         },
-        "projects": projects,
         "trust_products": trust_products,
-        "total_raised_amount": total_raised_amount,
-        "total_project_budget": total_project_budget,
     }
 
 
-def fetch_investor_map(conn):
-    result = conn.execute(text("SELECT id, code, name FROM investors ORDER BY id"))
-    return {
-        row.id: {"code": row.code, "name": row.name}
-        for row in result
-    }
-
-
-def render_asset_pool_detail_html(data, investor_map):
+def render_asset_pool_detail_html(data):
     pool = data["asset_pool"]
-    projects = data["projects"]
     trust_products = data["trust_products"]
-
-    project_rows = ""
-    if projects:
-        for project in projects:
-            project_rows += f"""
-                <tr>
-                    <td>{escape(project["code"])}</td>
-                    <td>{escape(project["name"])}</td>
-                    <td>{escape(project["city"] or "—")}</td>
-                    <td>{fmt_status(project["status"])}</td>
-                    <td class="num">{fmt_money(project["total_budget"])}</td>
-                    <td>{escape(project["planned_start_date"] or "—")}</td>
-                    <td>{escape(project["planned_end_date"] or "—")}</td>
-                </tr>
-            """
-    else:
-        project_rows = '<tr><td colspan="7" class="empty">暂无关联项目</td></tr>'
 
     trust_product_cards = ""
     if trust_products:
         for tp in trust_products:
-            progress = min(tp["raised_amount"] / tp["target_amount"] * 100, 100) if tp["target_amount"] > 0 else 0
             trust_product_cards += f"""
                 <div class="card sub-card">
                     <div class="sub-card-header">
@@ -2400,47 +2287,12 @@ def render_asset_pool_detail_html(data, investor_map):
                         {fmt_status(tp["status"])}
                     </div>
                     <div class="meta-grid">
-                        <div><span class="meta-label">目标募集</span><span class="meta-value">{fmt_money(tp["target_amount"])}</span></div>
-                        <div><span class="meta-label">已募集</span><span class="meta-value money">{fmt_money(tp["raised_amount"])}</span></div>
                         <div><span class="meta-label">预期收益率</span><span class="meta-value">{fmt_rate(tp["expected_return_rate"])}</span></div>
-                        <div><span class="meta-label">开放日</span><span class="meta-value">{escape(tp["open_date"] or "—")}</span></div>
-                        <div><span class="meta-label">关闭日</span><span class="meta-value">{escape(tp["close_date"] or "—")}</span></div>
-                    </div>
-                    <div class="progress-wrap">
-                        <div class="progress-label">
-                            <span>募集进度</span>
-                            <span>{progress:.1f}%</span>
-                        </div>
-                        <div class="progress-bar"><div class="progress-fill" style="width: {progress:.1f}%"></div></div>
                     </div>
                 </div>
             """
     else:
         trust_product_cards = '<div class="empty-block">尚未发行信托产品</div>'
-
-    investment_rows = ""
-    all_investments = []
-    for tp in trust_products:
-        for investment in tp["investments"]:
-            all_investments.append((tp, investment))
-
-    if all_investments:
-        for tp, investment in all_investments:
-            investor = investor_map.get(investment["investor_id"], {})
-            investor_label = investor.get("name") or f'ID {investment["investor_id"]}'
-            investor_code = investor.get("code", "—")
-            investment_rows += f"""
-                <tr>
-                    <td>{escape(tp["code"])}</td>
-                    <td>{escape(investment["subscription_no"])}</td>
-                    <td>{escape(investor_label)}<span class="muted"> ({escape(investor_code)})</span></td>
-                    <td class="num">{fmt_money(investment["amount"])}</td>
-                    <td>{fmt_status(investment["status"])}</td>
-                    <td>{escape(investment["invested_at"] or "—")}</td>
-                </tr>
-            """
-    else:
-        investment_rows = '<tr><td colspan="6" class="empty">暂无认购记录</td></tr>'
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -2645,65 +2497,14 @@ def render_asset_pool_detail_html(data, investor_map):
 
         <div class="grid">
             <div class="card">
-                <div class="card-label">关联项目数</div>
-                <div class="card-value">{len(projects)}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">项目总预算</div>
-                <div class="card-value money budget">{fmt_money(data["total_project_budget"])}</div>
-            </div>
-            <div class="card">
                 <div class="card-label">信托产品数</div>
                 <div class="card-value">{len(trust_products)}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">已募集总金额</div>
-                <div class="card-value money">{fmt_money(data["total_raised_amount"])}</div>
             </div>
         </div>
 
         <section class="section">
-            <h2 class="section-title">关联项目</h2>
-            <div class="card table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>项目编号</th>
-                            <th>项目名称</th>
-                            <th>城市</th>
-                            <th>状态</th>
-                            <th>预算</th>
-                            <th>计划开工</th>
-                            <th>计划完工</th>
-                        </tr>
-                    </thead>
-                    <tbody>{project_rows}</tbody>
-                </table>
-            </div>
-        </section>
-
-        <section class="section">
             <h2 class="section-title">信托产品</h2>
             {trust_product_cards}
-        </section>
-
-        <section class="section">
-            <h2 class="section-title">投资明细</h2>
-            <div class="card table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>信托产品</th>
-                            <th>认购编号</th>
-                            <th>投资人</th>
-                            <th>认购金额</th>
-                            <th>状态</th>
-                            <th>认购时间</th>
-                        </tr>
-                    </thead>
-                    <tbody>{investment_rows}</tbody>
-                </table>
-            </div>
         </section>
 
         <footer>Real Estate Securitization Platform</footer>
@@ -2751,11 +2552,8 @@ def render_not_found_html():
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
-    project_count = 0
     asset_pool_count = 0
     trust_product_count = 0
-    investor_count = 0
-    total_raised_amount = 0.0
     overdue_total = 0
     exposure_total = 0
     high_risk_count = 0
@@ -2767,17 +2565,11 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
     with engine.connect() as conn:
         row = conn.execute(text("""
             SELECT
-                (SELECT COUNT(*) FROM projects) AS project_count,
                 (SELECT COUNT(*) FROM asset_pools) AS asset_pool_count,
-                (SELECT COUNT(*) FROM trust_products) AS trust_product_count,
-                (SELECT COUNT(*) FROM investors) AS investor_count,
-                (SELECT COALESCE(SUM(raised_amount), 0) FROM trust_products) AS total_raised_amount
+                (SELECT COUNT(*) FROM trust_products) AS trust_product_count
         """)).fetchone()
-        project_count = int(row.project_count)
         asset_pool_count = int(row.asset_pool_count)
         trust_product_count = int(row.trust_product_count)
-        investor_count = int(row.investor_count)
-        total_raised_amount = float(row.total_raised_amount)
 
         try:
             iss_row = conn.execute(text("""
@@ -2821,7 +2613,6 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         return value if value else "—"
 
     data_updated_at = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
-    raised_display = fmt_money(total_raised_amount)
     issuance_count_display = dash_count(issuance_row_count) if issuance_row_count else "—"
     monitor_count_display = dash_count(monitor_asset_count) if monitor_asset_count else "—"
 
@@ -3152,24 +2943,12 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
 
         <div class="kpi-bar" aria-label="平台概览">
             <div class="kpi-item">
-                <span class="kpi-label">项目</span>
-                <span class="kpi-value">{dash_count(project_count)}</span>
-            </div>
-            <div class="kpi-item">
                 <span class="kpi-label">资产包</span>
                 <span class="kpi-value">{dash_count(asset_pool_count)}</span>
             </div>
             <div class="kpi-item">
                 <span class="kpi-label">信托产品</span>
                 <span class="kpi-value">{dash_count(trust_product_count)}</span>
-            </div>
-            <div class="kpi-item">
-                <span class="kpi-label">投资人</span>
-                <span class="kpi-value">{dash_count(investor_count)}</span>
-            </div>
-            <div class="kpi-item">
-                <span class="kpi-label">募集总规模</span>
-                <span class="kpi-value money">{raised_display}</span>
             </div>
             <div class="kpi-item">
                 <span class="kpi-label">逾期 M2+</span>
@@ -3286,38 +3065,6 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
 </html>"""
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
-@app.get("/projects")
-def list_projects():
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT
-                id,
-                code,
-                name,
-                city,
-                status,
-                total_budget,
-                planned_start_date,
-                planned_end_date
-            FROM projects
-            ORDER BY id
-        """))
-
-        projects = []
-        for row in result:
-            projects.append({
-                "id": row.id,
-                "code": row.code,
-                "name": row.name,
-                "city": row.city,
-                "status": row.status,
-                "total_budget": float(row.total_budget),
-                "planned_start_date": str(row.planned_start_date) if row.planned_start_date else None,
-                "planned_end_date": str(row.planned_end_date) if row.planned_end_date else None,
-            })
-
-        return projects
-
 @app.get("/asset-pools")
 def list_asset_pools():
     with engine.connect() as conn:
@@ -3353,8 +3100,7 @@ def asset_pool_detail(
         data = fetch_asset_pool_overview(conn, asset_pool_id)
         if data is None:
             return HTMLResponse(content=render_not_found_html(), status_code=404)
-        investor_map = fetch_investor_map(conn)
-        html = render_asset_pool_detail_html(data, investor_map)
+        html = render_asset_pool_detail_html(data)
 
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
@@ -3378,11 +3124,7 @@ def list_trust_products():
                 code,
                 name,
                 status,
-                target_amount,
-                raised_amount,
-                expected_return_rate,
-                open_date,
-                close_date
+                expected_return_rate
             FROM trust_products
             ORDER BY id
         """))
@@ -3395,74 +3137,10 @@ def list_trust_products():
                 "code": row.code,
                 "name": row.name,
                 "status": row.status,
-                "target_amount": float(row.target_amount),
-                "raised_amount": float(row.raised_amount),
                 "expected_return_rate": float(row.expected_return_rate) if row.expected_return_rate else None,
-                "open_date": str(row.open_date) if row.open_date else None,
-                "close_date": str(row.close_date) if row.close_date else None,
             })
 
         return trust_products
-
-@app.get("/investors")
-def list_investors():
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT
-                id,
-                code,
-                name,
-                investor_type,
-                kyc_status,
-                phone,
-                email
-            FROM investors
-            ORDER BY id
-        """))
-
-        investors = []
-        for row in result:
-            investors.append({
-                "id": row.id,
-                "code": row.code,
-                "name": row.name,
-                "investor_type": row.investor_type,
-                "kyc_status": row.kyc_status,
-                "phone": row.phone,
-                "email": row.email,
-            })
-
-        return investors
-
-@app.get("/investments")
-def list_investments():
-    with engine.connect() as conn:
-        result = conn.execute(text("""
-            SELECT
-                id,
-                investor_id,
-                trust_product_id,
-                subscription_no,
-                amount,
-                status,
-                invested_at
-            FROM investments
-            ORDER BY id
-        """))
-
-        investments = []
-        for row in result:
-            investments.append({
-                "id": row.id,
-                "investor_id": row.investor_id,
-                "trust_product_id": row.trust_product_id,
-                "subscription_no": row.subscription_no,
-                "amount": float(row.amount),
-                "status": row.status,
-                "invested_at": str(row.invested_at) if row.invested_at else None,
-            })
-
-        return investments
 
 @app.get("/overdue/overview")
 def overdue_overview(

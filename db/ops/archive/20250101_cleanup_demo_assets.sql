@@ -1,6 +1,6 @@
 -- type: ops/cleanup
--- status: pending
--- executed_at:
+-- status: executed
+-- executed_at: 2026-06-30
 -- safe_to_rerun: no
 -- scope: FY-* 演示房源关联数据清理
 -- ============================================================
@@ -149,7 +149,6 @@ WHERE ta.asset_code LIKE 'FY-%';
 COMMIT;
 
 -- ============================================================
--- E. 回滚方案（单独执行 rollback_demo_assets.sql 或以下语句）
--- 前提：_demo_fy_backup_* 表仍存在且未 DROP
+-- E. 回滚方案（已废弃：_demo_fy_backup_* 已于 20260630_drop_fy_demo_backups.sql 删除）
+-- 原脚本见 rollbacks/20250101_rollback_demo_assets.sql
 -- ============================================================
--- 见 rollback_demo_assets.sql

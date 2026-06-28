@@ -95,15 +95,6 @@
 | `pending` | 待激活 | 待生效 | seed |
 | `active` | 生效中 | 运行中 | seed |
 
-## project status
-
-`projects.status`（基础模块，非信托核心）。
-
-| Value | 中文 | 含义 |
-|-------|------|------|
-| `in_progress` | 进行中 | |
-| `completed` | 已完成 | |
-
 ## trust asset internal status
 
 `trust_asset_trust_marks.internal_status`（中文值，非英文枚举）。

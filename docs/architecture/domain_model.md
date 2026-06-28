@@ -12,7 +12,6 @@
 
 ```mermaid
 erDiagram
-    Project ||--o{ AssetPool : "project_asset_pools"
     AssetPool ||--o{ TrustProduct : "asset_pool_id"
     TrustProduct ||--o{ IssuanceAsset : "trust_product_id"
     TrustProduct ||--o{ TrustAsset : "trust_product_id"
@@ -30,9 +29,8 @@ erDiagram
 ## 业务链（主路径）
 
 ```
-Project
-  → AssetPool（资产包）
-    → TrustProduct（信托产品）
+AssetPool（资产包）
+  → TrustProduct（信托产品）
       → IssuanceAsset（发行明细，issue_date 维度）
       → TrustAsset（底层资产主体，custody_asset_code）
         → MonitorSnapshot（监控快照，data_date 维度）
@@ -45,15 +43,14 @@ Project
 
 ## 对象说明
 
-### Project / AssetPool / TrustProduct
+### AssetPool / TrustProduct
 
 | 对象 | 表 | 角色 |
 |------|-----|------|
-| `Project` | `projects` | 证券化项目顶层 |
-| `AssetPool` | `asset_pools` | 入池资产集合，多对多关联 Project |
+| `AssetPool` | `asset_pools` | 信托产品分组容器（FK 壳） |
 | `TrustProduct` | `trust_products` | 信托产品，全模块 `trust_product_id` 外键维度 |
 
-基础链：`Projects → Asset Pools → Trust Products`。
+基础链：`Asset Pools → Trust Products` → 底层资产（发行 / 监控 / 还款 / 逾期 / 风险）。
 
 ### IssuanceAsset
 

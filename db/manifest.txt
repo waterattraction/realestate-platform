@@ -9,14 +9,12 @@
 # ============================================================
 
 # --- baseline：平台基础 ---
-baseline/001_schema.sql          # 项目/资产包/信托/投资人等核心表
-baseline/002_seed.sql            # 基础演示数据
+baseline/001_schema.sql          # 资产包 / 信托产品等核心表
+baseline/002_seed.sql            # 默认资产包 + 占位信托产品 bootstrap
 
 # --- modules：业务模块（按依赖顺序）---
 modules/overdue/schema.sql       # 逾期跟进表
-modules/overdue/seed.sql         # 逾期种子（依赖 trust_product_id=1）
 modules/risk/schema.sql          # 风险管理 V2
-modules/risk/seed.sql            # 风险种子（依赖 overdue seed）
 modules/assetinfo/schema.sql     # 资产数据管道主表
 modules/users/schema.sql         # 用户与导入审计
 modules/assetinfo/schema_upload_v2.sql   # 上传批次 V2
@@ -38,3 +36,8 @@ migrations/20260625_overdue_followup_attachments.sql
 migrations/20260626_backfill_legacy_followups_to_entries.sql
 migrations/20260627_rename_ingestion_tables_to_assetinfo.sql
 migrations/20260628_overdue_asset_code_aggregate.sql
+migrations/20260629_drop_projects_tables.sql
+migrations/20260630_drop_investors_and_demo_backups.sql
+migrations/20260701_rename_default_asset_pool.sql
+migrations/20260702_drop_trust_product_fundraising_columns.sql
+migrations/20260703_drop_trust_product_open_close_dates.sql

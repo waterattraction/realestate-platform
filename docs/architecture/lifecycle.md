@@ -20,7 +20,7 @@
 | 阶段 | 触发 | 行为 | 终态 |
 |------|------|------|------|
 | 创建 | seed / 管理录入 | `status` 默认 `draft` | 否 |
-| 更新 | 募集、日期 | `raised_amount`, `open_date` 等可改 | 否 |
+| 更新 | 状态等 | `status`, `expected_return_rate` 等可改 | 否 |
 | 激活 | 业务操作 | `draft` → `raising` → `active` | 否 |
 | 冻结 | 停止新发 | 不可新发行批次（TODO：代码约束） | 否 |
 | 归档 | 产品结束 | `completed` / `closed` | **是** |
