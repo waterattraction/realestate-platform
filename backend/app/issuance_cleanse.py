@@ -26,7 +26,10 @@ COL_ALIASES: dict[str, tuple[str, ...]] = {
         "资产转让折扣率(数值)(%)",
         "资产转让折扣率",
     ),
-    "min_institution_transferable_amount": ("MIN金额机构可转让最终",),
+    "min_institution_transferable_amount": (
+        "MIN金融机构可转让",
+        "MIN金额机构可转让最终",
+    ),
     "remaining_unpaid_amount_beike_not_withheld": ("剩余未还款金额--贝壳未代扣",),
     "rental_price": ("出房价格",),
     "total_rent_withholding_amount": ("总租金代扣金额", "租金代扣金额"),

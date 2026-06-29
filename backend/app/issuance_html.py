@@ -275,6 +275,7 @@ COLUMN_LABELS: dict[str, str] = {
     "custody_asset_code": "托管房源号",
     "receivable_contract_amount": "应收账款合同金额",
     "receivable_transfer_amount": "应收账款转让价款",
+    "min_institution_transferable_amount": "MIN金融机构可转让",
     "contract_name": "合同名称",
     "debtor_name": "债务人",
     "property_address": "房源地址",
@@ -293,6 +294,7 @@ COLUMN_ORDER: tuple[str, ...] = (
     "business_asset_key",
     "receivable_contract_amount",
     "receivable_transfer_amount",
+    "min_institution_transferable_amount",
     "from_trust_product_name",
     "migration_type",
     "contract_name",
@@ -313,6 +315,7 @@ NUMERIC_COLUMNS = frozenset({
     "from_trust_product_id",
     "receivable_contract_amount",
     "receivable_transfer_amount",
+    "min_institution_transferable_amount",
 })
 
 DATE_COLUMNS = frozenset({"issue_date"})
