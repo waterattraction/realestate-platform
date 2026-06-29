@@ -14,6 +14,7 @@ from app.html.formatters import (
     fmt_money,
     fmt_risk_badge,
 )
+from app.issuance_labels import format_rate, migration_type_label
 from app.overdue.ui_constants import (
     FOLLOWUP_STATUS_LABELS,
     INTERNAL_STATUS_OPTIONS,
@@ -1040,6 +1041,8 @@ def _panel_issuance(records: list) -> str:
                 per_period = rec.get("calculated_rent_withholding_per_period")
                 ratio = rec.get("rent_withholding_ratio")
                 discount = rec.get("asset_transfer_discount_rate")
+                migration = rec.get("migration_type")
+                from_product = rec.get("from_trust_product_name")
                 if contract_amt is not None:
                     price_parts.append(f"合同金额 {fmt_money(contract_amt)}")
                 if transfer_amt is not None:
@@ -1049,15 +1052,23 @@ def _panel_issuance(records: list) -> str:
                 if per_period is not None:
                     price_parts.append(f"每期代扣 {fmt_money(per_period)}")
                 if ratio is not None:
-                    price_parts.append(f"代扣比 {escape(str(ratio))}")
+                    price_parts.append(f"代扣比 {format_rate(ratio)}")
                 if discount is not None:
-                    price_parts.append(f"折价率 {escape(str(discount))}")
+                    price_parts.append(f"折价率 {format_rate(discount)}")
+
+                meta_parts = []
+                if migration:
+                    meta_parts.append(f"迁移类型：{escape(migration_type_label(str(migration)))}")
+                if from_product:
+                    meta_parts.append(f"转出信托：{escape(str(from_product))}")
+                meta_line = " · ".join(meta_parts)
                 price_line = " · ".join(price_parts) if price_parts else "—"
 
                 source = escape(str(rec.get("source_file_name") or ""))
 
                 rec_cards += f"""<div class="issuance-record">
                     <p class="issuance-issue-date">发行日 {issue}</p>
+                    {f'<p class="issuance-line">{meta_line}</p>' if meta_line else ''}
                     <p class="issuance-line">{location_line}</p>
                     <p class="issuance-line">债务人：{debtor} · 合同：{contract}</p>
                     <p class="issuance-line">{price_line}</p>
@@ -1066,7 +1077,7 @@ def _panel_issuance(records: list) -> str:
                 </div>"""
 
             multi = len(recs) > 1
-            group_label = f'<span class="issuance-custody">{escape(custody_code)}</span>'
+            group_label = f'<span class="issuance-custody">托管房源号 {escape(custody_code)}</span>'
             if multi:
                 group_blocks += f"""<details class="issuance-group">
                     <summary class="issuance-group-hd">{group_label} · {len(recs)} 条发行记录</summary>

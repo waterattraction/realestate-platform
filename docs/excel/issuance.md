@@ -42,7 +42,7 @@
 | `receivable_contract_amount` | 实际成交价（应收账款合同金额）、应收账款合同金额 |
 | `receivable_transfer_amount` | 应收账款转让价款 |
 | `asset_transfer_discount_rate` | 资产转让折扣率(%)、资产转让折扣率（数值）(%)、资产转让折扣率(数值)(%)、资产转让折扣率 |
-| `min_institution_transferable_amount` | MIN金额机构可转让最终 |
+| `min_institution_transferable_amount` | MIN金融机构可转让、MIN金额机构可转让最终 |
 | `remaining_unpaid_amount_beike_not_withheld` | 剩余未还款金额--贝壳未代扣 |
 | `rental_price` | 出房价格 |
 | `total_rent_withholding_amount` | 总租金代扣金额、租金代扣金额 |
@@ -114,7 +114,7 @@
 | `receivable_contract_amount` | 实际成交价（应收账款合同金额）、应收账款合同金额 | `receivable_contract_amount` | 金额 | 是 | `to_optional_amount(required=True)` | 无效→**failed** |
 | `receivable_transfer_amount` | 应收账款转让价款 | `receivable_transfer_amount` | 金额 | 是 | 同上 | 无效→**failed** |
 | `asset_transfer_discount_rate` | 资产转让折扣率(%)、资产转让折扣率（数值）(%)、资产转让折扣率(数值)(%)、资产转让折扣率 | `asset_transfer_discount_rate` | 比例 | 否 | `to_rate_value` | 空→**warning** |
-| `min_institution_transferable_amount` | MIN金额机构可转让最终 | `min_institution_transferable_amount` | 金额 | 否 | `to_numeric_value` | Excel错误→空+warning |
+| `min_institution_transferable_amount` | MIN金融机构可转让、MIN金额机构可转让最终 | `min_institution_transferable_amount` | 金额 | 否 | `to_numeric_value` | Excel错误→空+warning |
 | `remaining_unpaid_amount_beike_not_withheld` | 剩余未还款金额--贝壳未代扣 | `remaining_unpaid_amount_beike_not_withheld` | 金额 | 否 | `to_numeric_value` | 同上 |
 | `rental_price` | 出房价格 | `rental_price` | 金额 | 否 | `to_numeric_value` | 同上 |
 | `total_rent_withholding_amount` | 总租金代扣金额、租金代扣金额 | `total_rent_withholding_amount` | 金额 | 否 | `to_numeric_value` | 同上 |

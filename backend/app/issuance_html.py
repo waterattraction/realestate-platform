@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 from html import escape
-from zoneinfo import ZoneInfo
 
 from app.ui_css import BTN_CSS, FORM_FIELD_CSS, PAGE_CHROME_CSS, STANDARD_HEADER_CSS, TABLE_SCROLL_CSS
 from app import issuance_cleanse as ic
-
-DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
+from app import issuance_labels as il
+from app.import_ui_labels import (
+    PREVIEW_BTN_EXCLUDE_CONFIRM,
+    PREVIEW_BTN_SELECT_IMPORT,
+    preview_script_helpers,
+)
 
 
 def _page_shell(title: str, body: str) -> str:
@@ -91,7 +94,7 @@ def render_upload_page(trust_products: list[dict]) -> str:
     body = f"""
     <nav class="breadcrumb"><a href="/">首页</a> / 发行资产明细导入</nav>
     <h1>信托产品发行资产明细导入</h1>
-    <p class="muted">选择信托产品与发行日期，上传 Excel 后预检再导入。业务时间维度仅为发行日期（issue_date）。</p>
+    <p class="muted">选择信托产品与发行日期，上传 Excel 后预检再导入。业务时间维度仅为发行日期。</p>
     <div class="card">
         <label>信托产品</label>
         <select id="trust_product_id" style="width:100%">{options}</select>
@@ -107,6 +110,7 @@ def render_upload_page(trust_products: list[dict]) -> str:
         <button type="button" class="btn-primary" onclick="runImport()">确认导入选中 Sheet</button>
     </div>
     <script>
+    {preview_script_helpers()}
     let batchUuid = null;
     let previewData = null;
     let confirmedKeys = new Set();
@@ -224,15 +228,17 @@ def render_upload_page(trust_products: list[dict]) -> str:
 
     function renderPreview(data, ok) {{
         const sheets = data.sheets || [];
-        let html = '<p class="' + (ok ? 'ok' : 'err') + '">发行日: ' + (data.issue_date || '') + ' · file_id: ' + (data.file_id || '') + '</p>';
+        const batchId = data.batch_uuid || data.file_id || '';
+        let html = '<p class="' + (ok ? 'ok' : 'err') + '">发行日: ' + (data.issue_date || '') + ' · 批次 ID: ' + batchId + '</p>';
         html += '<div class="sheet-toolbar">';
-        html += '<button type="button" class="btn-secondary" onclick="selectAllImport()">全选 import</button>';
-        html += '<button type="button" class="btn-secondary" onclick="selectExcludeNeedsConfirm()">仅 import（排除 needs_confirm）</button>';
+        html += '<button type="button" class="btn-secondary" onclick="selectAllImport()">{PREVIEW_BTN_SELECT_IMPORT}</button>';
+        html += '<button type="button" class="btn-secondary" onclick="selectExcludeNeedsConfirm()">{PREVIEW_BTN_EXCLUDE_CONFIRM}</button>';
         html += '</div>';
-        html += '<div class="table-wrap"><table><tr><th>选</th><th>file</th><th>sheet</th><th>rows</th><th>amount</th><th>status</th><th>reason</th></tr>';
+        html += '<div class="table-wrap"><table><tr><th>选</th><th>文件名</th><th>工作表</th><th>行数</th><th>金额合计</th><th>预检状态</th><th>说明</th></tr>';
         sheets.forEach(s => {{
             const key = sheetKey(s);
             const st = s.status || s.action || '—';
+            const stLabel = importActionLabel(st);
             const rowCls = s.action === 'failed' ? 'row-reject' : (st === 'needs_confirm' ? 'row-needs_confirm' : '');
             const reject = isReject(s);
             const needsConfirm = st === 'needs_confirm' || s.action === 'needs_confirm';
@@ -250,7 +256,7 @@ def render_upload_page(trust_products: list[dict]) -> str:
             html += '<tr class="'+rowCls+'"><td>'+cb+'</td>';
             html += '<td>'+s.file_name+'</td><td>'+s.sheet_name+'</td>';
             html += '<td>'+(s.rows ?? s.row_count ?? '—')+'</td><td>'+(s.amount ?? s.amount_sum ?? '—')+'</td>';
-            html += '<td><span class="'+(st==='failed'?'err':(st==='needs_confirm'?'warn':'ok'))+'">'+st+'</span></td>';
+            html += '<td><span class="'+previewStatusClass(st)+'">'+stLabel+'</span></td>';
             html += '<td>'+(s.reason || '')+'</td></tr>';
         }});
         html += '</table></div>';
@@ -263,65 +269,6 @@ def render_upload_page(trust_products: list[dict]) -> str:
     return _page_shell("发行资产明细导入", body)
 
 
-COLUMN_LABELS: dict[str, str] = {
-    "id": "ID",
-    "trust_product_id": "产品ID",
-    "trust_product_name": "信托产品",
-    "from_trust_product_id": "转出产品ID",
-    "from_trust_product_name": "转出信托产品",
-    "migration_type": "迁移类型",
-    "issue_date": "发行日期",
-    "business_asset_key": "发行资产标识",
-    "custody_asset_code": "托管房源号",
-    "receivable_contract_amount": "应收账款合同金额",
-    "receivable_transfer_amount": "应收账款转让价款",
-    "min_institution_transferable_amount": "MIN金融机构可转让",
-    "contract_name": "合同名称",
-    "debtor_name": "债务人",
-    "property_address": "房源地址",
-    "city": "城市",
-    "source_file_name": "文件名",
-    "source_sheet_name": "Sheet名",
-    "source_row_number": "行号",
-    "created_at": "创建时间",
-    "updated_at": "更新时间",
-}
-
-COLUMN_ORDER: tuple[str, ...] = (
-    "trust_product_name",
-    "issue_date",
-    "custody_asset_code",
-    "business_asset_key",
-    "receivable_contract_amount",
-    "receivable_transfer_amount",
-    "min_institution_transferable_amount",
-    "from_trust_product_name",
-    "migration_type",
-    "contract_name",
-    "debtor_name",
-    "property_address",
-    "city",
-    "source_file_name",
-    "source_sheet_name",
-    "source_row_number",
-    "created_at",
-    "id",
-    "trust_product_id",
-)
-
-NUMERIC_COLUMNS = frozenset({
-    "id",
-    "trust_product_id",
-    "from_trust_product_id",
-    "receivable_contract_amount",
-    "receivable_transfer_amount",
-    "min_institution_transferable_amount",
-})
-
-DATE_COLUMNS = frozenset({"issue_date"})
-TIMESTAMP_COLUMNS = frozenset({"created_at", "updated_at"})
-
-
 def _filter_query_string(filters: dict, page: int | None = None) -> str:
     parts = []
     for key, val in filters.items():
@@ -330,29 +277,6 @@ def _filter_query_string(filters: dict, page: int | None = None) -> str:
     if page is not None:
         parts.append(f"page={page}")
     return "&".join(parts)
-
-
-def _format_cell(key: str, value) -> str:
-    if value is None:
-        return "—"
-    if key in TIMESTAMP_COLUMNS:
-        if isinstance(value, datetime):
-            dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-            return dt.astimezone(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M")
-        text = str(value).strip()
-        if text:
-            try:
-                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.astimezone(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M")
-            except ValueError:
-                pass
-    if key in DATE_COLUMNS:
-        return str(value)[:10] if value else "—"
-    if key == "migration_type":
-        return ic.migration_type_label(str(value) if value else None)
-    return str(value)
 
 
 def render_records_page(
@@ -376,7 +300,7 @@ def render_records_page(
         ("business_asset_key", "发行资产标识"),
         ("city", "城市"),
         ("source_file_name", "文件名"),
-        ("source_sheet_name", "Sheet名"),
+        ("source_sheet_name", "工作表名"),
         ("from_trust_product_name", "转出信托产品"),
     ]
     filter_inputs = f"""
@@ -399,18 +323,19 @@ def render_records_page(
     rows = ""
     headers = ""
     if data.get("items"):
-        keys = [k for k in COLUMN_ORDER if k in data["items"][0]]
-        rest = sorted(k for k in data["items"][0] if k not in keys)
-        keys = keys + rest
+        sample = data["items"][0]
+        keys = [k for k in il.COLUMN_ORDER if k in sample]
+        extra = sorted(k for k in sample if k not in keys)
+        keys = keys + extra
         headers = "".join(
-            f'<th data-col="{escape(k)}">{escape(COLUMN_LABELS.get(k, k))}</th>'
+            f'<th data-col="{escape(k)}">{escape(il.field_label(k))}</th>'
             for k in keys
         )
         for item in data["items"]:
             cells = ""
             for k in keys:
-                display = _format_cell(k, item.get(k))
-                cls = "col-num" if k in NUMERIC_COLUMNS else ""
+                display = il.format_cell(k, item.get(k))
+                cls = "col-num" if k in il.NUMERIC_COLUMNS else ""
                 class_attr = f' class="{cls}"' if cls else ""
                 cells += f"<td{class_attr}>{escape(display)}</td>"
             rows += f"<tr>{cells}</tr>"
@@ -456,7 +381,7 @@ def render_records_page(
     <p class="muted"><a href="{escape(data_path)}?{json_qs}">JSON</a></p>
     <div class="card table-wrap">
         <table class="records-table"><thead><tr>{headers}</tr></thead>
-        <tbody>{rows or '<tr><td colspan="20">无数据</td></tr>'}</tbody></table>
+        <tbody>{rows or f'<tr><td colspan="{len(il.COLUMN_ORDER)}">无数据</td></tr>'}</tbody></table>
     </div>
     {pager}
     """

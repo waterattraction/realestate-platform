@@ -7,6 +7,11 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from app.ui_css import BTN_CSS, FORM_FIELD_CSS, PAGE_CHROME_CSS, STANDARD_HEADER_CSS, TABLE_SCROLL_CSS
+from app.import_ui_labels import (
+    PREVIEW_BTN_EXCLUDE_CONFIRM,
+    PREVIEW_BTN_SELECT_IMPORT,
+    preview_script_helpers,
+)
 
 DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -141,6 +146,7 @@ def render_upload_page(trust_products: list[dict]) -> str:
         <button type="button" class="btn-primary" onclick="runImport()">确认导入选中 Sheet</button>
     </div>
     <script>
+    {preview_script_helpers()}
     let batchUuid = null;
     let previewData = null;
     let confirmedKeys = new Set();
@@ -260,15 +266,17 @@ def render_upload_page(trust_products: list[dict]) -> str:
 
     function renderPreview(data, ok) {{
         const sheets = data.sheets || [];
-        let html = '<p class="' + (ok ? 'ok' : 'err') + '">file_id: ' + (data.file_id || data.batch_uuid || '') + '</p>';
+        const batchId = data.batch_uuid || data.file_id || '';
+        let html = '<p class="' + (ok ? 'ok' : 'err') + '">批次 ID: ' + batchId + '</p>';
         html += '<div class="sheet-toolbar">';
-        html += '<button type="button" class="btn-secondary" onclick="selectAllImport()">全选 import</button>';
-        html += '<button type="button" class="btn-secondary" onclick="selectExcludeNeedsConfirm()">仅 import（排除 needs_confirm）</button>';
+        html += '<button type="button" class="btn-secondary" onclick="selectAllImport()">{PREVIEW_BTN_SELECT_IMPORT}</button>';
+        html += '<button type="button" class="btn-secondary" onclick="selectExcludeNeedsConfirm()">{PREVIEW_BTN_EXCLUDE_CONFIRM}</button>';
         html += '</div>';
-        html += '<div class="table-wrap"><table><tr><th>选</th><th>file</th><th>sheet</th><th>type</th><th>rows</th><th>amount</th><th>status</th><th>reason</th></tr>';
+        html += '<div class="table-wrap"><table><tr><th>选</th><th>文件名</th><th>工作表</th><th>类型</th><th>行数</th><th>金额合计</th><th>预检状态</th><th>说明</th></tr>';
         sheets.forEach(s => {{
             const key = sheetKey(s);
             const st = s.status || s.action || '—';
+            const stLabel = importActionLabel(st);
             const rowCls = st === 'reject' || s.action === 'failed' ? 'row-reject' : (st === 'needs_confirm' ? 'row-needs_confirm' : '');
             const reject = isReject(s);
             const needsConfirm = st === 'needs_confirm' || s.action === 'needs_confirm';
@@ -285,12 +293,14 @@ def render_upload_page(trust_products: list[dict]) -> str:
             }}
             let reasonCell = s.reason || '';
             if (s.sheet_type === 'ambiguous_sheet_type') {{
-                reasonCell = '名称识别：' + (s.name_type || '') + ' / 表头：' + (s.header_type || '');
+                reasonCell = '名称识别：' + sheetTypeLabel(s.name_type || '') + ' / 表头：' + sheetTypeLabel(s.header_type || '');
             }}
+            const typeRaw = s.type || s.sheet_type || '—';
+            const typeLabel = sheetTypeLabel(typeRaw);
             html += '<tr class="'+rowCls+'"><td>'+cb+'</td>';
-            html += '<td>'+s.file_name+'</td><td>'+s.sheet_name+'</td><td>'+(s.type||s.sheet_type||'—')+'</td>';
+            html += '<td>'+s.file_name+'</td><td>'+s.sheet_name+'</td><td>'+typeLabel+'</td>';
             html += '<td>'+(s.rows ?? s.row_count ?? '—')+'</td><td>'+(s.amount ?? s.amount_sum ?? '—')+'</td>';
-            html += '<td><span class="'+(st==='reject'?'err':(st==='needs_confirm'?'warn':'ok'))+'">'+st+'</span></td>';
+            html += '<td><span class="'+previewStatusClass(st)+'">'+stLabel+'</span></td>';
             html += '<td>'+reasonCell+'</td></tr>';
         }});
         html += '</table></div>';
