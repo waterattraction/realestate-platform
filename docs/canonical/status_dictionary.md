@@ -20,15 +20,21 @@
 
 ## trust_products.status
 
+V1 Lite 管理端 **仅写入** 以下两值：
+
 | 表/模块 | 字段 | 值 | 中文 | 含义 | 是否终态 |
 |---------|------|-----|------|------|----------|
-| `trust_products` | `status` | `draft` | 草稿 | 未正式发布 | 否 |
-| `trust_products` | `status` | `raising` | 募集中 | 募集期 | 否 |
-| `trust_products` | `status` | `active` | 生效中 | 产品运行中 | 否 |
-| `trust_products` | `status` | `completed` | 已完成 | 正常结束 | 是 |
-| `trust_products` | `status` | `closed` | 已关闭 | 强制/异常关闭 | 是 |
+| `trust_products` | `status` | `issued` | 已发行 | 产品有效 / 运行中 | 否 |
+| `trust_products` | `status` | `ended` | 结束 | 产品已结束 | 是 |
 
-> seed 现主要为 `draft` / `raising`；`active` / `completed` / `closed` 见 `STATUS_LABELS`，使用待业务确认（TODO）。
+**读取兼容**（API / 管理页展示归一化，库中未 PATCH 前可能仍为旧值）：
+
+| 旧值 | 归一化 | 中文 |
+|------|--------|------|
+| `draft` / `raising` / `active` / `issued` | `issued` | 已发行 |
+| `completed` / `closed` / `ended` | `ended` | 结束 |
+
+> 不再在 UI 展示「草稿 / 募集中 / 存续中 / 已完成 / 已关闭」。无状态流转控制，可在「已发行 ↔ 结束」直接切换。
 
 ---
 
@@ -129,3 +135,4 @@
 | 日期 | 变更 |
 |------|------|
 | 2026-06 | M2.5 首批 status 字段 |
+| 2026-07 | trust_products V1 Lite：`issued` / `ended` |

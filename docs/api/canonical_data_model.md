@@ -46,11 +46,27 @@
 | API 字段 | Canonical | DB 来源 | 含义 |
 |----------|-----------|---------|------|
 | `trustProductId` | `trust_product_id` | `trust_products.id` | 产品 ID |
-| `assetPoolId` | — | `asset_pool_id` | 所属资产包 |
-| `code` | — | `code` | 产品编码 |
-| `name` | `trust_product_name` | `name` | 产品名称 |
-| `status` | — | `status` | draft / raising / active / … |
-| `expectedReturnRate` | — | `expected_return_rate` | 预期收益率（可选） |
+| `assetPoolId` | — | `asset_pool_id` | 所属资产包（创建后只读） |
+| `code` | — | `code` | 产品编码（创建后只读，UNIQUE） |
+| `name` | `trust_product_name` | `name` | 产品名称（UNIQUE） |
+| `status` | — | `status` | `issued` / `ended`（见 status_dictionary） |
+| `statusLabel` | — | — | 已发行 / 结束 |
+| `trustEndDate` | — | `trust_end_date` | 信托结束日期（可选 DATE） |
+| `expectedReturnRate` | — | `expected_return_rate` | 遗留列；V1 Lite 管理端不维护 |
+
+### 管理 API（V1 Lite）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/trust-products` | 产品列表（保留，供下拉） |
+| GET | `/trust-products/{id}` | 单条详情（需登录） |
+| POST | `/trust-products` | 新增（需登录） |
+| PATCH | `/trust-products/{id}` | 更新 name / status / trust_end_date |
+| GET | `/trust-products/manage` | HTML 列表 |
+| GET | `/trust-products/new` | HTML 新增 |
+| GET | `/trust-products/{id}/edit` | HTML 编辑 |
+
+不支持 DELETE。PATCH 传 `code` 或 `assetPoolId` 返回 400；`code` / `name` 冲突返回 409。
 
 ### 业务含义
 

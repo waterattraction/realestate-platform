@@ -41,3 +41,4 @@ migrations/20260630_drop_investors_and_demo_backups.sql
 migrations/20260701_rename_default_asset_pool.sql
 migrations/20260702_drop_trust_product_fundraising_columns.sql
 migrations/20260703_drop_trust_product_open_close_dates.sql
+migrations/20260704_trust_products_trust_end_date.sql

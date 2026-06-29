@@ -23,6 +23,8 @@ from app import assetinfo_upload
 from app import issuance_html
 from app import issuance_upload
 from app import query_utils
+from app import trust_products as trust_products_svc
+from app import trust_products_html
 from app import risk_hub
 from app.overdue import buckets as delinquency_buckets
 from app.overdue.buckets import (
@@ -2991,6 +2993,10 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                             <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
                             发行查看
                         </a>
+                        <a href="/trust-products/manage" class="op-chip op-purple">
+                            <svg viewBox="0 0 24 24"><path d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"/></svg>
+                            产品管理
+                        </a>
                     </div>
                     <div class="mini-kpi-row">
                         <span>最近发行日 <strong>{dash_date(latest_issue_date)}</strong></span>
@@ -3152,6 +3158,68 @@ def list_trust_products():
             })
 
         return trust_products
+
+@app.get("/trust-products/manage", response_class=HTMLResponse)
+def trust_products_manage_page(page_user: Annotated[dict, Depends(get_page_user)]):
+    with engine.connect() as conn:
+        items = trust_products_svc.fetch_manage_list(conn)
+    html = trust_products_html.render_trust_products_manage_page(items)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+@app.get("/trust-products/new", response_class=HTMLResponse)
+def trust_products_new_page(page_user: Annotated[dict, Depends(get_page_user)]):
+    with engine.connect() as conn:
+        pools = trust_products_svc.fetch_asset_pools(conn)
+    html = trust_products_html.render_trust_product_form_page(mode="create", asset_pools=pools)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+@app.get("/trust-products/{product_id}/edit", response_class=HTMLResponse)
+def trust_products_edit_page(
+    product_id: int,
+    page_user: Annotated[dict, Depends(get_page_user)],
+):
+    with engine.connect() as conn:
+        product = trust_products_svc.fetch_by_id(conn, product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Trust product not found")
+    html = trust_products_html.render_trust_product_form_page(mode="edit", product=product)
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+@app.get("/trust-products/{product_id}")
+def get_trust_product(
+    product_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.connect() as conn:
+        product = trust_products_svc.fetch_by_id(conn, product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Trust product not found")
+    return product
+
+
+@app.post("/trust-products")
+def create_trust_product(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    # TODO: admin only
+    with engine.begin() as conn:
+        return trust_products_svc.create_trust_product(conn, body)
+
+
+@app.patch("/trust-products/{product_id}")
+def patch_trust_product(
+    product_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    # TODO: admin only
+    with engine.begin() as conn:
+        return trust_products_svc.update_trust_product(conn, product_id, body)
+
 
 @app.get("/overdue/overview")
 def overdue_overview(
