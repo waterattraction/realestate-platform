@@ -202,6 +202,7 @@ def render_overdue_workbench_html(
     </div>
 </div>
 </div>
+{_ATTACHMENT_LIGHTBOX_HTML}
 {_WORKBENCH_SCRIPTS}
 </body>
 </html>"""
@@ -1424,6 +1425,57 @@ def _followup_entry_tab_label(entry: dict) -> str:
     return f"{_fmt_date_only(entry.get('created_at'))} · {_followup_status_label(entry.get('status_snapshot'))}"
 
 
+def _attachment_ext(file_name: str) -> str:
+    i = file_name.rfind(".")
+    return file_name[i:].lower() if i >= 0 else ""
+
+
+def _attachment_open_kind(att: dict) -> str:
+    ct = (att.get("content_type") or "").lower().split(";")[0].strip()
+    if att.get("attachment_type") == "image" or ct.startswith("image/"):
+        return "image"
+    fname = str(att.get("file_name") or "")
+    if _attachment_ext(fname) == ".pdf" or ct == "application/pdf":
+        return "pdf"
+    return "file"
+
+
+def _render_saved_attachment_link(att: dict) -> str:
+    aid = att.get("id")
+    if not aid:
+        return ""
+    fname = escape(str(att.get("file_name") or ""))
+    kind = _attachment_open_kind(att)
+    title = {"image": "点击预览", "pdf": "在新标签页打开"}.get(kind, "打开或下载")
+    return (
+        f'<a class="attachment-open-link" data-kind="{kind}"'
+        f' href="/overdue/workbench/attachments/{int(aid)}"'
+        f' title="{title}">{fname}</a>'
+    )
+
+
+def _render_attachment_uploader(*, existing_count: int = 0, label: str) -> str:
+    from app.service.followup_upload import ALLOWED_EXTENSIONS_ATTR, MAX_FILE_SIZE, MAX_FILES_PER_ENTRY
+
+    return f"""
+    <div class="span-2 attachment-uploader-field">
+        <span class="attachment-uploader-label">{escape(label)}</span>
+        <div class="attachment-uploader"
+             data-max-files="{MAX_FILES_PER_ENTRY}"
+             data-max-file-size="{MAX_FILE_SIZE}"
+             data-existing-count="{int(existing_count)}"
+             data-allowed-extensions="{escape(ALLOWED_EXTENSIONS_ATTR)}">
+            <div class="attachment-dropzone" tabindex="0">
+                <strong>拖拽文件到此处，或点击选择</strong>
+                <span>支持 Ctrl+V / ⌘+V 粘贴截图或文件；最多 10 个，单文件 ≤10MB</span>
+            </div>
+            <input class="attachment-input" type="file" name="files" multiple hidden>
+            <div class="attachment-preview"></div>
+            <div class="attachment-error" hidden></div>
+        </div>
+    </div>"""
+
+
 def _followup_entry_is_editable(entry: dict) -> bool:
     return entry.get("status_snapshot") == "in_progress"
 
@@ -1432,9 +1484,9 @@ def _render_followup_entry_readonly(entry: dict) -> str:
     eid = int(entry["id"])
     att_parts = []
     for att in entry.get("attachments") or []:
-        aid = att.get("id")
-        fname = escape(str(att.get("file_name") or ""))
-        att_parts.append(f'<a href="/overdue/workbench/attachments/{aid}">{fname}</a>')
+        link = _render_saved_attachment_link(att)
+        if link:
+            att_parts.append(link)
     att_html = " ".join(att_parts) if att_parts else "—"
 
     def ro_field(label: str, value) -> str:
@@ -1482,9 +1534,9 @@ def _render_followup_entry_editable(
 
     att_parts = []
     for att in entry.get("attachments") or []:
-        aid = att.get("id")
-        fname = escape(str(att.get("file_name") or ""))
-        att_parts.append(f'<a href="/overdue/workbench/attachments/{aid}">{fname}</a>')
+        link = _render_saved_attachment_link(att)
+        if link:
+            att_parts.append(link)
     att_html = " ".join(att_parts) if att_parts else "—"
 
     return f"""<div class="followup-editable">
@@ -1506,9 +1558,10 @@ def _render_followup_entry_editable(
                 <label>跟进方案<textarea name="follow_up_plan" rows="2">{plan}</textarea></label>
                 <label>信托反馈<textarea name="trust_feedback" rows="2">{feedback}</textarea></label>
                 <label>补充说明<textarea name="note" rows="2">{note}</textarea></label>
-                <label class="span-2">追加附件（图片/PDF 等，最多 10 个）
-                    <input type="file" name="files" class="followup-edit-files" multiple>
-                </label>
+                {_render_attachment_uploader(
+                    existing_count=len(entry.get("attachments") or []),
+                    label="追加附件（图片/PDF 等，最多 10 个）",
+                )}
             </div>
             <div class="form-actions">
                 <button type="submit" class="btn primary">保存修改</button>
@@ -1613,10 +1666,10 @@ def _panel_followup_write(
                             <label>跟进方案<textarea name="follow_up_plan" rows="2">{escape(str(last_plan))}</textarea></label>
                             <label>信托反馈<textarea name="trust_feedback" rows="2"></textarea></label>
                             <label>补充说明<textarea name="note" rows="2"></textarea></label>
-                            <label class="span-2">附件（图片/PDF 等，最多 10 个）
-                                <input type="file" name="files" id="followup-files" multiple>
-                            </label>
-                            <div class="span-2 file-preview" id="file-preview"></div>
+                            {_render_attachment_uploader(
+                                existing_count=0,
+                                label="附件（图片/PDF 等，最多 10 个）",
+                            )}
                         </div>
                         <div class="form-actions" id="followup-form-actions">
                             <button type="submit" class="btn primary">保存本次跟进</button>
@@ -1631,8 +1684,351 @@ def _panel_followup_write(
     """
 
 
+_ATTACHMENT_LIGHTBOX_HTML = """
+<div id="attachment-image-lightbox" class="attachment-image-lightbox" hidden aria-modal="true" role="dialog">
+    <div class="attachment-image-lightbox-backdrop"></div>
+    <div class="attachment-image-lightbox-panel">
+        <button type="button" class="attachment-image-lightbox-close" aria-label="关闭">×</button>
+        <img class="attachment-image-lightbox-img" alt="">
+    </div>
+</div>"""
+
+_ATTACHMENT_OPEN_SCRIPT = """
+var _attachmentLightboxInst = null;
+
+function getAttachmentLightbox() {
+    if (_attachmentLightboxInst) return _attachmentLightboxInst;
+    var root = document.getElementById('attachment-image-lightbox');
+    if (!root) return null;
+    var img = root.querySelector('.attachment-image-lightbox-img');
+    var backdrop = root.querySelector('.attachment-image-lightbox-backdrop');
+    var closeBtn = root.querySelector('.attachment-image-lightbox-close');
+
+    function close() {
+        root.hidden = true;
+        document.body.classList.remove('attachment-lightbox-open');
+        if (img) img.removeAttribute('src');
+    }
+
+    if (backdrop) backdrop.addEventListener('click', close);
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && !root.hidden) close();
+    });
+
+    _attachmentLightboxInst = {
+        open: function(src, title) {
+            if (!img || !src) return;
+            img.src = src;
+            img.alt = title || '';
+            root.hidden = false;
+            document.body.classList.add('attachment-lightbox-open');
+        },
+        close: close
+    };
+    return _attachmentLightboxInst;
+}
+
+function openAttachmentImagePreview(src, title) {
+    var lb = getAttachmentLightbox();
+    if (lb) lb.open(src, title);
+}
+
+function classifyFileKind(file, getExt) {
+    if (file.type && file.type.indexOf('image/') === 0) return 'image';
+    var ext = getExt(file.name);
+    if (ext === '.pdf' || file.type === 'application/pdf') return 'pdf';
+    return 'file';
+}
+
+function bindPendingAttachmentOpen(el, file, blobUrl, getExt) {
+    var kind = classifyFileKind(file, getExt);
+    el.classList.add('attachment-chip-open-link');
+    el.dataset.kind = kind;
+    if (kind === 'image') {
+        el.href = '#';
+        el.title = '点击预览';
+        el.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            openAttachmentImagePreview(blobUrl, file.name);
+        });
+    } else if (kind === 'pdf') {
+        el.href = blobUrl;
+        el.target = '_blank';
+        el.rel = 'noopener';
+        el.title = '在新标签页打开';
+        el.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.open(blobUrl, '_blank', 'noopener');
+        });
+    } else {
+        el.href = blobUrl;
+        el.target = '_blank';
+        el.rel = 'noopener';
+        el.title = '打开或下载';
+    }
+}
+
+document.addEventListener('click', function(e) {
+    var link = e.target.closest('a.attachment-open-link');
+    if (!link) return;
+    var kind = link.dataset.kind;
+    var href = link.getAttribute('href');
+    if (!href) return;
+    if (kind === 'image') {
+        e.preventDefault();
+        openAttachmentImagePreview(href, link.textContent.trim());
+    } else if (kind === 'pdf') {
+        e.preventDefault();
+        window.open(href, '_blank', 'noopener');
+    }
+});
+"""
+
+_ATTACHMENT_UPLOADER_SCRIPT = """
+function initAttachmentUploader(container) {
+    if (!container || container.dataset.initialized === '1') return;
+    container.dataset.initialized = '1';
+
+    var dropzone = container.querySelector('.attachment-dropzone');
+    var input = container.querySelector('.attachment-input');
+    var preview = container.querySelector('.attachment-preview');
+    var errorEl = container.querySelector('.attachment-error');
+    var maxFiles = parseInt(container.dataset.maxFiles || '10', 10);
+    var maxSize = parseInt(container.dataset.maxFileSize || '10485760', 10);
+    var existingCount = parseInt(container.dataset.existingCount || '0', 10);
+    var allowedExt = (container.dataset.allowedExtensions || '').split(',').map(function(s) {
+        return s.trim().toLowerCase();
+    }).filter(Boolean);
+
+    container._attachmentPool = new DataTransfer();
+    container._objectUrls = new Map();
+
+    function revokeBlobUrl(key) {
+        if (container._objectUrls.has(key)) {
+            URL.revokeObjectURL(container._objectUrls.get(key));
+            container._objectUrls.delete(key);
+        }
+    }
+
+    function revokeAllBlobUrls() {
+        container._objectUrls.forEach(function(url) {
+            URL.revokeObjectURL(url);
+        });
+        container._objectUrls.clear();
+    }
+
+    function getBlobUrl(file) {
+        var key = fileKey(file);
+        if (container._objectUrls.has(key)) {
+            return container._objectUrls.get(key);
+        }
+        var url = URL.createObjectURL(file);
+        container._objectUrls.set(key, url);
+        return url;
+    }
+
+    function showError(msg) {
+        if (!errorEl) return;
+        if (msg) {
+            errorEl.textContent = msg;
+            errorEl.hidden = false;
+        } else {
+            errorEl.textContent = '';
+            errorEl.hidden = true;
+        }
+    }
+
+    function fileKey(file) {
+        return file.name + '|' + file.size + '|' + file.lastModified;
+    }
+
+    function pad2(n) { return n < 10 ? '0' + n : String(n); }
+
+    function normalizeFile(file) {
+        var name = file.name || '';
+        if (!name || name === 'image.png') {
+            var now = new Date();
+            var ext = '.png';
+            if (file.type === 'image/jpeg') ext = '.jpg';
+            else if (file.type === 'image/webp') ext = '.webp';
+            else if (file.type === 'image/gif') ext = '.gif';
+            name = 'screenshot-' + now.getFullYear() + pad2(now.getMonth() + 1) + pad2(now.getDate())
+                + '-' + pad2(now.getHours()) + pad2(now.getMinutes()) + pad2(now.getSeconds()) + ext;
+            return new File([file], name, { type: file.type || 'image/png', lastModified: file.lastModified });
+        }
+        return file;
+    }
+
+    function getExt(name) {
+        var i = name.lastIndexOf('.');
+        return i >= 0 ? name.slice(i).toLowerCase() : '';
+    }
+
+    function validateFile(file) {
+        if (file.size > maxSize) return '单文件不能超过 10MB';
+        var ext = getExt(file.name);
+        if (!ext || allowedExt.indexOf(ext) < 0) return '不支持该文件类型';
+        return null;
+    }
+
+    function syncInput() {
+        if (input) input.files = container._attachmentPool.files;
+    }
+
+    function removeAt(index) {
+        var file = container._attachmentPool.files[index];
+        if (file) revokeBlobUrl(fileKey(file));
+        var next = new DataTransfer();
+        Array.prototype.forEach.call(container._attachmentPool.files, function(f, i) {
+            if (i !== index) next.items.add(f);
+        });
+        container._attachmentPool = next;
+        syncInput();
+        renderPreview();
+        showError('');
+    }
+
+    function renderPreview() {
+        if (!preview) return;
+        preview.innerHTML = '';
+        Array.prototype.forEach.call(container._attachmentPool.files, function(file, idx) {
+            var chip = document.createElement('div');
+            chip.className = 'attachment-chip';
+            var blobUrl = getBlobUrl(file);
+            var isImage = file.type && file.type.indexOf('image/') === 0;
+
+            if (isImage) {
+                var thumbLink = document.createElement('a');
+                bindPendingAttachmentOpen(thumbLink, file, blobUrl, getExt);
+                var img = document.createElement('img');
+                img.className = 'attachment-thumb';
+                img.alt = file.name;
+                var reader = new FileReader();
+                reader.onload = function(e) { img.src = e.target.result; };
+                reader.readAsDataURL(file);
+                thumbLink.appendChild(img);
+                chip.appendChild(thumbLink);
+            }
+
+            var metaLink = document.createElement('a');
+            bindPendingAttachmentOpen(metaLink, file, blobUrl, getExt);
+            metaLink.classList.add('attachment-chip-meta-link');
+            var extLabel = getExt(file.name).replace('.', '').toUpperCase() || 'FILE';
+            metaLink.textContent = file.name + ' · ' + Math.round(file.size / 1024) + ' KB · ' + extLabel;
+            chip.appendChild(metaLink);
+
+            var removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'attachment-chip-remove';
+            removeBtn.setAttribute('aria-label', '删除');
+            removeBtn.textContent = '×';
+            removeBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                removeAt(idx);
+            });
+            chip.appendChild(removeBtn);
+            preview.appendChild(chip);
+        });
+    }
+
+    function addFiles(fileList) {
+        if (!fileList || !fileList.length) return;
+        showError('');
+        var seen = {};
+        Array.prototype.forEach.call(container._attachmentPool.files, function(f) {
+            seen[fileKey(f)] = true;
+        });
+        var firstError = '';
+
+        for (var i = 0; i < fileList.length; i++) {
+            var file = normalizeFile(fileList[i]);
+            var key = fileKey(file);
+            if (seen[key]) continue;
+
+            if (existingCount + container._attachmentPool.files.length + 1 > maxFiles) {
+                firstError = '附件最多 10 个';
+                break;
+            }
+
+            var err = validateFile(file);
+            if (err) {
+                if (!firstError) firstError = err;
+                continue;
+            }
+
+            container._attachmentPool.items.add(file);
+            seen[key] = true;
+        }
+
+        if (firstError) showError(firstError);
+        syncInput();
+        renderPreview();
+    }
+
+    container.clearAttachmentUploader = function() {
+        revokeAllBlobUrls();
+        container._attachmentPool = new DataTransfer();
+        syncInput();
+        renderPreview();
+        showError('');
+    };
+
+    if (dropzone) {
+        dropzone.addEventListener('click', function(e) {
+            if (e.target.closest('.attachment-chip-remove')) return;
+            if (e.target.closest('.attachment-chip-open-link')) return;
+            if (input) input.click();
+        });
+        dropzone.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                if (input) input.click();
+            }
+        });
+        dropzone.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            dropzone.classList.add('drag-over');
+        });
+        dropzone.addEventListener('dragenter', function(e) {
+            e.preventDefault();
+            dropzone.classList.add('drag-over');
+        });
+        dropzone.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            dropzone.classList.remove('drag-over');
+        });
+        dropzone.addEventListener('drop', function(e) {
+            e.preventDefault();
+            dropzone.classList.remove('drag-over');
+            addFiles(e.dataTransfer.files);
+        });
+    }
+
+    if (input) {
+        input.addEventListener('change', function() {
+            addFiles(input.files);
+        });
+    }
+
+    var form = container.closest('form');
+    if (form) {
+        form.addEventListener('paste', function(e) {
+            var files = e.clipboardData && e.clipboardData.files;
+            if (!files || !files.length) return;
+            e.preventDefault();
+            addFiles(files);
+        });
+    }
+}
+"""
+
 _WORKBENCH_SCRIPTS = """
 <script>
+""" + _ATTACHMENT_OPEN_SCRIPT + _ATTACHMENT_UPLOADER_SCRIPT + """
 document.addEventListener('DOMContentLoaded', function() {
     var writeBar = document.getElementById('followup-entry-form');
     var expandBtn = document.getElementById('followup-expand-btn');
@@ -1815,40 +2211,27 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
     var form = document.getElementById('followup-form');
-    var fileInput = document.getElementById('followup-files');
-    var preview = document.getElementById('file-preview');
     var clearBtn = document.getElementById('followup-clear');
     if (clearBtn && form) {
         clearBtn.addEventListener('click', function() {
             form.reset();
-            if (preview) preview.innerHTML = '';
+            var uploader = form.querySelector('.attachment-uploader');
+            if (uploader && uploader.clearAttachmentUploader) {
+                uploader.clearAttachmentUploader();
+            }
         });
     }
-    if (fileInput && preview) {
-        fileInput.addEventListener('change', function() {
-            preview.innerHTML = '';
-            Array.prototype.forEach.call(fileInput.files || [], function(file) {
-                var chip = document.createElement('span');
-                chip.className = 'file-chip';
-                chip.textContent = file.name + ' (' + Math.round(file.size / 1024) + ' KB)';
-                if (file.type && file.type.indexOf('image/') === 0) {
-                    var img = document.createElement('img');
-                    img.className = 'file-thumb';
-                    img.alt = file.name;
-                    var reader = new FileReader();
-                    reader.onload = function(e) { img.src = e.target.result; };
-                    reader.readAsDataURL(file);
-                    var wrap = document.createElement('div');
-                    wrap.className = 'file-chip-img';
-                    wrap.appendChild(img);
-                    wrap.appendChild(chip);
-                    preview.appendChild(wrap);
-                } else {
-                    preview.appendChild(chip);
-                }
-            });
+
+    document.querySelectorAll('.attachment-uploader').forEach(initAttachmentUploader);
+
+    window.addEventListener('beforeunload', function() {
+        document.querySelectorAll('.attachment-uploader').forEach(function(el) {
+            if (el._objectUrls) {
+                el._objectUrls.forEach(function(url) { URL.revokeObjectURL(url); });
+                el._objectUrls.clear();
+            }
         });
-    }
+    });
 });
 </script>
 """
@@ -2209,13 +2592,111 @@ _WORKBENCH_SPECIFIC_CSS = """
         padding: 0.35rem; border-radius: 6px; background: rgba(0,0,0,0.2);
         color: #e2e8f0; border: 1px solid rgba(255,255,255,0.15);
     }
-    .file-preview { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.25rem; }
-    .file-chip {
-        display: inline-block; padding: 0.25rem 0.5rem; border-radius: 6px;
-        background: rgba(255,255,255,0.08); font-size: 0.75rem;
+    .attachment-uploader-field { display: block; }
+    .attachment-uploader-label {
+        display: block; font-size: 0.82rem; color: #94a3b8; margin-bottom: 0.35rem;
     }
-    .file-chip-img { display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; }
-    .file-thumb { max-width: 64px; max-height: 64px; border-radius: 4px; object-fit: cover; }
+    .attachment-uploader { margin-top: 0.15rem; }
+    .attachment-dropzone {
+        border: 1px dashed rgba(148,163,184,0.45);
+        border-radius: 12px;
+        padding: 16px;
+        background: rgba(15,23,42,0.45);
+        cursor: pointer;
+        text-align: center;
+        transition: border-color 0.15s ease, background 0.15s ease;
+    }
+    .attachment-dropzone strong {
+        display: block; color: #e2e8f0; font-size: 0.9rem; margin-bottom: 0.35rem;
+    }
+    .attachment-dropzone span {
+        display: block; color: #94a3b8; font-size: 0.78rem; line-height: 1.4;
+    }
+    .attachment-dropzone:hover,
+    .attachment-dropzone:focus {
+        outline: none;
+        border-color: rgba(56,189,248,0.55);
+        background: rgba(56,189,248,0.08);
+    }
+    .attachment-dropzone.drag-over {
+        border-color: rgba(56,189,248,0.75);
+        background: rgba(56,189,248,0.12);
+    }
+    .attachment-preview {
+        display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;
+    }
+    .attachment-chip {
+        display: flex; align-items: center; gap: 0.45rem;
+        max-width: 100%;
+        padding: 0.35rem 0.5rem;
+        border-radius: 8px;
+        background: rgba(255,255,255,0.08);
+        border: 1px solid rgba(255,255,255,0.1);
+        font-size: 0.75rem;
+    }
+    .attachment-chip-meta {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        color: #cbd5e1; max-width: 220px;
+    }
+    .attachment-chip-meta-link {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        color: #38bdf8; max-width: 220px; text-decoration: none;
+    }
+    .attachment-chip-meta-link:hover {
+        color: #7dd3fc; text-decoration: underline;
+    }
+    .attachment-chip-open-link {
+        color: inherit; text-decoration: none; flex-shrink: 0;
+    }
+    .attachment-open-link {
+        color: #38bdf8; text-decoration: none;
+    }
+    .attachment-open-link:hover {
+        color: #7dd3fc; text-decoration: underline;
+    }
+    .attachment-chip-remove {
+        flex-shrink: 0;
+        border: none; background: transparent; color: #f87171;
+        cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 0.2rem;
+    }
+    .attachment-chip-remove:hover { color: #fca5a5; }
+    .attachment-thumb {
+        width: 48px; height: 48px; border-radius: 6px;
+        object-fit: cover; flex-shrink: 0;
+        cursor: pointer;
+    }
+    .attachment-error {
+        margin-top: 0.5rem; font-size: 0.8rem; color: #f87171;
+    }
+    .attachment-image-lightbox[hidden] { display: none !important; }
+    .attachment-image-lightbox {
+        position: fixed; inset: 0; z-index: 10000;
+        display: flex; align-items: center; justify-content: center;
+    }
+    .attachment-image-lightbox-backdrop {
+        position: absolute; inset: 0;
+        background: rgba(0, 0, 0, 0.88);
+        cursor: pointer;
+    }
+    .attachment-image-lightbox-panel {
+        position: relative; z-index: 1;
+        max-width: 92vw; max-height: 92vh;
+    }
+    .attachment-image-lightbox-img {
+        display: block;
+        max-width: 92vw; max-height: 92vh;
+        object-fit: contain;
+        border-radius: 6px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+    }
+    .attachment-image-lightbox-close {
+        position: absolute; top: -2.25rem; right: 0;
+        border: none; background: transparent;
+        color: #f1f5f9; font-size: 2rem; line-height: 1;
+        cursor: pointer; padding: 0 0.25rem;
+    }
+    .attachment-image-lightbox-close:hover { color: #fff; }
+    body.attachment-lightbox-open { overflow: hidden; }
 """
 
 _WORKBENCH_CSS = f"""

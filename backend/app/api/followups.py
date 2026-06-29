@@ -11,7 +11,11 @@ from app import auth
 from app import query_utils
 from app.db import get_engine
 from app.repo.followup_repo import FollowupRepo
-from app.service.followup_upload import save_entry_files, upload_root
+from app.service.followup_upload import (
+    attachment_content_disposition,
+    save_entry_files,
+    upload_root,
+)
 
 router = APIRouter(tags=["overdue-followups"])
 
@@ -69,7 +73,12 @@ async def create_followup_entry(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if files:
-        saved = await save_entry_files(result["case_id"], result["entry_id"], files)
+        saved = await save_entry_files(
+            result["case_id"],
+            result["entry_id"],
+            files,
+            existing_attachment_count=0,
+        )
         attachments = _repo.insert_attachments(
             result["entry_id"], saved, current_user.get("username")
         )
@@ -130,7 +139,13 @@ async def update_followup_entry(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if files:
-        saved = await save_entry_files(result["case_id"], result["entry_id"], files)
+        existing_count = _repo.count_attachments_for_entry(result["entry_id"])
+        saved = await save_entry_files(
+            result["case_id"],
+            result["entry_id"],
+            files,
+            existing_attachment_count=existing_count,
+        )
         attachments = _repo.insert_attachments(
             result["entry_id"], saved, current_user.get("username")
         )
@@ -157,8 +172,12 @@ def download_followup_attachment(
     resolved = full_path.resolve()
     if not str(resolved).startswith(str(upload_root().resolve())):
         raise HTTPException(status_code=403, detail="Invalid path")
+    file_name = str(att["file_name"])
+    media_type = att.get("content_type") or "application/octet-stream"
+    disposition = attachment_content_disposition(file_name, media_type)
     return FileResponse(
         path=resolved,
-        filename=att["file_name"],
-        media_type=att.get("content_type") or "application/octet-stream",
+        filename=file_name,
+        media_type=media_type,
+        content_disposition_type=disposition,
     )

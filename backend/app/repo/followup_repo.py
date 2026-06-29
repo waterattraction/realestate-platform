@@ -467,3 +467,17 @@ class FollowupRepo:
                 {"entry_ids": entry_ids},
             ).fetchall()
         return rows_to_dicts(rows)
+
+    def count_attachments_for_entry(self, entry_id: int) -> int:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM trust_overdue_followup_attachments
+                    WHERE entry_id = :entry_id
+                    """
+                ),
+                {"entry_id": entry_id},
+            ).fetchone()
+        return int(row.cnt) if row else 0
