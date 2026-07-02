@@ -334,6 +334,33 @@ def _normalize_excel_asset_code(value) -> str | None:
     return cleanse.clean_custody_code(value)
 
 
+def _primary_asset_code_from_trust_no(trust_no: str | None) -> str | None:
+    """资产主编号：资产信托号左 12 位；不足 12 位则用整值。"""
+    if not trust_no:
+        return None
+    return trust_no[:12] if len(trust_no) >= 12 else trust_no
+
+
+def _resolve_monitor_asset_fields(
+    row: pd.Series, col_asset: str | None, col_custody: str | None
+) -> tuple[str | None, str | None, str | None]:
+    """监控导入：资产编号(房源)整列→source；托管列→custody；信托号左12→asset_code。"""
+    trust_no = _normalize_excel_asset_code(row[col_asset]) if col_asset else None
+    custody = _normalize_excel_asset_code(row[col_custody]) if col_custody else None
+
+    if trust_no:
+        asset_code = _primary_asset_code_from_trust_no(trust_no)
+        if custody is None:
+            custody = asset_code
+        return asset_code, custody, trust_no
+
+    if custody:
+        primary = _primary_asset_code_from_trust_no(custody)
+        return primary, custody, custody
+
+    return None, None, None
+
+
 def _excel_custody_source_mismatch_rows(df: pd.DataFrame) -> list[dict]:
     """检测 Excel 原始列：资产编号(房源) vs 托管房源编码 不一致行。"""
     col_asset = cleanse.pick_column(df, *COL_ASSET_CODE)
@@ -397,6 +424,8 @@ def _upsert_trust_asset(
     custody_asset_code: str | None,
     initial_transfer_amount: float,
     source_asset_code: str | None = None,
+    *,
+    distinct_custody: bool = False,
 ) -> int:
     source = source_asset_code or asset_code
     existing = None
@@ -418,11 +447,8 @@ def _upsert_trust_asset(
             """),
             {"pid": trust_product_id, "code": asset_code},
         ).fetchone()
-    if (
-        existing is None
-        and custody_asset_code
-        and source
-        and custody_asset_code == source
+    if existing is None and custody_asset_code and (
+        distinct_custody or (source and custody_asset_code == source)
     ):
         existing = conn.execute(
             text("""
@@ -433,7 +459,12 @@ def _upsert_trust_asset(
             {"pid": trust_product_id, "custody": custody_asset_code},
         ).fetchone()
 
-    safe_custody = custody_asset_code if custody_asset_code and custody_asset_code == source else None
+    if distinct_custody:
+        safe_custody = custody_asset_code
+    else:
+        safe_custody = (
+            custody_asset_code if custody_asset_code and custody_asset_code == source else None
+        )
 
     if existing:
         conn.execute(
@@ -466,12 +497,100 @@ def _upsert_trust_asset(
         {
             "pid": trust_product_id,
             "code": asset_code,
-            "custody": safe_custody or source,
+            "custody": (custody_asset_code or asset_code) if distinct_custody else (safe_custody or source),
             "source": source,
             "initial": initial_transfer_amount,
         },
     ).fetchone()
     return int(row.id)
+
+
+def _fetch_monitor_latest_snapshot(
+    conn: Connection, trust_product_id: int
+) -> tuple[date | None, int, set[str]]:
+    """返回 (latest_date, 该日产品监控总行数, 该日 distinct asset_code)。"""
+    row = conn.execute(
+        text("""
+            SELECT MAX(data_date) AS latest_date
+            FROM trust_asset_monitor_records
+            WHERE trust_product_id = :pid
+        """),
+        {"pid": trust_product_id},
+    ).fetchone()
+    if row is None or row.latest_date is None:
+        return None, 0, set()
+
+    latest_date = row.latest_date
+    total_row = conn.execute(
+        text("""
+            SELECT COUNT(*) AS cnt
+            FROM trust_asset_monitor_records
+            WHERE trust_product_id = :pid AND data_date = :dd
+        """),
+        {"pid": trust_product_id, "dd": latest_date},
+    ).fetchone()
+    code_rows = conn.execute(
+        text("""
+            SELECT DISTINCT asset_code
+            FROM trust_asset_monitor_records
+            WHERE trust_product_id = :pid AND data_date = :dd
+              AND asset_code IS NOT NULL
+        """),
+        {"pid": trust_product_id, "dd": latest_date},
+    )
+    codes = {str(r.asset_code) for r in code_rows if r.asset_code}
+    return latest_date, int(total_row.cnt), codes
+
+
+def _monitor_precheck_confirm_reasons(
+    *,
+    latest_date: date | None,
+    latest_total: int,
+    latest_codes: set[str],
+    excel_rows: int,
+    excel_codes: set[str],
+    sheet_db_cnt: int,
+) -> list[str]:
+    reasons: list[str] = []
+
+    if latest_date is None:
+        if excel_rows > 0:
+            reasons.append(
+                f"<strong>首次导入</strong>：产品尚无监控快照，本次解析 {excel_rows} 行，须确认后导入。"
+            )
+        return reasons
+
+    if excel_rows != latest_total:
+        reasons.append(
+            f"最新快照日 {latest_date} 产品共 {latest_total} 行，"
+            f"本次 Sheet 解析 {excel_rows} 行，记录数不一致。"
+        )
+
+    unknown = sorted(excel_codes - latest_codes)
+    if unknown:
+        sample = "、".join(unknown[:5])
+        suffix = " 等" if len(unknown) > 5 else ""
+        reasons.append(
+            f"存在 {len(unknown)} 个资产主编号不在最新快照日（{latest_date}）中："
+            f"{sample}{suffix}。"
+        )
+
+    if sheet_db_cnt > 0 and sheet_db_cnt != excel_rows:
+        reasons.append(
+            f"同 Sheet 已有 {sheet_db_cnt} 条（快照日导入范围），"
+            f"本次 {excel_rows} 条，条数不一致。"
+        )
+
+    return reasons
+
+
+def _apply_monitor_confirm_precheck(result: dict[str, Any], reasons: list[str]) -> None:
+    if not reasons:
+        return
+    result["action"] = "needs_confirm"
+    result["importable"] = True
+    result["reason"] = "<br><br>".join(reasons) + "<br><br>须勾选确认后方可导入。"
+    result["monitor_confirm_reasons"] = reasons
 
 
 def _resolve_asset_fields(
@@ -891,7 +1010,7 @@ def _parse_monitor_rows(
         skipped_reason_summary[reason] = skipped_reason_summary.get(reason, 0) + 1
 
     for idx, row in df.iterrows():
-        asset_code, custody, source = _resolve_asset_fields(row, col_asset, col_custody)
+        asset_code, custody, source = _resolve_monitor_asset_fields(row, col_asset, col_custody)
         if not asset_code and not custody:
             _skip("no_asset_identifier")
             continue
@@ -1091,7 +1210,6 @@ def precheck_monitor_sheet(
     sheet_name: str,
     df: pd.DataFrame,
 ) -> dict[str, Any]:
-    mismatches = _excel_custody_source_mismatch_rows(df)
     result: dict[str, Any] = {
         "file_name": file_name,
         "sheet_name": sheet_name,
@@ -1112,16 +1230,19 @@ def precheck_monitor_sheet(
         "reason": "",
         "warnings": [],
         "db_row_count": 0,
+        "latest_snapshot_date": None,
+        "latest_snapshot_row_count": 0,
+        "unknown_asset_code_count": 0,
     }
 
     if not trust_product_id:
         result["reason"] = "trust_product_id 缺失，无法预检资产监控快照"
-        return _finalize_asset_code_mismatch_precheck(result, mismatches)
+        return result
 
     sheet_err = _require_monitor_sheet_name(sheet_name)
     if sheet_err:
         result["reason"] = sheet_err.replace("覆盖", "预检")
-        return _finalize_asset_code_mismatch_precheck(result, mismatches)
+        return result
 
     parsed = _parse_monitor_rows(
         df, file_name=file_name, sheet_name=sheet_name, product_name=product_name,
@@ -1143,20 +1264,31 @@ def precheck_monitor_sheet(
     rows = parsed.rows
     if not batch_date:
         result["reason"] = "data_date（统计日期）无法解析，无法预检资产监控快照"
-        return _finalize_asset_code_mismatch_precheck(result, mismatches)
+        return result
     if not rows:
         result["reason"] = "无有效行"
-        return _finalize_asset_code_mismatch_precheck(result, mismatches)
+        return result
 
     result["warnings"].extend(_check_monitor_within_sheet_multi_rows(rows))
 
     result["parsed_date"] = str(batch_date)
-    result["row_count"] = len(rows)
-    result["parsed_row_count"] = len(rows)
+    excel_rows = len(rows)
+    result["row_count"] = excel_rows
+    result["parsed_row_count"] = excel_rows
 
-    db_cnt = _batch_monitor_count(conn, trust_product_id, batch_date, sheet_name)
-    result["db_row_count"] = db_cnt
-    result["exists"] = db_cnt > 0
+    sheet_db_cnt = _batch_monitor_count(conn, trust_product_id, batch_date, sheet_name)
+    result["db_row_count"] = sheet_db_cnt
+    result["exists"] = sheet_db_cnt > 0
+
+    latest_date, latest_total, latest_codes = _fetch_monitor_latest_snapshot(
+        conn, trust_product_id,
+    )
+    excel_codes = {str(r["asset_code"]) for r in rows if r.get("asset_code")}
+    result["latest_snapshot_date"] = str(latest_date) if latest_date else None
+    result["latest_snapshot_row_count"] = latest_total
+    result["unknown_asset_code_count"] = (
+        len(excel_codes - latest_codes) if latest_date else len(excel_codes)
+    )
 
     dup_checks = fetch_monitor_batch_duplicate_checks(
         conn, trust_product_id, str(batch_date), sheet_name,
@@ -1168,30 +1300,37 @@ def precheck_monitor_sheet(
                 f"{item['row_count']} 行重复批次记录"
             )
 
-    if db_cnt == 0:
+    confirm_reasons = _monitor_precheck_confirm_reasons(
+        latest_date=latest_date,
+        latest_total=latest_total,
+        latest_codes=latest_codes,
+        excel_rows=excel_rows,
+        excel_codes=excel_codes,
+        sheet_db_cnt=sheet_db_cnt,
+    )
+    if confirm_reasons:
+        _apply_monitor_confirm_precheck(result, confirm_reasons)
+        return result
+
+    if sheet_db_cnt == 0:
         result["action"] = "import"
         result["importable"] = True
         result["reason"] = "可导入"
-        return _finalize_asset_code_mismatch_precheck(result, mismatches)
+        return result
 
-    if db_cnt == len(rows):
+    if sheet_db_cnt == excel_rows:
         result["action"] = "overwrite"
         result["importable"] = True
         result["reason"] = "记录数一致，允许覆盖更新"
-        return _finalize_asset_code_mismatch_precheck(result, mismatches)
+        return result
 
-    excel_cnt = len(rows)
-    result["action"] = "needs_confirm"
-    result["importable"] = True
-    result["reason"] = (
-        f"数据库已有 {db_cnt} 条记录<br>"
-        f"当前文件解析出 {excel_cnt} 条记录<br><br>"
-        f"记录数不一致<br><br>"
-        f"确认导入后将：<br>"
-        f"删除旧记录<br>"
-        f"重新导入 {excel_cnt} 条记录"
+    _apply_monitor_confirm_precheck(
+        result,
+        [
+            f"同 Sheet 已有 {sheet_db_cnt} 条，本次 {excel_rows} 条，条数不一致。"
+        ],
     )
-    return _finalize_asset_code_mismatch_precheck(result, mismatches)
+    return result
 
 
 def recompute_monitor_payment_fields(
@@ -1384,6 +1523,7 @@ def _import_monitor_sheet(
             r.get("custody_asset_code"),
             float(r["initial_transfer_amount"]),
             r.get("source_asset_code"),
+            distinct_custody=True,
         )
         upsert_count += 1
         conn.execute(

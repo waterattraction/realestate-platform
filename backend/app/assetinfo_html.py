@@ -132,7 +132,7 @@ def render_upload_page(trust_products: list[dict]) -> str:
     body = f"""
     <nav class="breadcrumb"><a href="/">首页</a> / 资产情况 / 资产数据导入</nav>
     <h1>资产数据导入</h1>
-    <p class="muted">先预检，再确认导入。字段映射：托管房源编码 → 托管房源号；资产编号(房源) → 资产分笔号。</p>
+    <p class="muted">先预检，再确认导入。还款：托管房源编码 → 托管房源号；资产编号(房源) → 资产分笔号。监控：托管房源编码 → 托管房源号；资产编号(房源) → 资产信托号（左 12 位 → 资产主编号）。</p>
     <div class="card">
         <label>信托产品</label>
         <select id="trust_product_id" style="width:100%">{options}</select>
@@ -353,6 +353,11 @@ RECORD_COLUMN_LABELS: dict[str, str] = {
     "max_payment_date": "最大回款日",
 }
 
+MONITOR_COLUMN_LABELS: dict[str, str] = {
+    **RECORD_COLUMN_LABELS,
+    "source_asset_code": "资产信托号",
+}
+
 REPAYMENT_COLUMN_ORDER: tuple[str, ...] = (
     "trust_product_name",
     "asset_code",
@@ -502,12 +507,14 @@ def _ordered_record_keys(keys: list[str], record_type: str) -> list[str]:
     return preferred + rest
 
 
-def _record_column_label(key: str) -> str:
+def _record_column_label(key: str, record_type: str = "repayment") -> str:
+    if record_type == "monitor":
+        return MONITOR_COLUMN_LABELS.get(key, RECORD_COLUMN_LABELS.get(key, key))
     return RECORD_COLUMN_LABELS.get(key, key)
 
 
-def _render_record_header(key: str) -> str:
-    label = _record_column_label(key)
+def _render_record_header(key: str, record_type: str = "repayment") -> str:
+    label = _record_column_label(key, record_type)
     cls = _record_col_class(key)
     class_attr = f' class="{cls}"' if cls else ""
     return f'<th{class_attr} data-col="{escape(key)}">{escape(label)}</th>'
@@ -562,11 +569,12 @@ def render_records_page(
         <div><label>信托产品</label>
         <select name="trust_product_id" form="f" style="width:100%">{product_options}</select></div>"""
 
+    source_label = "资产信托号" if record_type == "monitor" else "资产分笔号"
     for key, label in [
         ("data_date", "数据日期"),
         ("asset_code", "资产主编号"),
         ("custody_asset_code", "托管房源号"),
-        ("source_asset_code", "资产分笔号"),
+        ("source_asset_code", source_label),
         ("source_file_name", "文件名"),
         ("source_sheet_name", "Sheet名"),
     ]:
@@ -606,7 +614,7 @@ def render_records_page(
     headers = ""
     if data.get("items"):
         keys = _ordered_record_keys(list(data["items"][0].keys()), record_type)
-        headers = "".join(_render_record_header(k) for k in keys)
+        headers = "".join(_render_record_header(k, record_type) for k in keys)
         for item in data.get("items", []):
             cells = "".join(_render_record_cell(k, item.get(k)) for k in keys)
             rows += f"<tr>{cells}</tr>"

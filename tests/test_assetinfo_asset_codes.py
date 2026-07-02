@@ -57,6 +57,32 @@ class TestNormalizeExcelAssetCode(unittest.TestCase):
         self.assertEqual(iu._normalize_excel_asset_code("107114177883"), "107114177883")
 
 
+class TestResolveMonitorAssetFields(unittest.TestCase):
+    def test_trust_custody_primary_split(self):
+        row = pd.Series(_monitor_row("101127075900-001", "101127075900"))
+        asset, custody, source = iu._resolve_monitor_asset_fields(
+            row, "资产编号(房源)", "托管房源编码",
+        )
+        self.assertEqual(source, "101127075900-001")
+        self.assertEqual(custody, "101127075900")
+        self.assertEqual(asset, "101127075900")
+
+    def test_trust_only_fills_custody_from_primary(self):
+        row = pd.Series({
+            "资产编号(房源)": "101127075900-001",
+            "统计日期": "2026-06-12",
+            "初始受让金额": 1.0,
+            "已还款金额": 1.0,
+            "剩余还款金额": 1.0,
+        })
+        asset, custody, source = iu._resolve_monitor_asset_fields(
+            row, "资产编号(房源)", None,
+        )
+        self.assertEqual(source, "101127075900-001")
+        self.assertEqual(asset, "101127075900")
+        self.assertEqual(custody, "101127075900")
+
+
 class TestResolveAssetFields(unittest.TestCase):
     def test_asset_number_is_authoritative_when_columns_differ(self):
         row = pd.Series(_repayment_row("107114177883", "107114502274"))
@@ -186,11 +212,17 @@ class TestUpsertTrustAssetLookupOrder(unittest.TestCase):
         self.assertEqual(asset_id, 99)
         self.assertNotIn("custody", conn._calls)
 
-    def test_custody_lookup_only_when_equals_source(self):
-        existing = SimpleNamespace(id=30, asset_code="107114177883")
+    def test_custody_lookup_when_distinct_custody(self):
+        existing = SimpleNamespace(id=30, asset_code="101127075900")
         conn = self._conn(by_source=None, by_asset=None, by_custody=existing)
         asset_id = iu._upsert_trust_asset(
-            conn, 3, "107114177883", "107114177883", 0.0, "107114177883",
+            conn,
+            3,
+            "101127075900",
+            "101127075900",
+            0.0,
+            "101127075900-001",
+            distinct_custody=True,
         )
         self.assertEqual(asset_id, 30)
         self.assertIn("custody", conn._calls)
@@ -244,25 +276,112 @@ class TestPrecheckRepaymentSheetMismatch(unittest.TestCase):
         self.assertNotIn("asset_code_mismatch_count", result)
 
 
+class TestMonitorPrecheckConfirmRules(unittest.TestCase):
+    def test_first_import_needs_confirm(self):
+        reasons = iu._monitor_precheck_confirm_reasons(
+            latest_date=None,
+            latest_total=0,
+            latest_codes=set(),
+            excel_rows=3,
+            excel_codes={"101127075900"},
+            sheet_db_cnt=0,
+        )
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("首次导入", reasons[0])
+
+    def test_row_count_mismatch_on_latest_snapshot(self):
+        reasons = iu._monitor_precheck_confirm_reasons(
+            latest_date=date(2026, 6, 12),
+            latest_total=111,
+            latest_codes={"101127075900"},
+            excel_rows=110,
+            excel_codes={"101127075900"},
+            sheet_db_cnt=0,
+        )
+        self.assertTrue(any("记录数不一致" in r for r in reasons))
+
+    def test_unknown_primary_codes(self):
+        reasons = iu._monitor_precheck_confirm_reasons(
+            latest_date=date(2026, 6, 12),
+            latest_total=1,
+            latest_codes={"101127075900"},
+            excel_rows=1,
+            excel_codes={"101127075901"},
+            sheet_db_cnt=0,
+        )
+        self.assertTrue(any("不在最新快照日" in r for r in reasons))
+
+    def test_new_snapshot_same_total_no_confirm(self):
+        reasons = iu._monitor_precheck_confirm_reasons(
+            latest_date=date(2026, 6, 12),
+            latest_total=111,
+            latest_codes={"101127075900"},
+            excel_rows=111,
+            excel_codes={"101127075900"},
+            sheet_db_cnt=0,
+        )
+        self.assertEqual(reasons, [])
+
+
 class TestPrecheckMonitorSheetMismatch(unittest.TestCase):
-    def _mock_conn(self, *, db_cnt: int = 0):
+    def _mock_conn(
+        self,
+        *,
+        sheet_db_cnt: int = 0,
+        latest_date: date | None = None,
+        latest_total: int = 0,
+        latest_codes: set[str] | None = None,
+    ):
         conn = MagicMock()
+        latest_codes = latest_codes or set()
 
         def execute(sql, params=None):
+            sql_text = str(sql)
             result = MagicMock()
-            if "trust_asset_monitor_records" in str(sql):
-                result.fetchone.return_value = MagicMock(cnt=db_cnt)
+            if "MAX(data_date)" in sql_text:
+                result.fetchone.return_value = MagicMock(
+                    latest_date=latest_date,
+                )
+            elif "COUNT(*)" in sql_text and "DISTINCT" not in sql_text:
+                if params and params.get("sheet"):
+                    result.fetchone.return_value = MagicMock(cnt=sheet_db_cnt)
+                else:
+                    result.fetchone.return_value = MagicMock(cnt=latest_total)
+            elif "DISTINCT asset_code" in sql_text:
+                result.__iter__ = lambda self: iter(
+                    [MagicMock(asset_code=c) for c in latest_codes]
+                )
+            elif "duplicate_batch" in sql_text or "GROUP BY" in sql_text:
+                result.__iter__ = lambda self: iter([])
             else:
+                result.fetchone.return_value = None
                 result.__iter__ = lambda self: iter([])
             return result
 
         conn.execute = execute
         return conn
 
-    def test_monitor_mismatch_needs_confirm(self):
-        df = pd.DataFrame([_monitor_row("107114177883", "107114502274")])
+    def test_trust_custody_difference_allows_import_when_aligned_counts(self):
+        df = pd.DataFrame([_monitor_row("101127075900-001", "101127075900")])
         result = iu.precheck_monitor_sheet(
-            conn=self._mock_conn(),
+            conn=self._mock_conn(
+                latest_date=date(2026, 6, 12),
+                latest_total=1,
+                latest_codes={"101127075900"},
+            ),
+            trust_product_id=3,
+            product_name="美好生活3号",
+            file_name="美好生活3号-资产监控表_0612.xlsx",
+            sheet_name="资产监控",
+            df=df,
+        )
+        self.assertEqual(result["action"], "import")
+        self.assertNotIn("asset_code_mismatch_count", result)
+
+    def test_first_import_needs_confirm(self):
+        df = pd.DataFrame([_monitor_row("101127075900-001", "101127075900")])
+        result = iu.precheck_monitor_sheet(
+            conn=self._mock_conn(latest_date=None),
             trust_product_id=3,
             product_name="美好生活3号",
             file_name="美好生活3号-资产监控表_0612.xlsx",
@@ -270,7 +389,7 @@ class TestPrecheckMonitorSheetMismatch(unittest.TestCase):
             df=df,
         )
         self.assertEqual(result["action"], "needs_confirm")
-        self.assertEqual(result["asset_code_mismatch_count"], 1)
+        self.assertIn("首次导入", result["reason"])
 
 
 class TestAssetCodeGlobalPolicy(unittest.TestCase):
