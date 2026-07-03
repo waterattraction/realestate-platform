@@ -61,6 +61,7 @@
 |------|------|
 | 缺监控核心列 | failed |
 | 同 Sheet 同房源多行 | warning |
+| 一主编号多托管 | 正常：同一 `asset_code` 可对应多行、多个 `custody_asset_code` |
 | 跨批次重复 | needs_confirm / overwrite（见 precheck） |
 | Sheet 名不含监控关键词 | failed |
 

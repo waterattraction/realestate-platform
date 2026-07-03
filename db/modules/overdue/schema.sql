@@ -15,11 +15,11 @@ CREATE TABLE trust_assets (
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    CONSTRAINT uq_trust_assets_product_code UNIQUE (trust_product_id, asset_code),
     CONSTRAINT chk_trust_assets_initial CHECK (initial_transfer_amount >= 0)
 );
 
 CREATE INDEX idx_trust_assets_trust_product_id ON trust_assets (trust_product_id);
+CREATE INDEX idx_trust_assets_product_asset_code ON trust_assets (trust_product_id, asset_code);
 
 -- ------------------------------------------------------------
 -- 2. 资产监控记录（更新的资产数据表）

@@ -395,15 +395,15 @@ def _apply_asset_code_mismatch_precheck(result: dict[str, Any], mismatches: list
     result["warnings"].insert(
         0,
         f"[ERROR] 资产编号(房源)与托管房源编码不一致 {count} 行；"
-        f"将以资产编号为权威字段。样例: {sample_txt}",
+        f"导入时以托管编号定位底层资产，分笔号写入 source_asset_code。样例: {sample_txt}",
     )
     if result.get("action") in ("failed", "reject"):
         return
     result["action"] = "needs_confirm"
     result["importable"] = True
     mismatch_reason = (
-        f"<strong>编码不一致 {count} 行</strong>：将以「资产编号(房源)」为唯一权威字段；"
-        f"托管房源编码列不一致值将被忽略。须勾选确认后方可导入。"
+        f"<strong>编码不一致 {count} 行</strong>：将以「托管房源编码」为持久化锚点；"
+        f"「资产编号(房源)」作为分笔号关联。须勾选确认后方可导入。"
     )
     prev = (result.get("reason") or "").strip()
     result["reason"] = mismatch_reason + (f"<br><br>{prev}" if prev else "")
@@ -415,6 +415,55 @@ def _finalize_asset_code_mismatch_precheck(
     if mismatches and result.get("action") not in ("failed", "reject"):
         _apply_asset_code_mismatch_precheck(result, mismatches)
     return result
+
+
+def _fetch_trust_asset_row(
+    conn: Connection,
+    trust_product_id: int,
+    *,
+    custody_asset_code: str | None = None,
+    source_asset_code: str | None = None,
+) -> Any | None:
+    if custody_asset_code:
+        return conn.execute(
+            text("""
+                SELECT id, asset_code, custody_asset_code, source_asset_code
+                FROM trust_assets
+                WHERE trust_product_id = :pid AND custody_asset_code = :custody
+                LIMIT 1
+            """),
+            {"pid": trust_product_id, "custody": custody_asset_code},
+        ).fetchone()
+    if source_asset_code:
+        return conn.execute(
+            text("""
+                SELECT id, asset_code, custody_asset_code, source_asset_code
+                FROM trust_assets
+                WHERE trust_product_id = :pid AND source_asset_code = :source
+                LIMIT 1
+            """),
+            {"pid": trust_product_id, "source": source_asset_code},
+        ).fetchone()
+    return None
+
+
+def _custody_taken_by_other(
+    conn: Connection,
+    trust_product_id: int,
+    custody_asset_code: str,
+    exclude_id: int,
+) -> bool:
+    row = conn.execute(
+        text("""
+            SELECT id FROM trust_assets
+            WHERE trust_product_id = :pid
+              AND custody_asset_code = :custody
+              AND id != :exclude
+            LIMIT 1
+        """),
+        {"pid": trust_product_id, "custody": custody_asset_code, "exclude": exclude_id},
+    ).fetchone()
+    return row is not None
 
 
 def _upsert_trust_asset(
@@ -429,35 +478,45 @@ def _upsert_trust_asset(
 ) -> int:
     source = source_asset_code or asset_code
     existing = None
-    if source:
-        existing = conn.execute(
-            text("""
-                SELECT id, asset_code FROM trust_assets
-                WHERE trust_product_id = :pid AND source_asset_code = :source
-                LIMIT 1
-            """),
-            {"pid": trust_product_id, "source": source},
-        ).fetchone()
-    if existing is None and asset_code:
-        existing = conn.execute(
-            text("""
-                SELECT id, asset_code FROM trust_assets
-                WHERE trust_product_id = :pid AND asset_code = :code
-                LIMIT 1
-            """),
-            {"pid": trust_product_id, "code": asset_code},
-        ).fetchone()
-    if existing is None and custody_asset_code and (
-        distinct_custody or (source and custody_asset_code == source)
-    ):
-        existing = conn.execute(
-            text("""
-                SELECT id, asset_code FROM trust_assets
-                WHERE trust_product_id = :pid AND custody_asset_code = :custody
-                LIMIT 1
-            """),
-            {"pid": trust_product_id, "custody": custody_asset_code},
-        ).fetchone()
+
+    if distinct_custody:
+        if custody_asset_code:
+            existing = _fetch_trust_asset_row(
+                conn, trust_product_id, custody_asset_code=custody_asset_code,
+            )
+        if existing is None and source:
+            by_source = _fetch_trust_asset_row(
+                conn, trust_product_id, source_asset_code=source,
+            )
+            if by_source:
+                ex_custody = by_source.custody_asset_code
+                if (
+                    not custody_asset_code
+                    or ex_custody is None
+                    or ex_custody == custody_asset_code
+                ):
+                    existing = by_source
+    else:
+        if source:
+            existing = _fetch_trust_asset_row(
+                conn, trust_product_id, source_asset_code=source,
+            )
+        if existing is None and asset_code:
+            existing = conn.execute(
+                text("""
+                    SELECT id, asset_code, custody_asset_code, source_asset_code
+                    FROM trust_assets
+                    WHERE trust_product_id = :pid AND asset_code = :code
+                    LIMIT 1
+                """),
+                {"pid": trust_product_id, "code": asset_code},
+            ).fetchone()
+        if existing is None and custody_asset_code and (
+            source and custody_asset_code == source
+        ):
+            existing = _fetch_trust_asset_row(
+                conn, trust_product_id, custody_asset_code=custody_asset_code,
+            )
 
     if distinct_custody:
         safe_custody = custody_asset_code
@@ -467,6 +526,16 @@ def _upsert_trust_asset(
         )
 
     if existing:
+        update_custody: str | None = None
+        if distinct_custody:
+            if custody_asset_code and not existing.custody_asset_code:
+                if not _custody_taken_by_other(
+                    conn, trust_product_id, custody_asset_code, int(existing.id),
+                ):
+                    update_custody = custody_asset_code
+        else:
+            update_custody = safe_custody
+
         conn.execute(
             text("""
                 UPDATE trust_assets SET
@@ -479,7 +548,7 @@ def _upsert_trust_asset(
             """),
             {
                 "id": existing.id,
-                "custody": safe_custody,
+                "custody": update_custody,
                 "source": source,
                 "initial": initial_transfer_amount,
             },
@@ -892,7 +961,7 @@ def _parse_repayment_rows(
     rows: list[dict] = []
     errors: list[str] = []
     for idx, row in df.iterrows():
-        asset_code, custody, source = _resolve_asset_fields(row, col_asset, col_custody)
+        asset_code, custody, source = _resolve_monitor_asset_fields(row, col_asset, col_custody)
         if not asset_code and not custody:
             continue
         amount = cleanse.to_numeric_value(row[col_amount])
@@ -1435,6 +1504,7 @@ def _import_repayment_sheet(
             r.get("custody_asset_code"),
             0.0,
             r.get("source_asset_code"),
+            distinct_custody=True,
         )
         upsert_count += 1
         conn.execute(
@@ -1720,6 +1790,7 @@ def run_import(
             })
             continue
 
+        savepoint = conn.begin_nested()
         try:
             if sheet["sheet_type"] == "repayment_detail":
                 ins, ups, msg = _import_repayment_sheet(
@@ -1758,7 +1829,9 @@ def run_import(
             else:
                 failed += 1
                 sheet_results.append({**sheet, "final_action": "failed"})
+            savepoint.commit()
         except Exception as exc:
+            savepoint.rollback()
             failed += 1
             sheet_results.append({**sheet, "final_action": "failed", "reason": str(exc)})
 

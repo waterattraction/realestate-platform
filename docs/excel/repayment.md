@@ -64,6 +64,7 @@
 | 条件 | 级别 |
 |------|------|
 | 缺托管/资产编号列 | failed |
+| 资产编号与托管编码不一致 | needs_confirm（以托管编号 upsert，分笔号写入 source） |
 | 无法解析 repayment_date | 行 failed |
 | period_no 全缺失 | warning |
 | Sheet 内完全重复 | reject / warning |

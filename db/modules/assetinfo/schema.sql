@@ -10,6 +10,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_trust_assets_product_custody
     ON trust_assets (trust_product_id, custody_asset_code)
     WHERE custody_asset_code IS NOT NULL;
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_trust_assets_product_source
+    ON trust_assets (trust_product_id, source_asset_code)
+    WHERE source_asset_code IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS data_mapping_config (
     id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     config_version      VARCHAR(32)  NOT NULL DEFAULT 'v1.0',

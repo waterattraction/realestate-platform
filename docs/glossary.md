@@ -7,7 +7,8 @@ Canonical 字段名以英文 snake_case 为准；中文仅作 Excel 别名或展
 | 托管房源号 / 托管房源主体号 | `custody_asset_code` | `asset_code`（新逻辑） | 跨发行、监控、还款、逾期、风险识别房源主体；12 位数字为主 |
 | 房源编码 / 房源编号 | `custody_asset_code` | 独立字段名 | Excel 别名，映射到 `custody_asset_code` |
 | 资产分笔号 / 资产编号(房源) | `source_asset_code` | `custody_asset_code` | 分笔粒度，如 `101127075900-001` |
-| 资产编号（历史） | `asset_code` | 新业务主键 | `trust_assets` 历史唯一约束字段；新逻辑勿扩散 |
+| 资产主编号 | `asset_code` | 唯一业务键 | 信托号左 12 位；**同一产品可对应多个托管编号**（多行 trust_assets） |
+| 资产编号（历史展示） | `asset_code` | custody 锚点 | 与主编号同列；新逻辑 upsert 以 `custody_asset_code` 为首要键 |
 | 发行资产标识 | `business_asset_key` | 主键 / UNIQUE | `{trust_product_id}:{issue_date}:{custody_asset_code}`；**非唯一约束** |
 | 发行日 | `issue_date` | `data_date` | **仅发行模块**业务时间维度 |
 | 快照日期 / 统计日期 | `data_date` | `issue_date` | 监控、还款、逾期、风险快照维度 |

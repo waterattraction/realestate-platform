@@ -68,10 +68,10 @@ AssetPool（资产包）
 | 项 | 说明 |
 |----|------|
 | 表 | `trust_assets` |
-| 标识 | `custody_asset_code`（主体）、`source_asset_code`（分笔，多在子表）、历史 `asset_code` |
+| 标识 | `custody_asset_code`（持久化锚点）、`source_asset_code`（分笔）、`asset_code`（主编号，可重复） |
 | 角色 | 监控/还款/逾期/风险的 **资产维度锚点** |
 
-同一 `custody_asset_code` 在产品内代表一套托管房源主体。
+同一 `custody_asset_code` 在产品内代表一套托管房源主体。同一 `asset_code`（主编号）下可有 **多个** `custody_asset_code`（一主多托管）。
 
 ### MonitorSnapshot
 

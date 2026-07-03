@@ -141,7 +141,7 @@ class TestApplyAssetCodeMismatchPrecheck(unittest.TestCase):
         self.assertTrue(result["importable"])
         self.assertEqual(result["asset_code_mismatch_count"], 1)
         self.assertTrue(any("[ERROR]" in w for w in result["warnings"]))
-        self.assertIn("权威字段", result["reason"])
+        self.assertIn("持久化锚点", result["reason"])
 
     def test_does_not_override_failed(self):
         result = {"action": "failed", "warnings": [], "reason": "解析失败"}
@@ -153,16 +153,15 @@ class TestApplyAssetCodeMismatchPrecheck(unittest.TestCase):
 
 
 class TestParseRepaymentRowsRegression0612(unittest.TestCase):
-    def test_mismatched_excel_row_uses_source_not_custody(self):
+    def test_mismatched_excel_row_preserves_custody_for_upsert(self):
         df = pd.DataFrame([_repayment_row("107114177883", "107114502274")])
         rows, errors = iu._parse_repayment_rows(df, date(2026, 6, 12))
         self.assertEqual(errors, [])
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(row["source_asset_code"], "107114177883")
-        self.assertEqual(row["custody_asset_code"], "107114177883")
+        self.assertEqual(row["custody_asset_code"], "107114502274")
         self.assertEqual(row["asset_code"], "107114177883")
-        self.assertNotEqual(row["custody_asset_code"], "107114502274")
 
 
 class TestUpsertTrustAssetLookupOrder(unittest.TestCase):
@@ -179,7 +178,7 @@ class TestUpsertTrustAssetLookupOrder(unittest.TestCase):
             elif "asset_code = :code" in sql_text and "INSERT" not in sql_text:
                 calls.append("asset")
                 result.fetchone.return_value = by_asset
-            elif "custody_asset_code = :custody" in sql_text:
+            elif "custody_asset_code = :custody" in sql_text and "id !=" not in sql_text:
                 calls.append("custody")
                 result.fetchone.return_value = by_custody
             elif "INSERT INTO trust_assets" in sql_text:
@@ -195,7 +194,10 @@ class TestUpsertTrustAssetLookupOrder(unittest.TestCase):
         return conn
 
     def test_lookup_source_asset_code_first(self):
-        existing = SimpleNamespace(id=10, asset_code="107114177883")
+        existing = SimpleNamespace(
+            id=10, asset_code="107114177883",
+            custody_asset_code="107114177883", source_asset_code="107114177883",
+        )
         conn = self._conn(by_source=existing)
         asset_id = iu._upsert_trust_asset(
             conn, 3, "107114502274", "107114502274", 0.0, "107114177883",
@@ -212,8 +214,11 @@ class TestUpsertTrustAssetLookupOrder(unittest.TestCase):
         self.assertEqual(asset_id, 99)
         self.assertNotIn("custody", conn._calls)
 
-    def test_custody_lookup_when_distinct_custody(self):
-        existing = SimpleNamespace(id=30, asset_code="101127075900")
+    def test_custody_lookup_first_when_distinct_custody(self):
+        existing = SimpleNamespace(
+            id=30, asset_code="101127075900",
+            custody_asset_code="101127075900", source_asset_code="101127075900-001",
+        )
         conn = self._conn(by_source=None, by_asset=None, by_custody=existing)
         asset_id = iu._upsert_trust_asset(
             conn,
@@ -225,7 +230,30 @@ class TestUpsertTrustAssetLookupOrder(unittest.TestCase):
             distinct_custody=True,
         )
         self.assertEqual(asset_id, 30)
-        self.assertIn("custody", conn._calls)
+        self.assertEqual(conn._calls[0], "custody")
+
+    def test_distinct_custody_prefers_custody_over_conflicting_source(self):
+        by_custody = SimpleNamespace(
+            id=1967, asset_code="107113281945",
+            custody_asset_code="107114931134", source_asset_code="107114931134",
+        )
+        by_source = SimpleNamespace(
+            id=1874, asset_code="107113281945",
+            custody_asset_code="107113281945", source_asset_code="107113281945-002",
+        )
+        conn = self._conn(by_source=by_source, by_custody=by_custody)
+        asset_id = iu._upsert_trust_asset(
+            conn,
+            2,
+            "107113281945",
+            "107114931134",
+            87800.0,
+            "107113281945-002",
+            distinct_custody=True,
+        )
+        self.assertEqual(asset_id, 1967)
+        self.assertEqual(conn._calls[0], "custody")
+        self.assertNotIn("source", conn._calls)
 
 
 class TestPrecheckRepaymentSheetMismatch(unittest.TestCase):
