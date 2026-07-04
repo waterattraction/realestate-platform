@@ -23,6 +23,8 @@ from app import assetinfo_upload
 from app import issuance_html
 from app import issuance_upload
 from app import query_utils
+from app import repayment_analytics
+from app import repayment_analytics_html
 from app import trust_products as trust_products_svc
 from app import trust_products_html
 from app import risk_hub
@@ -2825,6 +2827,8 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         a.op-chip.op-orange:hover {{ border-color: #fb923c; box-shadow: 0 4px 12px rgba(251,146,60,0.2); }}
         a.op-chip.op-purple {{ color: #c084fc; border-color: rgba(192,132,252,0.35); }}
         a.op-chip.op-purple:hover {{ border-color: #c084fc; box-shadow: 0 4px 12px rgba(192,132,252,0.2); }}
+        a.op-chip.op-teal {{ color: #2dd4bf; border-color: rgba(45,212,191,0.35); }}
+        a.op-chip.op-teal:hover {{ border-color: #2dd4bf; box-shadow: 0 4px 12px rgba(45,212,191,0.2); }}
         .mini-kpi-row {{
             display: flex;
             flex-wrap: wrap;
@@ -3020,6 +3024,10 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                         <a href="/assetinfo/monitor-records" class="op-chip op-purple">
                             <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                             监控快照
+                        </a>
+                        <a href="/assetinfo/asset-stats" class="op-chip op-teal">
+                            <svg viewBox="0 0 24 24"><path d="M5 9.2h3V19H5V9.2zM10.6 5h2.8v14h-2.8V5zm5.6 8H19v6h-2.8v-6z"/></svg>
+                            资产情况统计
                         </a>
                     </div>
                     <div class="mini-kpi-row">
@@ -3869,6 +3877,114 @@ def assetinfo_monitor_records_page(
     html = assetinfo_html.render_records_page(
         "资产监控数据", "/assetinfo/monitor-records/data", filters, data, products,
         record_type="monitor",
+    )
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+def _parse_asset_stats_dates(
+    date_from_raw: str | None,
+    date_to_raw: str | None,
+) -> tuple[date, date]:
+    today = date.today()
+    parsed_from = query_utils.parse_optional_date(date_from_raw)
+    parsed_to = query_utils.parse_optional_date(date_to_raw)
+    date_from = date.fromisoformat(parsed_from[:10]) if parsed_from else date(today.year, 1, 1)
+    date_to = date.fromisoformat(parsed_to[:10]) if parsed_to else today
+    if date_from > date_to:
+        raise HTTPException(status_code=400, detail="date_from 不能晚于 date_to")
+    return date_from, date_to
+
+
+@app.get("/assetinfo/asset-stats/issue-dates")
+def asset_stats_issue_dates(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str = Query(...),
+):
+    pid = query_utils.parse_optional_int(trust_product_id)
+    if pid is None:
+        raise HTTPException(status_code=400, detail="trust_product_id 无效")
+    with engine.connect() as conn:
+        items = repayment_analytics.fetch_issue_dates(conn, pid)
+    return {"items": items}
+
+
+@app.get("/assetinfo/asset-stats/cities")
+def asset_stats_cities(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str = Query(...),
+    issue_date: str = Query(...),
+):
+    pid = query_utils.parse_optional_int(trust_product_id)
+    if pid is None:
+        raise HTTPException(status_code=400, detail="trust_product_id 无效")
+    parsed_issue = query_utils.parse_optional_date(issue_date)
+    if not parsed_issue:
+        raise HTTPException(status_code=400, detail="issue_date 无效")
+    with engine.connect() as conn:
+        items = repayment_analytics.fetch_issuance_cities(conn, pid, parsed_issue[:10])
+    return {"items": items}
+
+
+@app.get("/assetinfo/asset-stats/data")
+def asset_stats_data(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str = Query(...),
+    issue_date: str | None = Query(default=None),
+    period: str = Query(default="month"),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+):
+    pid = query_utils.parse_optional_int(trust_product_id)
+    if pid is None:
+        raise HTTPException(status_code=400, detail="trust_product_id 无效")
+    if period not in ("week", "month", "year"):
+        raise HTTPException(status_code=400, detail="period 须为 week/month/year")
+    d_from, d_to = _parse_asset_stats_dates(date_from, date_to)
+    parsed_issue = query_utils.parse_optional_date(issue_date)
+    issue_str = parsed_issue[:10] if parsed_issue else None
+    city_filter = query_utils.clean_optional_str(city)
+    with engine.connect() as conn:
+        try:
+            return repayment_analytics.build_asset_stats_report(
+                conn,
+                trust_product_id=pid,
+                issue_date=issue_str,
+                period=period,  # type: ignore[arg-type]
+                date_from=d_from,
+                date_to=d_to,
+                city=city_filter,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/assetinfo/asset-stats", response_class=HTMLResponse)
+def asset_stats_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
+    trust_product_id: str | None = Query(default=None),
+    issue_date: str | None = Query(default=None),
+    period: str | None = Query(default=None),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+):
+    pid = query_utils.parse_optional_int(trust_product_id)
+    parsed_issue = query_utils.parse_optional_date(issue_date)
+    period_val = period if period in ("week", "month", "year") else "month"
+    with engine.connect() as conn:
+        products = [
+            {"id": r.id, "name": r.name}
+            for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
+        ]
+    html = repayment_analytics_html.render_asset_stats_page(
+        products,
+        trust_product_id=pid,
+        issue_date=parsed_issue[:10] if parsed_issue else None,
+        period=period_val,
+        date_from=date_from,
+        date_to=date_to,
+        city=query_utils.clean_optional_str(city),
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
