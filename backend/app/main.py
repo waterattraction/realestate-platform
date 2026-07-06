@@ -181,6 +181,86 @@ def build_overdue_kpi_metrics(
     }
 
 
+def _zero_overdue_kpi_amounts() -> dict:
+    pair = {"remaining_amount": 0.0, "initial_transfer_amount": 0.0}
+    return {
+        "exposure": dict(pair),
+        "ES": {"repaid_amount": 0.0, "initial_transfer_amount": 0.0},
+        "M1": dict(pair),
+        "overdue": dict(pair),
+        "M2": dict(pair),
+        "M3": dict(pair),
+        "M3_PLUS": dict(pair),
+    }
+
+
+def _overdue_kpi_amounts_from_row(row) -> dict:
+    def _f(name: str) -> float:
+        return float(getattr(row, name, 0) or 0)
+
+    return {
+        "exposure": {
+            "remaining_amount": _f("exposure_remaining_sum"),
+            "initial_transfer_amount": _f("exposure_initial_sum"),
+        },
+        "ES": {
+            "repaid_amount": _f("es_repaid_sum"),
+            "initial_transfer_amount": _f("es_initial_sum"),
+        },
+        "M1": {
+            "remaining_amount": _f("m1_remaining_sum"),
+            "initial_transfer_amount": _f("m1_initial_sum"),
+        },
+        "overdue": {
+            "remaining_amount": _f("overdue_remaining_sum"),
+            "initial_transfer_amount": _f("overdue_initial_sum"),
+        },
+        "M2": {
+            "remaining_amount": _f("m2_remaining_sum"),
+            "initial_transfer_amount": _f("m2_initial_sum"),
+        },
+        "M3": {
+            "remaining_amount": _f("m3_remaining_sum"),
+            "initial_transfer_amount": _f("m3_initial_sum"),
+        },
+        "M3_PLUS": {
+            "remaining_amount": _f("m3_plus_remaining_sum"),
+            "initial_transfer_amount": _f("m3_plus_initial_sum"),
+        },
+    }
+
+
+def _fmt_overdue_card_amounts(amounts: dict, *, use_repaid: bool = False) -> str:
+    initial = float(amounts.get("initial_transfer_amount") or 0)
+    if use_repaid:
+        repaid = float(amounts.get("repaid_amount") or 0)
+        return f"已还 {fmt_money(repaid)} / 初始 {fmt_money(initial)}"
+    remaining = float(amounts.get("remaining_amount") or 0)
+    return f"剩余 {fmt_money(remaining)} / 初始 {fmt_money(initial)}"
+
+
+def _render_overdue_bucket_kpi_card(
+    label: str,
+    count: int,
+    amounts: dict,
+    *,
+    value_css: str = "",
+    hint: str = "",
+    use_repaid: bool = False,
+) -> str:
+    css_cls = f" {value_css}" if value_css else ""
+    amounts_html = _fmt_overdue_card_amounts(amounts, use_repaid=use_repaid)
+    hint_html = f'<div class="card-hint">{escape(hint)}</div>' if hint else ""
+    return f"""
+            <div class="card">
+                <div class="card-label">{escape(label)}</div>
+                <div class="card-value{css_cls}">{count}</div>
+                <div class="card-amounts">{amounts_html}</div>
+                {hint_html}
+            </div>
+        """
+
+
 def fmt_delinquency_badge(bucket: str | None) -> str:
     if bucket is None:
         return '<span class="badge">正常</span>'
@@ -687,6 +767,48 @@ def fetch_overdue_overview(
                 COUNT(*) FILTER (
                     WHERE {sql_m3_plus_asset_filter("mc.overdue_days", "mc.remaining_amount")}
                 ) AS m3_plus_count,
+                SUM(mc.remaining_amount) FILTER (
+                    WHERE {sql_exposure_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS exposure_remaining_sum,
+                SUM(mc.initial_transfer_amount) FILTER (
+                    WHERE {sql_exposure_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS exposure_initial_sum,
+                SUM(mc.repaid_amount) FILTER (
+                    WHERE {sql_es_asset_filter("mc.remaining_amount")}
+                ) AS es_repaid_sum,
+                SUM(mc.initial_transfer_amount) FILTER (
+                    WHERE {sql_es_asset_filter("mc.remaining_amount")}
+                ) AS es_initial_sum,
+                SUM(mc.remaining_amount) FILTER (
+                    WHERE {sql_m1_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m1_remaining_sum,
+                SUM(mc.initial_transfer_amount) FILTER (
+                    WHERE {sql_m1_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m1_initial_sum,
+                SUM(mc.remaining_amount) FILTER (
+                    WHERE {sql_overdue_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS overdue_remaining_sum,
+                SUM(mc.initial_transfer_amount) FILTER (
+                    WHERE {sql_overdue_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS overdue_initial_sum,
+                SUM(mc.remaining_amount) FILTER (
+                    WHERE {sql_m2_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m2_remaining_sum,
+                SUM(mc.initial_transfer_amount) FILTER (
+                    WHERE {sql_m2_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m2_initial_sum,
+                SUM(mc.remaining_amount) FILTER (
+                    WHERE {sql_m3_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m3_remaining_sum,
+                SUM(mc.initial_transfer_amount) FILTER (
+                    WHERE {sql_m3_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m3_initial_sum,
+                SUM(mc.remaining_amount) FILTER (
+                    WHERE {sql_m3_plus_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m3_plus_remaining_sum,
+                SUM(mc.initial_transfer_amount) FILTER (
+                    WHERE {sql_m3_plus_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m3_plus_initial_sum,
                 COUNT(*) AS total_asset_count,
                 COUNT(DISTINCT mc.asset_code) AS total_asset_code_count
             FROM monitor_custody mc
@@ -710,6 +832,7 @@ def fetch_overdue_overview(
             "m3_count": 0,
             "m3_plus_count": 0,
             **kpi,
+            "amounts": _zero_overdue_kpi_amounts(),
             "total_asset_count": 0,
             "total_asset_code_count": 0,
             "reconciliation_failed_count": 0,
@@ -819,6 +942,7 @@ def fetch_overdue_overview(
         "m3_count": m3,
         "m3_plus_count": m3_plus,
         **kpi,
+        "amounts": _overdue_kpi_amounts_from_row(row),
         "total_asset_count": int(row.total_asset_count),
         "total_asset_code_count": int(row.total_asset_code_count),
         "reconciliation_failed_count": int(recon_row.failed_count) if recon_row else 0,
@@ -1550,6 +1674,73 @@ def render_overdue_html(
         recalc_payload["trust_product_id"] = trust_product_id
     recalc_payload_json = json.dumps(recalc_payload, ensure_ascii=False)
 
+    amounts = overview.get("amounts") or _zero_overdue_kpi_amounts()
+    bd = overview.get("breakdown") or {}
+    kpi_cards = (
+        _render_overdue_bucket_kpi_card(
+            "资产规模（Exposure）",
+            overview["exposure_total"],
+            amounts["exposure"],
+            hint=f"ES+M1+M2+M3+M3+ 总风险暴露 · 资产 {overview['total_asset_code_count']} 个",
+        )
+        + _render_overdue_bucket_kpi_card(
+            "提前结清（ES）",
+            bd.get("ES", 0),
+            amounts["ES"],
+            value_css="ok",
+            hint="应还款为 0，非逾期",
+            use_repaid=True,
+        )
+        + _render_overdue_bucket_kpi_card(
+            "正常还款（M1）",
+            bd.get("M1", 0),
+            amounts["M1"],
+            value_css="ok",
+            hint="M1=正常在贷（含0天）",
+        )
+        + _render_overdue_bucket_kpi_card(
+            "逾期资产（Overdue）",
+            overview["overdue_total"],
+            amounts["overdue"],
+            value_css="warn",
+            hint="M2+M3+M3+，不含 ES / M1",
+        )
+        + _render_overdue_bucket_kpi_card(
+            "M2",
+            bd.get("M2", 0),
+            amounts["M2"],
+            value_css="m2",
+            hint="逾期 36–63 天",
+        )
+        + _render_overdue_bucket_kpi_card(
+            "M3",
+            bd.get("M3", 0),
+            amounts["M3"],
+            value_css="m2",
+            hint="逾期 64–91 天",
+        )
+        + _render_overdue_bucket_kpi_card(
+            "M3+",
+            bd.get("M3+", 0),
+            amounts["M3_PLUS"],
+            value_css="warn",
+            hint="逾期 ≥92 天",
+        )
+        + f"""
+            <div class="card">
+                <div class="card-label">核对异常</div>
+                <div class="card-value warn">{overview["reconciliation_failed_count"]}</div>
+                <div class="card-hint">托管房源口径</div>
+            </div>
+            <div class="card">
+                <div class="card-label">跟进中台账</div>
+                <div class="card-value">{overview["active_followup_count"]}</div>
+            </div>
+        """
+    )
+
+    m2_bucket_color = DELINQUENCY_BUCKET_COLORS["M2"]
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1564,7 +1755,7 @@ def render_overdue_html(
         header p {{ margin-top: 0.5rem; color: #94a3b8; font-size: 0.95rem; }}
         .grid {{
             display: grid;
-            grid-template-columns: repeat(6, minmax(0, 1fr));
+            grid-template-columns: repeat(9, minmax(0, 1fr));
             gap: 0.75rem;
             margin-bottom: 2rem;
         }}
@@ -1572,13 +1763,18 @@ def render_overdue_html(
             background: rgba(255, 255, 255, 0.06);
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 12px;
-            padding: 1.25rem;
+            padding: 1rem;
             backdrop-filter: blur(8px);
         }}
-        .card-label {{ font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.5rem; }}
-        .card-value {{ font-size: 1.75rem; font-weight: 700; color: #f8fafc; }}
+        .card-label {{ font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.35rem; }}
+        .card-value {{ font-size: 1.35rem; font-weight: 700; color: #f8fafc; }}
         .card-value.warn {{ color: #f87171; }}
         .card-value.ok {{ color: #34d399; }}
+        .card-value.m2 {{ color: {m2_bucket_color}; }}
+        .card-amounts {{
+            font-size: 0.68rem; color: #94a3b8; margin-top: 0.35rem;
+            line-height: 1.35; word-break: break-all;
+        }}
         .section {{ margin-top: 1.5rem; }}
         .section-title {{
             font-size: 1.05rem; font-weight: 600; color: #f8fafc;
@@ -1681,37 +1877,7 @@ def render_overdue_html(
         </header>
 
         <div class="grid">
-            <div class="card">
-                <div class="card-label">资产规模（Exposure）</div>
-                <div class="card-value">{overview["exposure_total"]}</div>
-                <div class="card-hint">ES+M1+M2+M3+M3+ 总风险暴露 · 资产 {overview["total_asset_code_count"]} 个</div>
-            </div>
-            <div class="card">
-                <div class="card-label">逾期资产（Overdue）</div>
-                <div class="card-value warn">{overview["overdue_total"]}</div>
-                <div class="card-hint">M2+M3+M3+，不含 ES / M1</div>
-            </div>
-            <div class="card">
-                <div class="card-label">提前结清（ES）</div>
-                <div class="card-value ok">{overview["breakdown"]["ES"]}</div>
-                <div class="card-hint">应还款为 0，非逾期</div>
-            </div>
-            <div class="card">
-                <div class="card-label">ES / M1 / M2 / M3 / M3+</div>
-                <div class="card-value" style="font-size:1rem;">
-                    {overview["breakdown"]["ES"]} / {overview["breakdown"]["M1"]} / {overview["breakdown"]["M2"]} / {overview["breakdown"]["M3"]} / {overview["breakdown"]["M3+"]}
-                </div>
-                <div class="card-hint">M1=正常在贷（含0天）；ES 已结清</div>
-            </div>
-            <div class="card">
-                <div class="card-label">核对异常</div>
-                <div class="card-value warn">{overview["reconciliation_failed_count"]}</div>
-                <div class="card-hint">托管房源口径</div>
-            </div>
-            <div class="card">
-                <div class="card-label">跟进中台账</div>
-                <div class="card-value">{overview["active_followup_count"]}</div>
-            </div>
+            {kpi_cards}
         </div>
 
         <section class="section">
