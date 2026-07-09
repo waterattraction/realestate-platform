@@ -8,6 +8,7 @@ from app.overdue.buckets import (
     OVERDUE_ASSET_MIN_DAYS,
     calc_delinquency_bucket,
     is_overdue_asset,
+    matches_delinquency_bucket_filter,
     stage_from_overdue_days,
 )
 
@@ -46,6 +47,15 @@ class DelinquencyBucketTests(unittest.TestCase):
         self.assertEqual(M2_MAX_DAYS, 63)
         self.assertEqual(M3_MAX_DAYS, 91)
         self.assertEqual(M3_PLUS_MIN_DAYS, 92)
+
+    def test_matches_delinquency_bucket_filter(self):
+        self.assertTrue(matches_delinquency_bucket_filter("M2", "M2_PLUS"))
+        self.assertTrue(matches_delinquency_bucket_filter("M3", "M2_PLUS"))
+        self.assertTrue(matches_delinquency_bucket_filter("M3_PLUS", "M2_PLUS"))
+        self.assertFalse(matches_delinquency_bucket_filter("M1", "M2_PLUS"))
+        self.assertFalse(matches_delinquency_bucket_filter("ES", "M2_PLUS"))
+        self.assertTrue(matches_delinquency_bucket_filter("M2", "M2"))
+        self.assertFalse(matches_delinquency_bucket_filter("M3", "M2"))
 
 
 if __name__ == "__main__":

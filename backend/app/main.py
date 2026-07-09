@@ -425,7 +425,11 @@ def _apply_custody_list_filters(item: dict, filters: dict | None) -> bool:
         if item["trust_product_id"] != filters["trust_product_id"]:
             return False
     if filters.get("delinquency_bucket"):
-        if item["delinquency_bucket"] != filters["delinquency_bucket"]:
+        from app.overdue.buckets import matches_delinquency_bucket_filter
+
+        if not matches_delinquency_bucket_filter(
+            item["delinquency_bucket"], filters["delinquency_bucket"]
+        ):
             return False
     if filters.get("trust_marker"):
         if item.get("trust_marker") != filters["trust_marker"]:
@@ -2802,7 +2806,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>房地产资产证券化平台</title>
+    <title>贝源RSP平台</title>
     <style>
         {PAGE_CHROME_CSS}
         {DASHBOARD_BODY_CSS}
@@ -3111,7 +3115,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                     <svg viewBox="0 0 24 24"><path d="M12 3L2 20h20L12 3zm0 4.5l6.2 10.5H5.8L12 7.5z"/></svg>
                 </div>
                 <div>
-                    <h1>房地产资产证券化平台</h1>
+                    <h1>贝源RSP平台</h1>
                     <p>Real Estate Securitization Platform</p>
                 </div>
             </div>
@@ -3244,7 +3248,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         </section>
 
         <footer class="page-footer">
-            <span>房地产资产证券化平台 © {datetime.now().year}</span>
+            <span>贝源RSP平台 © {datetime.now().year}</span>
             <span>
                 <a href="#">关于我们</a>
                 <a href="#">帮助中心</a>

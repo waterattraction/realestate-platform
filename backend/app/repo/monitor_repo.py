@@ -1,7 +1,12 @@
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from app.overdue.buckets import OVERDUE_ASSET_MIN_DAYS
+from app.overdue.buckets import (
+    OVERDUE_ASSET_MIN_DAYS,
+    RECONCILIATION_TOLERANCE_DEFAULT,
+    matches_delinquency_bucket_filter,
+    sql_agg_delinquency_filter,
+)
 from app.repo._serialize import row_to_dict, rows_to_dicts
 
 
@@ -259,6 +264,7 @@ class MonitorRepo:
         limit: int = 100,
         trust_marker: str | None = None,
         followup_status: str | None = None,
+        delinquency_bucket: str = "M2_PLUS",
     ) -> list[dict]:
         """Return one row per asset_code for the workbench left-column list."""
         pid_clause = (
@@ -288,9 +294,15 @@ class MonitorRepo:
             if followup_status
             else ""
         )
+        having_clause = sql_agg_delinquency_filter(
+            delinquency_bucket or "M2_PLUS",
+            "MAX(m.overdue_days)",
+            "SUM(m.remaining_amount)",
+            tolerance_param=":tolerance",
+        )
         params: dict = {
             "data_date": data_date,
-            "overdue_min_days": OVERDUE_ASSET_MIN_DAYS,
+            "tolerance": RECONCILIATION_TOLERANCE_DEFAULT,
             "limit": limit,
         }
         if trust_product_id is not None:
@@ -318,11 +330,11 @@ class MonitorRepo:
                     INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
                     INNER JOIN trust_products tp ON tp.id = m.trust_product_id
                     WHERE m.data_date = :data_date
-                      AND m.overdue_days >= :overdue_min_days
                       {pid_clause}
                       {marker_clause}
                       {status_clause}
                     GROUP BY m.asset_code, m.trust_product_id, tp.name
+                    HAVING {having_clause}
                     ORDER BY MAX(m.overdue_days) DESC
                     LIMIT :limit
                     """

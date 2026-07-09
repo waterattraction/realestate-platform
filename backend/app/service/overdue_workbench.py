@@ -11,6 +11,7 @@ from app.repo.monitor_repo import MonitorRepo
 from app.repo.repayment_repo import RepaymentRepo
 from app.service import checks_service
 from app.service.ops_service import suggest_ops
+from app.overdue.buckets import matches_delinquency_bucket_filter
 
 
 class OverdueWorkbenchService:
@@ -308,6 +309,7 @@ class OverdueWorkbenchService:
         *,
         trust_product_id: int | None,
         data_date: str | None = None,
+        delinquency_bucket: str = DEFAULT_DELINQUENCY_BUCKET,
         trust_marker: str | None = None,
         followup_status: str | None = None,
     ) -> dict:
@@ -321,6 +323,7 @@ class OverdueWorkbenchService:
             resolved_date,
             trust_marker=trust_marker,
             followup_status=followup_status,
+            delinquency_bucket=delinquency_bucket or DEFAULT_DELINQUENCY_BUCKET,
         )
         items = []
         for row in rows:
@@ -334,6 +337,9 @@ class OverdueWorkbenchService:
                 bucket = "ES"
             else:
                 bucket = checks_service.calc_risk_level(int(overdue_days or 0), remaining)
+
+            if not matches_delinquency_bucket_filter(bucket, delinquency_bucket):
+                continue
 
             followup_count = self._followup.count_entries_by_asset_code(pid, ac)
             mark = self._marks.fetch_mark(pid, ac, resolved_date)
@@ -397,6 +403,7 @@ class OverdueWorkbenchService:
         asset_list = self.get_asset_list(
             trust_product_id=list_pid,
             data_date=resolved_date,
+            delinquency_bucket=delinquency_bucket,
             trust_marker=trust_marker,
             followup_status=followup_status,
         )

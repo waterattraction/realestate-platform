@@ -258,3 +258,47 @@ def is_m3_plus_alert(overdue_days: int | None) -> bool:
 def is_payment_gap_risk(overdue_days: int | None) -> bool:
     od = 0 if overdue_days is None else int(overdue_days)
     return od > M1_MAX_DAYS
+
+
+def matches_delinquency_bucket_filter(item_bucket: str, filter_bucket: str) -> bool:
+    """Whether an asset's computed bucket matches a UI filter (incl. composite M2_PLUS)."""
+    if not filter_bucket:
+        return True
+    if filter_bucket == "M2_PLUS":
+        return item_bucket in ("M2", "M3", "M3_PLUS")
+    return item_bucket == filter_bucket
+
+
+def sql_agg_delinquency_filter(
+    filter_bucket: str,
+    overdue_days_expr: str,
+    remaining_amount_expr: str,
+    *,
+    tolerance_param: str = ":tolerance",
+) -> str:
+    """HAVING fragment for asset_code-aggregated monitor rows."""
+    if filter_bucket == "M2_PLUS":
+        return sql_overdue_asset_filter(
+            overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
+        )
+    if filter_bucket == "ES":
+        return sql_es_filter(remaining_amount_expr, tolerance_param=tolerance_param)
+    if filter_bucket == "M1":
+        return sql_m1_filter(
+            overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
+        )
+    if filter_bucket == "M2":
+        return sql_m2_filter(
+            overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
+        )
+    if filter_bucket == "M3":
+        return sql_m3_filter(
+            overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
+        )
+    if filter_bucket == "M3_PLUS":
+        return sql_m3_plus_filter(
+            overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
+        )
+    return sql_overdue_asset_filter(
+        overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
+    )
