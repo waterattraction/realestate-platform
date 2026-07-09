@@ -19,6 +19,22 @@ from app.service.followup_upload import (
 
 router = APIRouter(tags=["overdue-followups"])
 
+
+def _workbench_followup_redirect_qs(
+    trust_product_id: int,
+    asset_code: str,
+    *,
+    entry_id: int | None = None,
+) -> str:
+    qs = (
+        f"?trust_product_id={trust_product_id}"
+        f"&asset_code={quote(asset_code)}"
+        f"&followup_expanded=1"
+    )
+    if entry_id is not None:
+        qs += f"&followup_entry_id={entry_id}"
+    return qs
+
 _engine = get_engine()
 _repo = FollowupRepo(_engine)
 _get_user = auth.make_current_user_dependency(_engine)
@@ -85,7 +101,9 @@ async def create_followup_entry(
         result["attachments"] = attachments
 
     if redirect_to_workbench:
-        qs = f"?trust_product_id={trust_product_id}&asset_code={quote(ac)}"
+        qs = _workbench_followup_redirect_qs(
+            trust_product_id, ac, entry_id=int(result["entry_id"])
+        )
         return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
 
     return result
@@ -106,6 +124,7 @@ async def update_followup_entry(
     trust_feedback: str = Form(""),
     note: str = Form(""),
     redirect_to_workbench: str | None = Form(None),
+    remove_attachment_ids: list[int] = Form(default=[]),
     files: list[UploadFile] = File(default=[]),
 ):
     ac = query_utils.clean_optional_str(asset_code) or ""
@@ -123,7 +142,7 @@ async def update_followup_entry(
         raise HTTPException(status_code=400, detail="asset_code is required")
 
     try:
-        result = _repo.update_in_progress_entry(
+        result = _repo.update_entry(
             entry_id=entry_id,
             trust_product_id=trust_product_id,
             asset_code=ac,
@@ -137,6 +156,17 @@ async def update_followup_entry(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if remove_attachment_ids:
+        try:
+            _repo.delete_attachments(
+                attachment_ids=remove_attachment_ids,
+                entry_id=entry_id,
+                trust_product_id=trust_product_id,
+                asset_code=ac,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if files:
         existing_count = _repo.count_attachments_for_entry(result["entry_id"])
@@ -152,7 +182,49 @@ async def update_followup_entry(
         result["attachments"] = attachments
 
     if redirect_to_workbench:
-        qs = f"?trust_product_id={trust_product_id}&asset_code={quote(ac)}"
+        qs = _workbench_followup_redirect_qs(
+            trust_product_id, ac, entry_id=entry_id
+        )
+        return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
+
+    return result
+
+
+@router.post("/overdue/workbench/followups/entries/{entry_id}/delete")
+def delete_followup_entry(
+    entry_id: int,
+    current_user: Annotated[dict, Depends(_get_user)],
+    trust_product_id: int = Form(...),
+    asset_code: str = Form(""),
+    custody_asset_code: str = Form(""),
+    redirect_to_workbench: str | None = Form(None),
+):
+    ac = query_utils.clean_optional_str(asset_code) or ""
+    if not ac and custody_asset_code:
+        from app.service.overdue_workbench import build_overdue_workbench_service
+
+        svc = build_overdue_workbench_service(_engine)
+        resolved = svc.resolve_asset_code(
+            trust_product_id,
+            query_utils.clean_optional_str(custody_asset_code) or "",
+            None,
+        )
+        ac = resolved or ""
+    if not ac:
+        raise HTTPException(status_code=400, detail="asset_code is required")
+
+    try:
+        result = _repo.delete_entry(
+            entry_id=entry_id,
+            trust_product_id=trust_product_id,
+            asset_code=ac,
+            updated_by=current_user.get("username"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if redirect_to_workbench:
+        qs = _workbench_followup_redirect_qs(trust_product_id, ac)
         return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
 
     return result

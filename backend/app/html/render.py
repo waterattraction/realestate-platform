@@ -103,6 +103,8 @@ def render_overdue_workbench_html(
     dto: dict,
     *,
     new_followup: bool = False,
+    followup_expanded: bool = False,
+    followup_entry_id: int | None = None,
 ) -> str:
     if dto.get("legacy_error"):
         return _render_legacy_error_page(dto)
@@ -157,6 +159,12 @@ def render_overdue_workbench_html(
         if data_date_display else ""
     )
     write_bar = ""
+    initial_followup_pane = "followup-pane-new"
+    followup_entries_for_pane = asset.get("followup_entries") or []
+    if followup_entry_id and any(
+        int(e["id"]) == followup_entry_id for e in followup_entries_for_pane
+    ):
+        initial_followup_pane = f"followup-pane-entry-{followup_entry_id}"
     if asset.get("selected_split") or asset.get("monitor", {}).get("splits"):
         write_bar = _panel_followup_write(
             product_hidden,
@@ -164,10 +172,11 @@ def render_overdue_workbench_html(
             bucket_hidden,
             workbench_qs,
             dto,
-            new_followup=new_followup,
+            followup_expanded=new_followup or followup_expanded,
+            initial_pane=initial_followup_pane,
         )
 
-    scroll_flag = "1" if new_followup else "0"
+    scroll_flag = "1" if (new_followup or followup_expanded) else "0"
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -177,7 +186,7 @@ def render_overdue_workbench_html(
     <title>资产逾期跟进工作台 · 房地产资产证券化平台</title>
     {_WORKBENCH_CSS}
 </head>
-<body class="workbench-page" data-scroll-followup="{scroll_flag}">
+<body class="workbench-page" data-scroll-followup="{scroll_flag}" data-followup-pane="{escape(initial_followup_pane)}">
 <div class="page-wrap">
 <div class="container">
     <div class="breadcrumb">
@@ -1454,46 +1463,125 @@ def _render_saved_attachment_link(att: dict) -> str:
     )
 
 
-def _render_attachment_uploader(*, existing_count: int = 0, label: str) -> str:
+def _render_attachment_uploader(*, existing_count: int = 0, label: str = "", collapsible: bool = True) -> str:
     from app.service.followup_upload import ALLOWED_EXTENSIONS_ATTR, MAX_FILE_SIZE, MAX_FILES_PER_ENTRY
 
+    remaining = max(0, MAX_FILES_PER_ENTRY - int(existing_count))
+    toggle_label = label or f"添加附件（{int(existing_count)}/{MAX_FILES_PER_ENTRY}）"
+    panel_hidden = " hidden" if collapsible else ""
     return f"""
-    <div class="span-2 attachment-uploader-field">
-        <span class="attachment-uploader-label">{escape(label)}</span>
-        <div class="attachment-uploader"
-             data-max-files="{MAX_FILES_PER_ENTRY}"
-             data-max-file-size="{MAX_FILE_SIZE}"
-             data-existing-count="{int(existing_count)}"
-             data-allowed-extensions="{escape(ALLOWED_EXTENSIONS_ATTR)}">
-            <div class="attachment-dropzone" tabindex="0">
-                <strong>拖拽文件到此处，或点击选择</strong>
-                <span>支持 Ctrl+V / ⌘+V 粘贴截图或文件；最多 10 个，单文件 ≤10MB</span>
+    <div class="followup-attachment-upload span-full">
+        <button type="button" class="btn btn-compact attachment-upload-toggle" aria-expanded="false">{escape(toggle_label)}</button>
+        <div class="attachment-upload-panel"{panel_hidden}>
+            <div class="attachment-uploader"
+                 data-max-files="{MAX_FILES_PER_ENTRY}"
+                 data-max-file-size="{MAX_FILE_SIZE}"
+                 data-existing-count="{int(existing_count)}"
+                 data-allowed-extensions="{escape(ALLOWED_EXTENSIONS_ATTR)}">
+                <div class="attachment-dropzone attachment-dropzone-compact" tabindex="0">
+                    <strong>拖拽、点击或 Ctrl+V 粘贴</strong>
+                    <span>最多 {remaining} 个，单文件 ≤10MB</span>
+                </div>
+                <input class="attachment-input" type="file" name="files" multiple hidden>
+                <div class="attachment-preview"></div>
+                <div class="attachment-error" hidden></div>
             </div>
-            <input class="attachment-input" type="file" name="files" multiple hidden>
-            <div class="attachment-preview"></div>
-            <div class="attachment-error" hidden></div>
         </div>
     </div>"""
 
 
-def _followup_entry_is_editable(entry: dict) -> bool:
-    return entry.get("status_snapshot") == "in_progress"
+def _followup_entry_is_mutable(status: str | None) -> bool:
+    return status in ("open", "in_progress")
 
 
-def _render_followup_entry_readonly(entry: dict) -> str:
-    eid = int(entry["id"])
+def _render_followup_field_cell(label: str, inner_html: str) -> str:
+    return (
+        f'<div class="followup-field">'
+        f'<span class="followup-field-label">{escape(label)}</span>'
+        f"{inner_html}"
+        f"</div>"
+    )
+
+
+def _render_followup_field_display(value, *, textarea: bool = False, extra_class: str = "") -> str:
+    text = escape(str(value)) if value not in (None, "") else "—"
+    cls = "field-display"
+    if textarea:
+        cls += " field-display--scrollcell"
+    if extra_class:
+        cls += f" {extra_class}"
+    return f'<div class="{cls}">{text}</div>'
+
+
+def _render_saved_attachment_chip(att: dict) -> str:
+    aid = att.get("id")
+    if not aid:
+        return ""
+    fname = escape(str(att.get("file_name") or ""))
+    kind = _attachment_open_kind(att)
+    title = {"image": "点击预览", "pdf": "在新标签页打开"}.get(kind, "打开或下载")
+    return (
+        f'<span class="attachment-chip attachment-chip-saved" data-attachment-id="{int(aid)}">'
+        f'<a class="attachment-open-link attachment-chip-meta-link" data-kind="{kind}"'
+        f' href="/overdue/workbench/attachments/{int(aid)}"'
+        f' title="{title}">{fname}</a>'
+        f'<button type="button" class="attachment-chip-remove attachment-saved-remove"'
+        f' aria-label="删除附件">×</button>'
+        f"</span>"
+    )
+
+
+def _render_followup_attachment_view(entry: dict) -> str:
     att_parts = []
     for att in entry.get("attachments") or []:
         link = _render_saved_attachment_link(att)
         if link:
             att_parts.append(link)
-    att_html = " ".join(att_parts) if att_parts else "—"
+    content = " ".join(att_parts) if att_parts else "—"
+    return f'<span class="followup-view-only">{content}</span>'
 
-    def ro_field(label: str, value) -> str:
-        text = escape(str(value)) if value not in (None, "") else "—"
-        return f'<p><span class="lbl">{escape(label)}</span>{text}</p>'
 
-    cite_attrs = (
+def _render_followup_attachment_edit(entry: dict) -> str:
+    atts = entry.get("attachments") or []
+    if not atts:
+        return '<div class="followup-saved-attachments followup-edit-only"><span class="muted">—</span></div>'
+    chips = [_render_saved_attachment_chip(att) for att in atts]
+    chips_html = "".join(c for c in chips if c)
+    return f'<div class="followup-saved-attachments followup-edit-only">{chips_html}</div>'
+
+
+def _render_followup_attachment_row(entry: dict) -> str:
+    return f"""<div class="followup-attachment-row">
+        <div class="followup-field">
+            <span class="followup-field-label">附件</span>
+            <div class="field-display field-display--attachment">
+                {_render_followup_attachment_view(entry)}
+                {_render_followup_attachment_edit(entry)}
+            </div>
+        </div>
+    </div>"""
+
+
+def _render_followup_status_badge(status: str | None, *, view_only_class: str = "") -> str:
+    label = _followup_status_label(status)
+    code = escape(str(status or ""))
+    extra = f" {view_only_class}" if view_only_class else ""
+    return (
+        f'<span class="status-badge{extra}" data-status="{code}">{escape(label)}</span>'
+    )
+
+
+def _render_followup_attachment_links(entry: dict) -> str:
+    att_parts = []
+    for att in entry.get("attachments") or []:
+        link = _render_saved_attachment_link(att)
+        if link:
+            att_parts.append(link)
+    return " ".join(att_parts) if att_parts else "—"
+
+
+def _render_followup_entry_cite_attrs(entry: dict) -> str:
+    return (
         f'data-status="{escape(str(entry.get("status_snapshot") or ""))}" '
         f'data-owner="{escape(str(entry.get("owner_name") or ""))}" '
         f'data-reason="{escape(str(entry.get("overdue_reason") or ""))}" '
@@ -1501,72 +1589,80 @@ def _render_followup_entry_readonly(entry: dict) -> str:
         f'data-feedback="{escape(str(entry.get("trust_feedback") or ""))}" '
         f'data-note="{escape(str(entry.get("note") or ""))}"'
     )
-    return f"""<div class="followup-readonly">
-        <p class="readonly-hint muted tiny">历史记录只读 · 如需补充请切换至「＋ 新建跟进」</p>
-        {ro_field("跟进时间", _fmt_date_only(entry.get("created_at")))}
-        {ro_field("跟进记录状态", _followup_status_label(entry.get("status_snapshot")))}
-        {ro_field("负责人", entry.get("owner_name"))}
-        {ro_field("逾期原因", entry.get("overdue_reason"))}
-        {ro_field("跟进方案", entry.get("follow_up_plan"))}
-        {ro_field("信托反馈", entry.get("trust_feedback"))}
-        {ro_field("补充说明", entry.get("note"))}
-        <p><span class="lbl">附件</span>{att_html}</p>
-        <button type="button" class="btn btn-compact entry-cite-btn" {cite_attrs}>引用此条到新建</button>
+
+
+def _render_followup_meta_row_dual(
+    *,
+    created_display: str,
+    status: str,
+    owner_name: str,
+) -> str:
+    owner_esc = escape(owner_name)
+    return f"""<div class="followup-meta-row">
+        {_render_followup_field_cell(
+            "跟进时间",
+            f'<div class="field-display field-display--meta">{created_display}</div>',
+        )}
+        {_render_followup_field_cell(
+            "跟进记录状态",
+            f'{_render_followup_status_badge(status, view_only_class="followup-view-only")}'
+            f'<select name="status" class="followup-edit-only">'
+            f"{_followup_status_options(status)}</select>",
+        )}
+        {_render_followup_field_cell(
+            "负责人",
+            f"{_render_followup_field_display(owner_name, extra_class='followup-view-only')}"
+            f'<input name="owner_name" class="followup-edit-only" value="{owner_esc}">',
+        )}
     </div>"""
 
 
-def _render_followup_entry_editable(
-    entry: dict,
-    product_hidden: str,
-    asset_hidden: str,
-    bucket_hidden: str,
-    workbench_qs,
-    data_date: str,
+def _render_followup_body_grid_dual(
+    *,
+    reason: str = "",
+    plan: str = "",
+    feedback: str = "",
+    note: str = "",
 ) -> str:
-    eid = int(entry["id"])
-    status = entry.get("status_snapshot") or "in_progress"
-    owner_val = escape(entry.get("owner_name") or "")
-    reason = escape(str(entry.get("overdue_reason") or ""))
-    plan = escape(str(entry.get("follow_up_plan") or ""))
-    feedback = escape(str(entry.get("trust_feedback") or ""))
-    note = escape(str(entry.get("note") or ""))
-    created = escape(_fmt_date_only(entry.get("created_at")))
+    # 2×2：左列 逾期原因/信托反馈，右列 跟进方案/补充说明
+    fields = (
+        ("逾期原因", "overdue_reason", reason),
+        ("跟进方案", "follow_up_plan", plan),
+        ("信托反馈", "trust_feedback", feedback),
+        ("补充说明", "note", note),
+    )
+    parts: list[str] = ['<div class="followup-body-grid">']
+    for label, name, val in fields:
+        parts.append(
+            f'<div class="followup-field followup-scroll-cell">'
+            f'<span class="followup-field-label">{escape(label)}</span>'
+            f"{_render_followup_field_display(val, textarea=True, extra_class='followup-view-only')}"
+            f'<textarea name="{name}" rows="2" class="followup-textarea-scroll followup-edit-only">'
+            f"{escape(str(val))}</textarea>"
+            f"</div>"
+        )
+    parts.append("</div>")
+    return "\n".join(parts)
 
-    att_parts = []
-    for att in entry.get("attachments") or []:
-        link = _render_saved_attachment_link(att)
-        if link:
-            att_parts.append(link)
-    att_html = " ".join(att_parts) if att_parts else "—"
 
-    return f"""<div class="followup-editable">
-        <p class="readonly-hint muted tiny">跟进中记录可修改 · 保存后更新本条（不新增记录）</p>
-        <p class="muted tiny">跟进时间 {created} · 已有附件 {att_html}</p>
-        <form class="followup-form followup-edit-form" method="post" enctype="multipart/form-data"
-              action="/overdue/workbench/followups/entries/{eid}{workbench_qs()}">
-            <input type="hidden" name="redirect_to_workbench" value="1">
-            {product_hidden}
-            {asset_hidden}
-            {bucket_hidden}
-            <input type="hidden" name="data_date" value="{data_date}">
-            <div class="followup-form-grid">
-                <label>跟进记录状态
-                    <select name="status">{_followup_status_options(status)}</select>
-                </label>
-                <label>负责人 <input name="owner_name" value="{owner_val}"></label>
-                <label>逾期原因<textarea name="overdue_reason" rows="2">{reason}</textarea></label>
-                <label>跟进方案<textarea name="follow_up_plan" rows="2">{plan}</textarea></label>
-                <label>信托反馈<textarea name="trust_feedback" rows="2">{feedback}</textarea></label>
-                <label>补充说明<textarea name="note" rows="2">{note}</textarea></label>
-                {_render_attachment_uploader(
-                    existing_count=len(entry.get("attachments") or []),
-                    label="追加附件（图片/PDF 等，最多 10 个）",
-                )}
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="btn primary">保存修改</button>
-            </div>
-        </form>
+def _render_followup_attachment_zone(
+    entry: dict,
+    *,
+    uploader_label: str = "",
+    show_uploader: bool = True,
+) -> str:
+    attachments = entry.get("attachments") or []
+    existing_count = len(attachments)
+    uploader = ""
+    if show_uploader:
+        uploader = _render_attachment_uploader(
+            existing_count=existing_count,
+            label=uploader_label or f"追加附件（{existing_count}/10）",
+        )
+    return f"""<div class="followup-attachment-zone span-full">
+        {_render_followup_attachment_row(entry)}
+        <div class="followup-attachment-upload-slot followup-edit-only">{uploader}</div>
+        <div class="followup-attachment-spacer followup-view-only" aria-hidden="true"></div>
     </div>"""
 
 
@@ -1578,11 +1674,111 @@ def _render_followup_entry_panel(
     workbench_qs,
     data_date: str,
 ) -> str:
-    if _followup_entry_is_editable(entry):
-        return _render_followup_entry_editable(
-            entry, product_hidden, asset_hidden, bucket_hidden, workbench_qs, data_date
-        )
-    return _render_followup_entry_readonly(entry)
+    eid = int(entry["id"])
+    status = entry.get("status_snapshot") or "open"
+    mutable = _followup_entry_is_mutable(status)
+    created = escape(_fmt_date_only(entry.get("created_at")))
+    cite_attrs = _render_followup_entry_cite_attrs(entry)
+    disabled = "" if mutable else " disabled"
+    disabled_title = "" if mutable else ' title="已结案记录不可编辑或删除"'
+    att_count = len(entry.get("attachments") or [])
+    shell_layout = f"""<div class="followup-shell-layout">
+                {_render_followup_meta_row_dual(
+                    created_display=created,
+                    status=status,
+                    owner_name=str(entry.get("owner_name") or ""),
+                )}
+                {_render_followup_body_grid_dual(
+                    reason=str(entry.get("overdue_reason") or ""),
+                    plan=str(entry.get("follow_up_plan") or ""),
+                    feedback=str(entry.get("trust_feedback") or ""),
+                    note=str(entry.get("note") or ""),
+                )}
+                {_render_followup_attachment_zone(
+                    entry,
+                    uploader_label=f"追加附件（{att_count}/10）",
+                )}
+            </div>"""
+
+    delete_form = f"""
+        <form class="entry-delete-form" method="post" enctype="multipart/form-data"
+              action="/overdue/workbench/followups/entries/{eid}/delete{workbench_qs()}">
+            <input type="hidden" name="redirect_to_workbench" value="1">
+            {product_hidden}
+            {asset_hidden}
+            {bucket_hidden}
+        </form>"""
+
+    return f"""<div class="followup-entry-shell" data-entry-id="{eid}" data-editing="0">
+        <form class="followup-form followup-entry-form" method="post" enctype="multipart/form-data"
+              action="/overdue/workbench/followups/entries/{eid}{workbench_qs()}">
+            <input type="hidden" name="redirect_to_workbench" value="1">
+            {product_hidden}
+            {asset_hidden}
+            {bucket_hidden}
+            <input type="hidden" name="data_date" value="{data_date}">
+            {shell_layout}
+            <div class="followup-actions-bar">
+                <div class="followup-view-only followup-entry-view-actions">
+                    <button type="button" class="btn btn-compact entry-edit-btn"{disabled}{disabled_title}>修改</button>
+                    <button type="button" class="btn btn-compact entry-delete-btn"{disabled}{disabled_title}>删除</button>
+                    <button type="button" class="btn btn-compact entry-cite-btn" {cite_attrs}>引用此条到新建</button>
+                </div>
+                <div class="followup-edit-only followup-entry-edit-actions">
+                    <button type="submit" class="btn primary">保存</button>
+                    <button type="button" class="btn entry-cancel-btn">取消</button>
+                </div>
+            </div>
+        </form>
+        {delete_form}
+    </div>"""
+
+
+def _render_followup_create_pane(
+    product_hidden: str,
+    asset_hidden: str,
+    bucket_hidden: str,
+    workbench_qs,
+    data_date: str,
+    *,
+    current_status: str,
+    owner_val: str,
+    last_reason: str,
+    last_plan: str,
+) -> str:
+    return f"""<div class="followup-entry-shell followup-entry-shell--create" data-editing="1">
+        <form class="followup-form" id="followup-form" method="post" enctype="multipart/form-data"
+              action="/overdue/workbench/followups/entries{workbench_qs()}">
+            <input type="hidden" name="redirect_to_workbench" value="1">
+            {product_hidden}
+            {asset_hidden}
+            {bucket_hidden}
+            <input type="hidden" name="data_date" value="{data_date}">
+            <div class="followup-shell-layout">
+                {_render_followup_meta_row_dual(
+                    created_display="保存后自动生成",
+                    status=current_status,
+                    owner_name=owner_val,
+                )}
+                {_render_followup_body_grid_dual(
+                    reason=last_reason,
+                    plan=last_plan,
+                    feedback="",
+                    note="",
+                )}
+                {_render_followup_attachment_zone(
+                    {"attachments": []},
+                    uploader_label="添加附件（0/10）",
+                )}
+            </div>
+            <div class="followup-actions-bar" id="followup-form-actions">
+                <div class="followup-create-actions">
+                    <button type="submit" class="btn primary">保存本次跟进</button>
+                    <button type="button" class="btn" id="followup-clear">清空</button>
+                </div>
+            </div>
+        </form>
+    </div>"""
 
 
 def _panel_followup_write(
@@ -1592,15 +1788,16 @@ def _panel_followup_write(
     workbench_qs,
     dto,
     *,
-    new_followup: bool = False,
+    followup_expanded: bool = False,
+    initial_pane: str = "followup-pane-new",
 ) -> str:
     data_date = escape(str(dto.get("data_date") or ""))
     asset = dto.get("asset") or {}
     case = asset.get("followup_case") or {}
     current_status = case.get("status") or "in_progress"
-    owner_val = escape(case.get("owner_name") or "")
+    owner_val = case.get("owner_name") or ""
     asset_code = escape(str(dto.get("asset_code") or asset.get("asset_code") or ""))
-    expanded = "1" if new_followup else "0"
+    expanded = "1" if followup_expanded else "0"
     followup_entries = asset.get("followup_entries") or []
 
     last_reason = ""
@@ -1616,27 +1813,30 @@ def _panel_followup_write(
                 break
 
     entry_tabs = (
-        '<button type="button" class="entry-tab active" data-pane="followup-pane-new">'
-        "＋ 新建跟进</button>"
+        f'<button type="button" class="entry-tab{" active" if initial_pane == "followup-pane-new" else ""}" '
+        f'data-pane="followup-pane-new">＋ 新建跟进</button>'
     )
     entry_panes = ""
     for entry in followup_entries:
         eid = int(entry["id"])
         pane_id = f"followup-pane-entry-{eid}"
+        tab_active = " active" if initial_pane == pane_id else ""
         entry_tabs += (
-            f'<button type="button" class="entry-tab" data-pane="{pane_id}">'
+            f'<button type="button" class="entry-tab{tab_active}" data-pane="{pane_id}">'
             f"{escape(_followup_entry_tab_label(entry))}</button>"
         )
+        pane_active = " active" if initial_pane == pane_id else ""
         entry_panes += (
-            f'<div class="followup-pane" id="{pane_id}">'
+            f'<div class="followup-pane{pane_active}" id="{pane_id}">'
             f"{_render_followup_entry_panel(entry, product_hidden, asset_hidden, bucket_hidden, workbench_qs, data_date)}"
             f"</div>"
         )
 
+    new_pane_active = " active" if initial_pane == "followup-pane-new" else ""
     return f"""
     <div class="sticky-write-bar" id="followup-entry-form" data-expanded="{expanded}">
         <div class="sticky-write-collapsed">
-            <button type="button" class="write-toggle" id="followup-expand" aria-expanded="{"true" if new_followup else "false"}">
+            <button type="button" class="write-toggle" id="followup-expand" aria-expanded="{"true" if followup_expanded else "false"}">
                 <span class="write-toggle-icon" aria-hidden="true">▶</span>
                 <span class="sticky-write-title">记录跟进 · {ASSET_CODE_LABEL} {asset_code}</span>
             </button>
@@ -1647,35 +1847,19 @@ def _panel_followup_write(
         </div>
         <div class="sticky-write-panel" id="followup-write-panel">
             <div class="sticky-write-inner">
-                <p class="muted tiny">跟进时间于保存时自动生成 · 每次保存追加一条跟进记录（V2.2 entries）</p>
                 <div class="entry-tabs" role="tablist">{entry_tabs}</div>
-                <div class="followup-pane active" id="followup-pane-new">
-                    <form class="followup-form" id="followup-form" method="post" enctype="multipart/form-data"
-                          action="/overdue/workbench/followups/entries{workbench_qs()}">
-                        <input type="hidden" name="redirect_to_workbench" value="1">
-                        {product_hidden}
-                        {asset_hidden}
-                        {bucket_hidden}
-                        <input type="hidden" name="data_date" value="{data_date}">
-                        <div class="followup-form-grid">
-                            <label>跟进记录状态
-                                <select name="status">{_followup_status_options(current_status)}</select>
-                            </label>
-                            <label>负责人 <input name="owner_name" value="{owner_val}"></label>
-                            <label>逾期原因<textarea name="overdue_reason" rows="2">{escape(str(last_reason))}</textarea></label>
-                            <label>跟进方案<textarea name="follow_up_plan" rows="2">{escape(str(last_plan))}</textarea></label>
-                            <label>信托反馈<textarea name="trust_feedback" rows="2"></textarea></label>
-                            <label>补充说明<textarea name="note" rows="2"></textarea></label>
-                            {_render_attachment_uploader(
-                                existing_count=0,
-                                label="附件（图片/PDF 等，最多 10 个）",
-                            )}
-                        </div>
-                        <div class="form-actions" id="followup-form-actions">
-                            <button type="submit" class="btn primary">保存本次跟进</button>
-                            <button type="button" class="btn" id="followup-clear">清空</button>
-                        </div>
-                    </form>
+                <div class="followup-pane{new_pane_active}" id="followup-pane-new">
+                    {_render_followup_create_pane(
+                        product_hidden,
+                        asset_hidden,
+                        bucket_hidden,
+                        workbench_qs,
+                        data_date,
+                        current_status=current_status,
+                        owner_val=owner_val,
+                        last_reason=str(last_reason),
+                        last_plan=str(last_plan),
+                    )}
                 </div>
                 {entry_panes}
             </div>
@@ -1944,12 +2128,19 @@ function initAttachmentUploader(container) {
         });
         var firstError = '';
 
+        function getEffectiveExistingCount() {
+            var shell = container.closest('.followup-entry-shell');
+            if (!shell) return existingCount;
+            var removed = shell.querySelectorAll('.remove-attachment-input').length;
+            return Math.max(0, existingCount - removed);
+        }
+
         for (var i = 0; i < fileList.length; i++) {
             var file = normalizeFile(fileList[i]);
             var key = fileKey(file);
             if (seen[key]) continue;
 
-            if (existingCount + container._attachmentPool.files.length + 1 > maxFiles) {
+            if (getEffectiveExistingCount() + container._attachmentPool.files.length + 1 > maxFiles) {
                 firstError = '附件最多 10 个';
                 break;
             }
@@ -2067,22 +2258,149 @@ document.addEventListener('DOMContentLoaded', function() {
         expandWriteBar();
     }
 
+    function refreshAttachmentUploadLabel(shell) {
+        if (!shell) return;
+        var uploader = shell.querySelector('.attachment-uploader');
+        var toggle = shell.querySelector('.attachment-upload-toggle');
+        if (!uploader || !toggle) return;
+        var maxFiles = parseInt(uploader.dataset.maxFiles || '10', 10);
+        var base = parseInt(uploader.dataset.existingCount || '0', 10);
+        var removed = shell.querySelectorAll('.remove-attachment-input').length;
+        var pending = uploader._attachmentPool ? uploader._attachmentPool.files.length : 0;
+        var current = Math.max(0, base - removed) + pending;
+        toggle.textContent = (toggle.textContent.indexOf('添加') >= 0 ? '添加附件' : '追加附件')
+            + '（' + current + '/' + maxFiles + '）';
+    }
+
+    function restoreRemovedAttachments(shell) {
+        if (!shell) return;
+        shell.querySelectorAll('.attachment-chip-saved.marked-removed').forEach(function(chip) {
+            chip.classList.remove('marked-removed');
+            chip.hidden = false;
+        });
+        shell.querySelectorAll('.remove-attachment-input').forEach(function(el) {
+            el.remove();
+        });
+        shell.querySelectorAll('.followup-saved-attachments-empty').forEach(function(el) {
+            el.remove();
+        });
+        refreshAttachmentUploadLabel(shell);
+    }
+
+    function initSavedAttachmentRemovers(shell) {
+        if (!shell) return;
+        shell.querySelectorAll('.attachment-saved-remove').forEach(function(btn) {
+            if (btn.dataset.bound === '1') return;
+            btn.dataset.bound = '1';
+            btn.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                var chip = btn.closest('.attachment-chip-saved');
+                if (!chip || chip.classList.contains('marked-removed')) return;
+                var aid = chip.dataset.attachmentId;
+                var form = shell.querySelector('.followup-entry-form');
+                if (!form || !aid) return;
+                chip.classList.add('marked-removed');
+                chip.hidden = true;
+                var input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'remove_attachment_ids';
+                input.value = aid;
+                input.className = 'remove-attachment-input';
+                form.appendChild(input);
+                refreshAttachmentUploadLabel(shell);
+                var list = shell.querySelector('.followup-saved-attachments');
+                if (list && !list.querySelector('.attachment-chip-saved:not(.marked-removed)')) {
+                    if (!list.querySelector('.followup-saved-attachments-empty')) {
+                        var span = document.createElement('span');
+                        span.className = 'muted followup-saved-attachments-empty';
+                        span.textContent = '—';
+                        list.appendChild(span);
+                    }
+                }
+            });
+        });
+    }
+
+    function cancelEntryEdit(shell) {
+        if (!shell) return;
+        var form = shell.querySelector('.followup-entry-form');
+        if (form) form.reset();
+        restoreRemovedAttachments(shell);
+        shell.dataset.editing = '0';
+        shell.querySelectorAll('.attachment-upload-panel').forEach(function(panel) {
+            panel.hidden = true;
+        });
+        shell.querySelectorAll('.attachment-upload-toggle').forEach(function(btn) {
+            btn.setAttribute('aria-expanded', 'false');
+        });
+    }
+
+    function startEntryEdit(shell) {
+        if (!shell) return;
+        shell.dataset.editing = '1';
+        initSavedAttachmentRemovers(shell);
+        refreshAttachmentUploadLabel(shell);
+    }
+
+    function paneHasUnsavedEdit(pane) {
+        var shell = pane && pane.querySelector('.followup-entry-shell:not(.followup-entry-shell--create)');
+        return shell && shell.dataset.editing === '1';
+    }
+
     function switchFollowupPane(paneId) {
+        var activePane = document.querySelector('.followup-pane.active');
+        if (activePane && activePane.id !== paneId && paneHasUnsavedEdit(activePane)) {
+            if (!confirm('有未保存修改，是否放弃？')) return;
+            var activeShell = activePane.querySelector('.followup-entry-shell');
+            cancelEntryEdit(activeShell);
+        }
         document.querySelectorAll('.followup-pane').forEach(function(pane) {
             pane.classList.toggle('active', pane.id === paneId);
         });
         document.querySelectorAll('.entry-tab').forEach(function(tab) {
             tab.classList.toggle('active', tab.dataset.pane === paneId);
         });
-        var formActions = document.getElementById('followup-form-actions');
-        if (formActions) {
-            formActions.style.display = paneId === 'followup-pane-new' ? '' : 'none';
-        }
     }
 
     document.querySelectorAll('.entry-tab').forEach(function(tab) {
         tab.addEventListener('click', function() {
             switchFollowupPane(tab.dataset.pane);
+        });
+    });
+
+    document.querySelectorAll('.entry-edit-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            if (btn.disabled) return;
+            var shell = btn.closest('.followup-entry-shell');
+            startEntryEdit(shell);
+        });
+    });
+
+    document.querySelectorAll('.entry-cancel-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            cancelEntryEdit(btn.closest('.followup-entry-shell'));
+        });
+    });
+
+    document.querySelectorAll('.entry-delete-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            if (btn.disabled) return;
+            if (!confirm('确定删除该条跟进记录？此操作不可恢复。')) return;
+            var shell = btn.closest('.followup-entry-shell');
+            var form = shell && shell.querySelector('.entry-delete-form');
+            if (form) form.submit();
+        });
+    });
+
+    document.querySelectorAll('.attachment-upload-toggle').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var wrap = btn.closest('.followup-attachment-upload');
+            var panel = wrap && wrap.querySelector('.attachment-upload-panel');
+            if (!panel) return;
+            var open = panel.hidden;
+            panel.hidden = !open;
+            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
         });
     });
 
@@ -2107,7 +2425,12 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    switchFollowupPane('followup-pane-new');
+    var initialFollowupPane = document.body.dataset.followupPane || 'followup-pane-new';
+    if (document.getElementById(initialFollowupPane)) {
+        switchFollowupPane(initialFollowupPane);
+    } else {
+        switchFollowupPane('followup-pane-new');
+    }
 
     document.querySelectorAll('.timeline-goto-entry').forEach(function(btn) {
         btn.addEventListener('click', function() {
@@ -2219,10 +2542,17 @@ document.addEventListener('DOMContentLoaded', function() {
             if (uploader && uploader.clearAttachmentUploader) {
                 uploader.clearAttachmentUploader();
             }
+            form.querySelectorAll('.attachment-upload-panel').forEach(function(panel) {
+                panel.hidden = true;
+            });
+            form.querySelectorAll('.attachment-upload-toggle').forEach(function(btn) {
+                btn.setAttribute('aria-expanded', 'false');
+            });
         });
     }
 
     document.querySelectorAll('.attachment-uploader').forEach(initAttachmentUploader);
+    document.querySelectorAll('.followup-entry-shell:not(.followup-entry-shell--create)').forEach(initSavedAttachmentRemovers);
 
     window.addEventListener('beforeunload', function() {
         document.querySelectorAll('.attachment-uploader').forEach(function(el) {
@@ -2544,14 +2874,14 @@ _WORKBENCH_SPECIFIC_CSS = """
     .sticky-write-bar[data-expanded="1"] #followup-expand-btn { display: none; }
     .sticky-write-panel { border-top: 1px solid rgba(255,255,255,0.06); }
     .sticky-write-inner {
-        padding: 0.85rem 0.85rem 1rem;
-        max-height: 45vh; overflow-y: auto;
+        padding: 0.65rem 0.85rem 0.75rem;
+        overflow: visible;
     }
     .sticky-write-title { font-size: 0.95rem; color: #f8fafc; }
     .entry-tabs {
         display: flex; flex-wrap: nowrap; gap: 0.35rem;
-        overflow-x: auto; margin: 0.5rem 0 0.65rem;
-        padding-bottom: 0.15rem;
+        overflow-x: auto; margin: 0.35rem 0 0.45rem;
+        padding-bottom: 0.1rem;
     }
     .entry-tab {
         flex-shrink: 0; padding: 0.35rem 0.7rem; border-radius: 999px;
@@ -2563,17 +2893,138 @@ _WORKBENCH_SPECIFIC_CSS = """
     }
     .followup-pane { display: none; }
     .followup-pane.active { display: block; }
-    .followup-readonly p { margin-bottom: 0.45rem; font-size: 0.85rem; }
-    .readonly-hint { margin-bottom: 0.65rem !important; }
-    .entry-cite-btn { margin-top: 0.35rem; }
-    .followup-form-grid {
-        display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 0.75rem;
-        margin: 0.5rem 0;
+    .followup-entry-shell {
+        min-height: 0;
     }
-    .followup-form-grid .span-2 { grid-column: span 2; }
+    .followup-shell-layout {
+        display: flex; flex-direction: column; gap: 0.45rem;
+    }
+    .followup-shell-layout .span-full { width: 100%; }
+    .followup-entry-shell[data-editing="0"] .followup-edit-only { display: none !important; }
+    .followup-entry-shell[data-editing="1"] .followup-view-only { display: none !important; }
+    .followup-entry-shell--create .followup-view-only { display: none !important; }
+    .followup-entry-shell--create .followup-edit-only { display: block; }
+    .followup-entry-shell--create .followup-entry-view-actions,
+    .followup-entry-shell--create .followup-entry-edit-actions { display: none !important; }
+    .followup-entry-shell:not(.followup-entry-shell--create) .followup-create-actions {
+        display: none !important;
+    }
+    .followup-entry-shell:not(.followup-entry-shell--create)[data-editing="0"] .followup-entry-edit-actions {
+        display: none !important;
+    }
+    .followup-entry-shell:not(.followup-entry-shell--create)[data-editing="0"] .followup-entry-view-actions {
+        display: flex; gap: 0.45rem; align-items: center;
+    }
+    .followup-entry-shell:not(.followup-entry-shell--create)[data-editing="1"] .followup-entry-view-actions {
+        display: none !important;
+    }
+    .followup-entry-shell:not(.followup-entry-shell--create)[data-editing="1"] .followup-entry-edit-actions {
+        display: flex; gap: 0.45rem; align-items: center;
+    }
+    .followup-create-actions {
+        display: flex; gap: 0.45rem; align-items: center;
+    }
+    .followup-meta-row {
+        display: grid;
+        grid-template-columns: 9rem 9rem minmax(0, 1fr);
+        gap: 0.45rem 0.65rem;
+        align-items: start;
+    }
+    .followup-body-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.45rem 0.65rem;
+        align-items: start;
+    }
+    .followup-field { display: block; min-width: 0; }
+    .followup-field-label {
+        display: block; font-size: 0.78rem; color: #94a3b8; margin-bottom: 0.15rem;
+    }
+    .followup-scroll-cell label,
+    .followup-scroll-cell.followup-field {
+        font-size: 0.78rem; color: #94a3b8;
+    }
+    .field-display {
+        width: 100%; margin-top: 0; padding: 0.32rem 0.45rem; border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.08); background: rgba(0,0,0,0.15);
+        color: #e2e8f0; font-size: 0.82rem; box-sizing: border-box;
+        line-height: 1.35;
+    }
+    .field-display--meta,
+    .followup-meta-row .field-display:not(.field-display--scrollcell):not(.field-display--attachment) {
+        height: 1.85rem; min-height: 1.85rem; max-height: 1.85rem;
+        display: flex; align-items: center;
+    }
+    .field-display--scrollcell {
+        height: 4.5rem; min-height: 4.5rem; max-height: 4.5rem;
+        overflow-y: auto; overflow-x: hidden;
+        white-space: pre-wrap; word-break: break-word;
+    }
+    .field-display--attachment {
+        height: 2.75rem; min-height: 2.75rem; max-height: 2.75rem;
+        overflow-y: auto; overflow-x: hidden;
+    }
+    .followup-saved-attachments {
+        display: flex; flex-wrap: wrap; gap: 0.35rem;
+        align-items: center; width: 100%;
+    }
+    .attachment-chip-saved {
+        max-width: 100%;
+    }
+    .status-badge {
+        display: inline-flex; align-items: center; width: 100%;
+        height: 1.85rem; min-height: 1.85rem; max-height: 1.85rem;
+        padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.82rem;
+        box-sizing: border-box;
+        background: rgba(56,189,248,0.12); border: 1px solid rgba(56,189,248,0.25);
+        color: #e2e8f0;
+    }
+    .followup-meta-row select,
+    .followup-meta-row input {
+        width: 100%; margin-top: 0; padding: 0.32rem 0.45rem; border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25);
+        color: #e2e8f0; box-sizing: border-box;
+        height: 1.85rem; min-height: 1.85rem; max-height: 1.85rem;
+        font-size: 0.82rem;
+    }
+    .followup-actions-bar {
+        display: flex; flex-wrap: nowrap; gap: 0.45rem; align-items: center;
+        height: 2rem; min-height: 2rem; margin-top: 0.45rem;
+        flex-shrink: 0;
+    }
+    .followup-actions-bar .btn[disabled] {
+        opacity: 0.45; cursor: not-allowed; pointer-events: none;
+    }
+    .followup-textarea-scroll,
+    .followup-scroll-cell textarea {
+        width: 100%; margin-top: 0; padding: 0.32rem 0.45rem; border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25);
+        color: #e2e8f0; box-sizing: border-box; font-size: 0.82rem;
+        height: 4.5rem; min-height: 4.5rem; max-height: 4.5rem;
+        overflow-y: auto; resize: none; display: block;
+    }
+    .followup-attachment-zone { min-height: 6.35rem; }
+    .followup-attachment-spacer {
+        height: 2.25rem; min-height: 2.25rem; margin-top: 0.1rem;
+    }
+    .followup-entry-shell--create .followup-attachment-spacer { display: none !important; }
+    .followup-attachment-upload-slot { margin-top: 0.1rem; }
+    .followup-attachment-upload { margin-top: 0; }
+    .attachment-upload-toggle { margin-bottom: 0.25rem; }
+    .attachment-upload-panel { margin-top: 0.15rem; }
+    .attachment-dropzone-compact {
+        padding: 0.55rem 0.65rem !important;
+    }
+    .attachment-dropzone-compact strong {
+        font-size: 0.82rem !important; margin-bottom: 0.15rem !important;
+    }
+    .attachment-dropzone-compact span {
+        font-size: 0.72rem !important;
+    }
+    .entry-cite-btn { margin-top: 0; }
     @media (max-width: 700px) {
-        .followup-form-grid { grid-template-columns: 1fr; }
-        .followup-form-grid .span-2 { grid-column: span 1; }
+        .followup-meta-row { grid-template-columns: 1fr; }
+        .followup-body-grid { grid-template-columns: 1fr; }
     }
     .followup-form label { display: block; font-size: 0.82rem; }
     .followup-form input, .followup-form textarea, .followup-form select {

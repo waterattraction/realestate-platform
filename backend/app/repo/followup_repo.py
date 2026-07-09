@@ -2,6 +2,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.repo._serialize import row_to_dict, rows_to_dicts
+from app.service.followup_upload import upload_root
+
+_MUTABLE_ENTRY_STATUSES = frozenset({"open", "in_progress"})
 
 
 class FollowupRepo:
@@ -295,7 +298,7 @@ class FollowupRepo:
             "status": status,
         }
 
-    def update_in_progress_entry(
+    def update_entry(
         self,
         *,
         entry_id: int,
@@ -334,8 +337,8 @@ class FollowupRepo:
             ).fetchone()
             if row is None:
                 raise ValueError("Followup entry not found")
-            if row.status_snapshot != "in_progress":
-                raise ValueError("Only in_progress followup entries can be edited")
+            if row.status_snapshot not in _MUTABLE_ENTRY_STATUSES:
+                raise ValueError("Only open or in_progress followup entries can be edited")
 
             case_id = int(row.case_id)
             conn.execute(
@@ -397,6 +400,198 @@ class FollowupRepo:
                 )
 
         return {"case_id": case_id, "entry_id": entry_id, "status": status}
+
+    update_in_progress_entry = update_entry
+
+    def _unlink_attachment_files(self, stored_paths: list[str]) -> None:
+        root = upload_root().resolve()
+        for rel in stored_paths:
+            try:
+                full = (upload_root() / rel).resolve()
+                if str(full).startswith(str(root)) and full.is_file():
+                    full.unlink()
+            except OSError:
+                pass
+
+    def delete_attachments(
+        self,
+        *,
+        attachment_ids: list[int],
+        entry_id: int,
+        trust_product_id: int,
+        asset_code: str,
+    ) -> int:
+        if not attachment_ids:
+            return 0
+        unique_ids = list(dict.fromkeys(int(i) for i in attachment_ids))
+        stored_paths: list[str] = []
+
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT e.id, e.status_snapshot
+                    FROM trust_overdue_followup_entries e
+                    INNER JOIN trust_overdue_followup_cases c ON c.id = e.case_id
+                    WHERE e.id = :entry_id
+                      AND c.trust_product_id = :trust_product_id
+                      AND c.asset_code = :asset_code
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "entry_id": entry_id,
+                    "trust_product_id": trust_product_id,
+                    "asset_code": asset_code,
+                },
+            ).fetchone()
+            if row is None:
+                raise ValueError("Followup entry not found")
+            if row.status_snapshot not in _MUTABLE_ENTRY_STATUSES:
+                raise ValueError("Only open or in_progress followup entries can be edited")
+
+            att_rows = conn.execute(
+                text(
+                    """
+                    SELECT id, stored_path
+                    FROM trust_overdue_followup_attachments
+                    WHERE entry_id = :entry_id
+                      AND id = ANY(:attachment_ids)
+                    """
+                ),
+                {"entry_id": entry_id, "attachment_ids": unique_ids},
+            ).fetchall()
+            if len(att_rows) != len(unique_ids):
+                raise ValueError("Attachment not found")
+
+            stored_paths = [str(r.stored_path) for r in att_rows if r.stored_path]
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM trust_overdue_followup_attachments
+                    WHERE entry_id = :entry_id
+                      AND id = ANY(:attachment_ids)
+                    """
+                ),
+                {"entry_id": entry_id, "attachment_ids": unique_ids},
+            )
+
+        self._unlink_attachment_files(stored_paths)
+        return len(unique_ids)
+
+    def delete_entry(
+        self,
+        *,
+        entry_id: int,
+        trust_product_id: int,
+        asset_code: str,
+        updated_by: str | None = None,
+    ) -> dict:
+        stored_paths: list[str] = []
+        case_id: int
+
+        with self._engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT e.id, e.case_id, e.status_snapshot
+                    FROM trust_overdue_followup_entries e
+                    INNER JOIN trust_overdue_followup_cases c ON c.id = e.case_id
+                    WHERE e.id = :entry_id
+                      AND c.trust_product_id = :trust_product_id
+                      AND c.asset_code = :asset_code
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "entry_id": entry_id,
+                    "trust_product_id": trust_product_id,
+                    "asset_code": asset_code,
+                },
+            ).fetchone()
+            if row is None:
+                raise ValueError("Followup entry not found")
+            if row.status_snapshot not in _MUTABLE_ENTRY_STATUSES:
+                raise ValueError("Cannot delete resolved or closed followup entries")
+
+            case_id = int(row.case_id)
+            att_rows = conn.execute(
+                text(
+                    """
+                    SELECT stored_path
+                    FROM trust_overdue_followup_attachments
+                    WHERE entry_id = :entry_id
+                    """
+                ),
+                {"entry_id": entry_id},
+            ).fetchall()
+            stored_paths = [str(r.stored_path) for r in att_rows if r.stored_path]
+
+            conn.execute(
+                text(
+                    "DELETE FROM trust_overdue_followup_attachments WHERE entry_id = :entry_id"
+                ),
+                {"entry_id": entry_id},
+            )
+            conn.execute(
+                text("DELETE FROM trust_overdue_followup_entries WHERE id = :entry_id"),
+                {"entry_id": entry_id},
+            )
+
+            latest = conn.execute(
+                text(
+                    """
+                    SELECT id, status_snapshot, owner_name, created_at
+                    FROM trust_overdue_followup_entries
+                    WHERE case_id = :case_id
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """
+                ),
+                {"case_id": case_id},
+            ).fetchone()
+
+            if latest:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE trust_overdue_followup_cases
+                        SET status = :status,
+                            owner_name = :owner_name,
+                            last_follow_up_at = :last_follow_up_at,
+                            updated_by = :updated_by,
+                            closed_at = CASE
+                                WHEN :status IN ('resolved', 'closed') THEN NOW()
+                                ELSE NULL
+                            END
+                        WHERE id = :case_id
+                        """
+                    ),
+                    {
+                        "case_id": case_id,
+                        "status": latest.status_snapshot,
+                        "owner_name": latest.owner_name,
+                        "last_follow_up_at": latest.created_at,
+                        "updated_by": updated_by,
+                    },
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE trust_overdue_followup_cases
+                        SET status = 'closed',
+                            closed_at = NOW(),
+                            updated_by = :updated_by
+                        WHERE id = :case_id
+                        """
+                    ),
+                    {"case_id": case_id, "updated_by": updated_by},
+                )
+
+        self._unlink_attachment_files(stored_paths)
+
+        return {"case_id": case_id, "entry_id": entry_id, "deleted": True}
 
     def insert_attachments(
         self,

@@ -3603,6 +3603,8 @@ def overdue_workbench_page(
     list_product_id: str | None = None,
     trust_asset_id: str | None = None,
     new_followup: str | None = None,
+    followup_expanded: str | None = None,
+    followup_entry_id: str | None = None,
     trust_marker: str | None = None,
     followup_status: str | None = None,
 ):
@@ -3646,6 +3648,11 @@ def overdue_workbench_page(
                 )
             if query_utils.parse_optional_int(new_followup):
                 redirect_params["new_followup"] = "1"
+            if query_utils.parse_optional_int(followup_expanded):
+                redirect_params["followup_expanded"] = "1"
+            parsed_entry_id = query_utils.parse_optional_int(followup_entry_id)
+            if parsed_entry_id:
+                redirect_params["followup_entry_id"] = str(parsed_entry_id)
             return RedirectResponse(
                 url=f"/overdue/workbench?{urlencode(redirect_params)}",
                 status_code=302,
@@ -3669,6 +3676,8 @@ def overdue_workbench_page(
     html = render_overdue_workbench_html(
         dto,
         new_followup=bool(query_utils.parse_optional_int(new_followup)),
+        followup_expanded=bool(query_utils.parse_optional_int(followup_expanded)),
+        followup_entry_id=query_utils.parse_optional_int(followup_entry_id),
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
