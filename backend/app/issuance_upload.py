@@ -18,6 +18,7 @@ from sqlalchemy.engine import Connection
 from app import assetinfo_cleanse as cleanse
 from app import issuance_cleanse as ic
 from app import query_utils
+from app.repo.location_repo import LocationRepo
 
 AMBIGUOUS_CONFLICT_REASON = "Sheet类型冲突：名称与表头识别结果不一致"
 ISSUANCE_FILE_KEYWORDS = ("发行资产", "已发行", "入池", "基础资产清单", "房源明细")
@@ -759,6 +760,15 @@ def import_issuance_sheet(
         params["issue_date"] = issue_date
         conn.execute(insert_sql, params)
     conn.commit()
+
+    LocationRepo(conn.engine).sync_locations_after_sheet_import(
+        conn,
+        trust_product_id=trust_product_id,
+        issue_date=issue_date,
+        file_name=file_name,
+        sheet_name=sheet_name,
+    )
+
     return len(rows), deleted
 
 

@@ -22,6 +22,7 @@ services:
       DATABASE_URL: postgresql://admin:ChangeThisPassword123!@postgres:5432/realestate 
       ASSETINFO_REPO_ROOT: /data/repo
       ASSET_UPLOAD_DIR: /data/uploads
+      AMAP_API_KEY: ${AMAP_API_KEY:-}
     volumes:
       - .:/data/repo:ro
       - upload_data:/data/uploads

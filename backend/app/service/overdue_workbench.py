@@ -10,6 +10,7 @@ from app.repo.marks_repo import MarksRepo
 from app.repo.monitor_repo import MonitorRepo
 from app.repo.repayment_repo import RepaymentRepo
 from app.service import checks_service
+from app.service.location_service import build_location_service
 from app.service.ops_service import suggest_ops
 from app.overdue.buckets import matches_delinquency_bucket_filter
 
@@ -55,6 +56,7 @@ class OverdueWorkbenchService:
             "checks": None,
             "trust_mark": None,
             "ops": None,
+            "spatial_hint": None,
             "followup_case": None,
             "timeline": [],
             "queue": [],
@@ -100,6 +102,9 @@ class OverdueWorkbenchService:
                 trust_product_id, resolved_asset, resolved_date
             )
             empty["ops"] = suggest_ops(self._engine, identity_id)
+            empty["spatial_hint"] = build_location_service(self._engine).get_spatial_hint(
+                trust_product_id, resolved_asset
+            )
             return empty
 
         repayment_total = self._repayment.sum_by_product_asset_code(
@@ -276,6 +281,9 @@ class OverdueWorkbenchService:
         summary["last_follow_up_owner"] = last_follow_up_owner
 
         product_queue = self.get_product_queue(trust_product_id, resolved_date)
+        spatial_hint = build_location_service(self._engine).get_spatial_hint(
+            trust_product_id, resolved_asset
+        )
 
         return {
             "trust_product_id": trust_product_id,
@@ -295,6 +303,7 @@ class OverdueWorkbenchService:
             "checks": custody_checks,
             "trust_mark": trust_mark,
             "ops": ops,
+            "spatial_hint": spatial_hint,
             "followup_case": followup_case,
             "followup_entries": followup_entries,
             "timeline": timeline,

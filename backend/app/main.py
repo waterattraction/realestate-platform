@@ -17,6 +17,7 @@ from app.api import asset_workbench
 from app.api import overdue_ops
 from app.api import overdue_workbench
 from app.api import followups
+from app.api.spatial import build_spatial_router
 from app import assetinfo_html
 from app import assetinfo_pipeline
 from app import assetinfo_upload
@@ -61,6 +62,7 @@ app.include_router(followups.router)
 
 get_current_user = auth.make_current_user_dependency(engine)
 get_page_user = auth.make_page_user_dependency(engine)
+app.include_router(build_spatial_router(engine, get_page_user, get_current_user))
 
 
 def _safe_next_path(next_url: str) -> str:
@@ -3243,6 +3245,16 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                     </div>
                     <div class="risk-card-value">{monitor_count_display}</div>
                     <div class="risk-card-foot">快照日 {dash_date(snapshot_date)} →</div>
+                </a>
+                <a href="/spatial/map" class="risk-card">
+                    <div class="risk-card-head">
+                        <span class="risk-card-label">地图监控</span>
+                        <span class="risk-card-icon risk-icon-monitor" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
+                        </span>
+                    </div>
+                    <div class="risk-card-value">按城市</div>
+                    <div class="risk-card-foot">监控快照 · M 级着色 →</div>
                 </a>
             </div>
         </section>

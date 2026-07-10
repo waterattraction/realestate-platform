@@ -1003,7 +1003,7 @@ def _render_panels(dto: dict, asset: dict, workbench_qs) -> str:
             asset.get("trust_mark") or {},
             asset.get("followup_entries") or [],
         )}</div>
-        <div class="grid-ops">{_panel_ops(asset.get("ops"), asset.get("summary") or {})}</div>
+        <div class="grid-ops">{_panel_ops(asset.get("ops"), asset.get("summary") or {}, asset.get("spatial_hint"))}</div>
     </div>"""
 
 
@@ -1284,11 +1284,16 @@ def _panel_trust_mark(mark: dict, dto: dict, asset: dict) -> str:
     </div>"""
 
 
-def _panel_ops(ops: dict | None, summary: dict) -> str:
+def _panel_ops(ops: dict | None, summary: dict, spatial_hint: dict | None = None) -> str:
     alert_cls = " ops-panel-alert" if summary.get("has_check_anomaly") else ""
     if not ops:
+        spatial_line = ""
+        if spatial_hint and not spatial_hint.get("ready", True):
+            spatial_line = (
+                f'<p class="muted tiny">{escape(str(spatial_hint.get("label") or ""))}</p>'
+            )
         return f"""<div class="info-card ops-panel{alert_cls}"><h3 class="info-card-title">Ops 建议（只读）</h3>
-            <p class="empty">暂无建议</p></div>"""
+            <p class="empty">暂无建议</p>{spatial_line}</div>"""
     actions = ops.get("recommended_actions") or []
     action_rows = "".join(
         f"<li>{escape(str(a.get('label') or a.get('action_type') or '—'))}</li>" for a in actions
@@ -1301,6 +1306,11 @@ def _panel_ops(ops: dict | None, summary: dict) -> str:
         if breached
         else '<span class="badge ok-badge">正常</span>'
     )
+    spatial_line = ""
+    if spatial_hint and not spatial_hint.get("ready", True):
+        spatial_line = (
+            f'<p class="muted tiny">{escape(str(spatial_hint.get("label") or ""))}</p>'
+        )
     return f"""<div class="info-card ops-panel{alert_cls}">
         <h3 class="info-card-title">Ops 建议（只读）</h3>
         <div class="info-card-body">
@@ -1309,6 +1319,7 @@ def _panel_ops(ops: dict | None, summary: dict) -> str:
             <p>SLA 截止 {sla_txt} {sla_badge}</p>
             <p class="lbl">建议动作</p><ul class="ops-list">{action_rows}</ul>
             <p class="muted tiny">建议不等于已执行，请在底栏录入跟进</p>
+            {spatial_line}
         </div>
     </div>"""
 
