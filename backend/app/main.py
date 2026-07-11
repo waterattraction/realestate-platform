@@ -142,10 +142,15 @@ def fmt_recon_money(value: float, *, passed: bool) -> str:
     return f'<span class="{css}">{fmt_money(value)}</span>'
 
 
-def fmt_cross_check_badge(passed: bool) -> str:
+def fmt_cross_check_badge(
+    passed: bool,
+    *,
+    pass_label: str = "通过",
+    fail_label: str = "不通过",
+) -> str:
     if passed:
-        return '<span class="badge ok-badge">通过</span>'
-    return '<span class="badge fail-badge">不通过</span>'
+        return f'<span class="badge ok-badge">{escape(pass_label)}</span>'
+    return f'<span class="badge fail-badge">{escape(fail_label)}</span>'
 
 
 def fmt_rate(value: float | None) -> str:
@@ -588,11 +593,22 @@ def _reconciliation_query_sql_by_asset(monitor_filter: str, trust_product_id: in
         repayment_asset AS (
             SELECT
                 r.trust_product_id,
-                ta.asset_code,
+                r.asset_code,
                 COALESCE(SUM(r.actual_repayment_amount), 0) AS repayment_detail_total
             FROM trust_repayment_detail_records r
-            JOIN trust_assets ta ON ta.id = r.trust_asset_id
-            WHERE 1=1
+            WHERE r.asset_code IS NOT NULL
+            {product_filter}
+            GROUP BY r.trust_product_id, r.asset_code
+        ),
+        code_mismatch_asset AS (
+            SELECT
+                r.trust_product_id,
+                ta.asset_code AS canonical_asset_code,
+                COUNT(*) AS code_mismatch_count,
+                COALESCE(SUM(r.actual_repayment_amount), 0) AS code_mismatch_amount
+            FROM trust_repayment_detail_records r
+            INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+            WHERE r.asset_code IS DISTINCT FROM ta.asset_code
             {product_filter}
             GROUP BY r.trust_product_id, ta.asset_code
         )
@@ -607,12 +623,17 @@ def _reconciliation_query_sql_by_asset(monitor_filter: str, trust_product_id: in
             ma.remaining_amount,
             (ma.remaining_amount - ma.initial_transfer_amount + ma.repaid_amount) AS balance_remainder,
             COALESCE(ra.repayment_detail_total, 0) AS repayment_detail_total,
-            (ma.repaid_amount - COALESCE(ra.repayment_detail_total, 0)) AS cross_diff
+            (ma.repaid_amount - COALESCE(ra.repayment_detail_total, 0)) AS cross_diff,
+            COALESCE(cm.code_mismatch_count, 0) AS code_mismatch_count,
+            COALESCE(cm.code_mismatch_amount, 0) AS code_mismatch_amount
         FROM monitor_asset ma
         INNER JOIN trust_products tp ON tp.id = ma.trust_product_id
         LEFT JOIN repayment_asset ra
             ON ra.trust_product_id = ma.trust_product_id
            AND ra.asset_code = ma.asset_code
+        LEFT JOIN code_mismatch_asset cm
+            ON cm.trust_product_id = ma.trust_product_id
+           AND cm.canonical_asset_code = ma.asset_code
         ORDER BY ma.trust_product_id, ma.asset_code
     """
 
@@ -623,6 +644,8 @@ def _reconciliation_item_from_row(row) -> dict:
     repaid_amount = float(row.repaid_amount)
     balance_passed = abs(balance_remainder) <= RECONCILIATION_TOLERANCE
     cross_passed = abs(cross_diff) <= RECONCILIATION_TOLERANCE
+    code_mismatch_count = int(getattr(row, "code_mismatch_count", 0) or 0)
+    code_mismatch_passed = code_mismatch_count == 0
     return {
         "trust_product_id": row.trust_product_id,
         "trust_product_name": row.trust_product_name,
@@ -636,9 +659,12 @@ def _reconciliation_item_from_row(row) -> dict:
         "balance_passed": balance_passed,
         "cross_diff": cross_diff,
         "cross_passed": cross_passed,
+        "code_mismatch_count": code_mismatch_count,
+        "code_mismatch_amount": float(getattr(row, "code_mismatch_amount", 0) or 0),
+        "code_mismatch_passed": code_mismatch_passed,
         "monitor_repaid_amount": repaid_amount,
         "repayment_detail_total": float(row.repayment_detail_total),
-        "has_anomaly": not balance_passed or not cross_passed,
+        "has_anomaly": not balance_passed or not cross_passed or not code_mismatch_passed,
     }
 
 
@@ -648,7 +674,52 @@ def _reconciliation_summary(items: list[dict]) -> dict[str, int]:
         "balance_fail_count": sum(1 for item in items if not item["balance_passed"]),
         "cross_pass_count": sum(1 for item in items if item["cross_passed"]),
         "cross_fail_count": sum(1 for item in items if not item["cross_passed"]),
+        "code_mismatch_pass_count": sum(1 for item in items if item["code_mismatch_passed"]),
+        "code_mismatch_fail_count": sum(1 for item in items if not item["code_mismatch_passed"]),
     }
+
+
+def _fetch_repayment_code_mismatch_alerts(
+    conn,
+    trust_product_id: int | None = None,
+) -> list[dict]:
+    """还款事实表 asset_code 与 trust_assets 权威主编号不一致的独立告警。"""
+    product_filter = (
+        "AND r.trust_product_id = :trust_product_id" if trust_product_id is not None else ""
+    )
+    params: dict = {}
+    if trust_product_id is not None:
+        params["trust_product_id"] = trust_product_id
+    rows = conn.execute(
+        text(f"""
+            SELECT
+                r.trust_product_id,
+                tp.name AS trust_product_name,
+                ta.asset_code AS canonical_asset_code,
+                r.asset_code AS stored_asset_code,
+                COUNT(*) AS row_count,
+                COALESCE(SUM(r.actual_repayment_amount), 0) AS amount_sum
+            FROM trust_repayment_detail_records r
+            INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+            INNER JOIN trust_products tp ON tp.id = r.trust_product_id
+            WHERE r.asset_code IS DISTINCT FROM ta.asset_code
+            {product_filter}
+            GROUP BY r.trust_product_id, tp.name, ta.asset_code, r.asset_code
+            ORDER BY r.trust_product_id, ta.asset_code, r.asset_code
+        """),
+        params,
+    )
+    return [
+        {
+            "trust_product_id": row.trust_product_id,
+            "trust_product_name": row.trust_product_name,
+            "canonical_asset_code": row.canonical_asset_code,
+            "stored_asset_code": row.stored_asset_code,
+            "row_count": int(row.row_count),
+            "amount_sum": float(row.amount_sum),
+        }
+        for row in rows
+    ]
 
 
 RECONCILIATION_BASIS_LABEL = "监控快照日 + 全量还款明细"
@@ -865,6 +936,7 @@ def fetch_overdue_overview(
             FROM ({_reconciliation_query_sql_by_asset(recon_filter, trust_product_id)}) recon
             WHERE ABS(recon.balance_remainder) > :tolerance
                OR ABS(recon.cross_diff) > :tolerance
+               OR recon.code_mismatch_count > 0
         """),
         {**recon_params, "tolerance": RECONCILIATION_TOLERANCE},
     ).fetchone()
@@ -1163,6 +1235,9 @@ def fetch_reconciliation(conn, trust_product_id: int | None = None, data_date: s
             "balance_fail_count": 0,
             "cross_pass_count": 0,
             "cross_fail_count": 0,
+            "code_mismatch_pass_count": 0,
+            "code_mismatch_fail_count": 0,
+            "code_mismatch_alerts": _fetch_repayment_code_mismatch_alerts(conn, trust_product_id),
         }
 
     resolved_data_date = str(row.data_date)
@@ -1185,6 +1260,7 @@ def fetch_reconciliation(conn, trust_product_id: int | None = None, data_date: s
     items = [_reconciliation_item_from_row(r) for r in rows]
     anomaly_count = sum(1 for item in items if item["has_anomaly"])
     summary = _reconciliation_summary(items)
+    code_mismatch_alerts = _fetch_repayment_code_mismatch_alerts(conn, trust_product_id)
 
     return {
         "data_date": resolved_data_date,
@@ -1192,6 +1268,7 @@ def fetch_reconciliation(conn, trust_product_id: int | None = None, data_date: s
         "total_count": len(items),
         "anomaly_count": anomaly_count,
         "basis": RECONCILIATION_BASIS_LABEL,
+        "code_mismatch_alerts": code_mismatch_alerts,
         **summary,
     }
 
@@ -1209,6 +1286,7 @@ def recalculate_reconciliation(
     total = int(payload["total_count"])
     balance_fail = int(payload["balance_fail_count"])
     cross_fail = int(payload["cross_fail_count"])
+    code_mismatch_fail = int(payload["code_mismatch_fail_count"])
     return {
         "data_date": payload.get("data_date"),
         "trust_product_id": trust_product_id,
@@ -1219,10 +1297,14 @@ def recalculate_reconciliation(
         "balance_fail_count": balance_fail,
         "cross_pass_count": int(payload["cross_pass_count"]),
         "cross_fail_count": cross_fail,
+        "code_mismatch_pass_count": int(payload["code_mismatch_pass_count"]),
+        "code_mismatch_fail_count": code_mismatch_fail,
+        "code_mismatch_alerts": payload.get("code_mismatch_alerts") or [],
         "message": (
-            f"已重新计算 {total} 条托管房源金额核对"
+            f"已重新计算 {total} 条资产主编号金额核对"
             f"，剩余差额异常：{balance_fail} 条"
             f"，跨表检查不通过：{cross_fail} 条"
+            f"，编码不一致：{code_mismatch_fail} 条"
         ),
     }
 
@@ -1279,18 +1361,19 @@ def recalculate_overdue_days(
                 overdue_days_as_of = :today,
                 updated_at = NOW()
             FROM (
-                SELECT trust_product_id, trust_asset_id, MAX(repayment_date) AS max_rd
-                FROM trust_repayment_detail_records
-                GROUP BY trust_product_id, trust_asset_id
+                SELECT r.trust_product_id, ta.asset_code, MAX(r.repayment_date) AS max_rd
+                FROM trust_repayment_detail_records r
+                INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                GROUP BY r.trust_product_id, ta.asset_code
             ) rp
             WHERE m.trust_product_id = rp.trust_product_id
-              AND m.trust_asset_id = rp.trust_asset_id
+              AND m.asset_code = rp.asset_code
               AND {scope_sql}
         """),
         params,
     )
 
-    without_repayment = conn.execute(
+    without_repayment_from_issue = conn.execute(
         text(f"""
             UPDATE trust_asset_monitor_records m
             SET
@@ -1298,15 +1381,76 @@ def recalculate_overdue_days(
                 max_payment_date = NULL,
                 overdue_days = CASE
                     WHEN m.remaining_amount <= :tolerance THEN NULL
-                    ELSE 0
+                    ELSE GREATEST(0, :today - iss.min_issue_date)
                 END,
+                overdue_days_as_of = :today,
+                updated_at = NOW()
+            FROM (
+                SELECT
+                    m2.id AS monitor_id,
+                    COALESCE(ip.min_issue_date, ia.min_issue_date) AS min_issue_date
+                FROM trust_asset_monitor_records m2
+                LEFT JOIN (
+                    SELECT
+                        i.trust_product_id,
+                        regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '') AS custody_norm,
+                        MIN(i.issue_date) AS min_issue_date
+                    FROM trust_product_issuance_asset_records i
+                    GROUP BY i.trust_product_id, custody_norm
+                ) ip
+                  ON ip.trust_product_id = m2.trust_product_id
+                 AND ip.custody_norm = regexp_replace(
+                     COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\\.0$', ''
+                 )
+                LEFT JOIN (
+                    SELECT
+                        regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '') AS custody_norm,
+                        MIN(i.issue_date) AS min_issue_date
+                    FROM trust_product_issuance_asset_records i
+                    GROUP BY custody_norm
+                ) ia
+                  ON ia.custody_norm = regexp_replace(
+                      COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\\.0$', ''
+                  )
+                WHERE {scope_sql.replace('m.', 'm2.')}
+                  AND COALESCE(ip.min_issue_date, ia.min_issue_date) IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM trust_repayment_detail_records r
+                      INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                      WHERE r.trust_product_id = m2.trust_product_id
+                        AND ta.asset_code = m2.asset_code
+                  )
+            ) iss
+            WHERE m.id = iss.monitor_id
+        """),
+        params,
+    )
+
+    missing_issuance = conn.execute(
+        text(f"""
+            UPDATE trust_asset_monitor_records m
+            SET
+                last_payment_date = NULL,
+                max_payment_date = NULL,
+                overdue_days = NULL,
                 overdue_days_as_of = :today,
                 updated_at = NOW()
             WHERE {scope_sql}
               AND NOT EXISTS (
-                  SELECT 1 FROM trust_repayment_detail_records r
+                  SELECT 1
+                  FROM trust_repayment_detail_records r
+                  INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
                   WHERE r.trust_product_id = m.trust_product_id
-                    AND r.trust_asset_id = m.trust_asset_id
+                    AND ta.asset_code = m.asset_code
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM trust_product_issuance_asset_records i
+                  WHERE regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '')
+                      = regexp_replace(
+                          COALESCE(m.custody_asset_code, m.asset_code, ''), '\\.0$', ''
+                      )
               )
         """),
         params,
@@ -1331,11 +1475,14 @@ def recalculate_overdue_days(
         params,
     ).fetchone()
     updated_count = int(total_row.cnt) if total_row else 0
-    missing_count = int(without_repayment.rowcount or 0)
+    no_repayment_from_issue_count = int(without_repayment_from_issue.rowcount or 0)
+    missing_issuance_count = int(missing_issuance.rowcount or 0)
 
     warnings: list[str] = []
-    if missing_count > 0:
-        warnings.append(f"部分资产缺少还款日期，已按 0 天处理（{missing_count} 条）")
+    if missing_issuance_count > 0:
+        warnings.append(
+            f"部分资产无还款明细且无发行日，逾期天数置空（{missing_issuance_count} 条）"
+        )
 
     return {
         "data_date": str(resolved_dd),
@@ -1343,12 +1490,19 @@ def recalculate_overdue_days(
         "as_of_date": str(today),
         "overdue_days_as_of": str(today),
         "updated_count": updated_count,
-        "missing_repayment_count": missing_count,
+        "no_repayment_from_issue_count": no_repayment_from_issue_count,
+        "missing_issuance_count": missing_issuance_count,
+        "missing_repayment_count": no_repayment_from_issue_count + missing_issuance_count,
         "with_repayment_updated": int(with_repayment.rowcount or 0),
         "warnings": warnings,
         "message": (
             f"已重新计算 {updated_count} 条监控记录"
-            + (f"，缺少还款日期 {missing_count} 条" if missing_count else "")
+            + (
+                f"，无还款按发行日计算 {no_repayment_from_issue_count} 条"
+                if no_repayment_from_issue_count
+                else ""
+            )
+            + (f"，无发行日置空 {missing_issuance_count} 条" if missing_issuance_count else "")
         ),
         "risk_hint": "逾期天数已更新，如需同步风险评分，请单独执行风险评分重算。",
     }
@@ -1500,17 +1654,25 @@ def _render_custody_es_table_rows(items: list) -> str:
 
 def _render_reconciliation_table_rows(reconciliation: list) -> str:
     if not reconciliation:
-        return '<tr class="recon-empty"><td colspan="10" class="empty">暂无核对记录</td></tr>'
+        return '<tr class="recon-empty"><td colspan="11" class="empty">暂无核对记录</td></tr>'
     rows = ""
     for item in reconciliation:
         bal_ok = item["balance_passed"]
         cross_ok = item["cross_passed"]
+        code_ok = item.get("code_mismatch_passed", True)
         custody_count = item.get("custody_count", 1)
         custody_note = f'<span class="recon-custody-count" title="含 {custody_count} 个托管房源号">×{custody_count}</span>' if custody_count > 1 else ""
+        code_title = ""
+        if not code_ok:
+            code_title = (
+                f' title="还款明细 {item.get("code_mismatch_count", 0)} 笔主编号与 trust_assets 不一致，'
+                f'涉及 ¥{item.get("code_mismatch_amount", 0):,.2f}"'
+            )
         rows += f"""
             <tr class="recon-row"
                 data-balance-passed="{"1" if bal_ok else "0"}"
                 data-cross-passed="{"1" if cross_ok else "0"}"
+                data-code-mismatch-passed="{"1" if code_ok else "0"}"
                 data-has-anomaly="{"1" if item["has_anomaly"] else "0"}">
                 <td>{escape(item["asset_code"])}{custody_note}</td>
                 <td>{escape(item["trust_product_name"])}</td>
@@ -1519,11 +1681,34 @@ def _render_reconciliation_table_rows(reconciliation: list) -> str:
                 <td>{fmt_recon_money(item["initial_transfer_amount"], passed=True)}</td>
                 <td>{fmt_recon_money(item["repaid_amount"], passed=True)}</td>
                 <td>{fmt_cross_check_badge(cross_ok)}</td>
+                <td{code_title}>{fmt_cross_check_badge(code_ok, pass_label="一致", fail_label="不一致")}</td>
                 <td>{fmt_recon_money(item["monitor_repaid_amount"], passed=True)}</td>
                 <td>{fmt_recon_money(item["repayment_detail_total"], passed=True)}</td>
             </tr>
         """
     return rows
+
+
+def _render_code_mismatch_alert_banner(alerts: list) -> str:
+    if not alerts:
+        return ""
+    lines = ""
+    for alert in alerts[:10]:
+        lines += (
+            f"<li><strong>{escape(alert['canonical_asset_code'])}</strong> "
+            f"（{escape(alert['trust_product_name'])}）："
+            f"还款明细写入主编号 <code>{escape(alert['stored_asset_code'])}</code>，"
+            f"{int(alert['row_count'])} 笔 / {fmt_money(float(alert['amount_sum']))}</li>"
+        )
+    more = ""
+    if len(alerts) > 10:
+        more = f'<li class="muted">… 另有 {len(alerts) - 10} 组编码不一致</li>'
+    return f"""
+        <div class="recon-code-alert" role="alert">
+            <strong>编码不一致告警</strong>：以下还款明细的 <code>asset_code</code> 与底层资产权威主编号不符，将影响跨表核对与还款明细筛选。
+            <ul>{lines}{more}</ul>
+        </div>
+    """
 
 
 def render_overdue_html(
@@ -1533,6 +1718,7 @@ def render_overdue_html(
     *,
     filters: dict | None = None,
     products: list | None = None,
+    code_mismatch_alerts: list | None = None,
 ):
     buckets = overview.get("top_overdue_by_bucket") or {}
     tab_defs = [
@@ -1652,6 +1838,8 @@ def render_overdue_html(
     recon_rows = _render_reconciliation_table_rows(reconciliation)
     recon_anomaly_count = sum(1 for item in reconciliation if item.get("has_anomaly"))
     recon_total_count = len(reconciliation)
+    code_mismatch_alerts = code_mismatch_alerts or []
+    code_mismatch_banner = _render_code_mismatch_alert_banner(code_mismatch_alerts)
     data_date = overview.get("data_date") or "—"
     trust_product_id = overview.get("trust_product_id")
     recon_data_date = data_date
@@ -1856,6 +2044,13 @@ def render_overdue_html(
         .recalc-msg.err {{
             background: rgba(248, 113, 113, 0.12); border-color: rgba(248, 113, 113, 0.35); color: #fecaca;
         }}
+        .recon-code-alert {{
+            margin-bottom: 0.75rem; padding: 0.75rem 1rem; border-radius: 8px;
+            background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.35);
+            color: #fcd34d; font-size: 0.88rem; line-height: 1.5;
+        }}
+        .recon-code-alert ul {{ margin: 0.5rem 0 0 1.1rem; padding: 0; }}
+        .recon-code-alert li {{ margin: 0.25rem 0; }}
         .meta-hint {{ font-size: 0.82rem; color: #64748b; }}
         .meta-warn {{ color: #fbbf24; }}
         header p strong {{ color: #e2e8f0; font-weight: 600; }}
@@ -1912,6 +2107,7 @@ def render_overdue_html(
                 · 最近重算时间：<span id="recon-recalc-at">—</span>
             </p>
             <div id="recon-recalc-message" class="recalc-msg" style="display:none; margin-bottom:0.75rem;"></div>
+            {code_mismatch_banner}
             <div class="card table-wrap">
                 <div class="filter-bar" id="recon-filters">
                     <button type="button" class="tab-btn active" data-recon-filter="anomaly">仅异常</button>
@@ -1920,6 +2116,7 @@ def render_overdue_html(
                     <button type="button" class="tab-btn" data-recon-filter="balance-nonzero">剩余差额 ≠ 0</button>
                     <button type="button" class="tab-btn" data-recon-filter="cross-pass">跨表检查通过</button>
                     <button type="button" class="tab-btn" data-recon-filter="cross-fail">跨表检查不通过</button>
+                    <button type="button" class="tab-btn" data-recon-filter="code-mismatch">编码不一致</button>
                     <span class="muted-count" id="recon-visible-count">显示 {recon_anomaly_count} / {recon_total_count}</span>
                 </div>
                 <table id="recon-table">
@@ -1927,7 +2124,7 @@ def render_overdue_html(
                         <tr>
                             <th>资产主编号</th><th>信托产品</th><th>剩余差额</th>
                             <th>剩余还款金额或剩余应还款金额</th><th>初始受让金额</th><th>已还款金额</th>
-                            <th>跨表检查</th><th>监控表已还款金额</th><th>还款明细汇总</th>
+                            <th>跨表检查</th><th>编码检查</th><th>监控表已还款金额</th><th>还款明细汇总</th>
                         </tr>
                     </thead>
                     <tbody>{recon_rows}</tbody>
@@ -1975,6 +2172,7 @@ def render_overdue_html(
         rows.forEach(function(row) {{
             var bal = row.getAttribute('data-balance-passed') === '1';
             var cross = row.getAttribute('data-cross-passed') === '1';
+            var codeOk = row.getAttribute('data-code-mismatch-passed') === '1';
             var anomaly = row.getAttribute('data-has-anomaly') === '1';
             var show = false;
             if (mode === 'all') show = true;
@@ -1983,6 +2181,7 @@ def render_overdue_html(
             else if (mode === 'balance-nonzero') show = !bal;
             else if (mode === 'cross-pass') show = cross;
             else if (mode === 'cross-fail') show = !cross;
+            else if (mode === 'code-mismatch') show = !codeOk;
             row.style.display = show ? '' : 'none';
             if (show) visible += 1;
         }});
@@ -3584,6 +3783,7 @@ def overdue_dashboard(
         followups,
         filters=filters,
         products=products,
+        code_mismatch_alerts=recon_data.get("code_mismatch_alerts") or [],
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
@@ -4014,6 +4214,7 @@ def assetinfo_monitor_records_data(
     source_file_name: str | None = Query(default=None),
     source_sheet_name: str | None = Query(default=None),
     include_history: str | None = Query(default=None),
+    transferred: str | None = Query(default=None),
 ):
     page_no, page_sz = query_utils.parse_pagination(page, page_size)
     filters = assetinfo_upload.build_record_filters(
@@ -4025,6 +4226,7 @@ def assetinfo_monitor_records_data(
         source_file_name=source_file_name,
         source_sheet_name=source_sheet_name,
         include_history=include_history,
+        transferred=transferred,
     )
     with engine.connect() as conn:
         return assetinfo_upload.fetch_paginated_records(
@@ -4045,6 +4247,7 @@ def assetinfo_monitor_records_page(
     source_file_name: str | None = Query(default=None),
     source_sheet_name: str | None = Query(default=None),
     include_history: str | None = Query(default=None),
+    transferred: str | None = Query(default=None),
 ):
     page_no, page_sz = query_utils.parse_pagination(page, page_size)
     filters = assetinfo_upload.build_record_filters(
@@ -4056,6 +4259,7 @@ def assetinfo_monitor_records_page(
         source_file_name=source_file_name,
         source_sheet_name=source_sheet_name,
         include_history=include_history,
+        transferred=transferred,
     )
     with engine.connect() as conn:
         data = assetinfo_upload.fetch_paginated_records(

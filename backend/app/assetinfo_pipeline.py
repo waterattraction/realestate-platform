@@ -224,6 +224,32 @@ def load_db_asset_lookup(conn: Connection, trust_product_id: int) -> dict[str, s
     return {r.custody_asset_code: r.source_asset_code for r in rows}
 
 
+def load_min_issue_dates(conn: Connection, trust_product_id: int) -> dict[str, date]:
+    rows = conn.execute(
+        text("""
+            SELECT
+                custody_norm,
+                MIN(issue_date) FILTER (WHERE trust_product_id = :trust_product_id) AS product_issue,
+                MIN(issue_date) AS global_issue
+            FROM (
+                SELECT
+                    trust_product_id,
+                    regexp_replace(COALESCE(custody_asset_code, ''), '\\.0$', '') AS custody_norm,
+                    issue_date
+                FROM trust_product_issuance_asset_records
+            ) src
+            GROUP BY custody_norm
+        """),
+        {"trust_product_id": trust_product_id},
+    )
+    out: dict[str, date] = {}
+    for r in rows:
+        issue = r.product_issue or r.global_issue
+        if issue is not None:
+            out[r.custody_norm] = issue
+    return out
+
+
 def resolve_asset_code(
     custody: str,
     f1_lookup: dict[str, str],
@@ -443,6 +469,7 @@ def run_assetinfo_pipeline(
     ].copy()
 
     payment_dates = _compute_payment_dates(repayment_mapped)
+    issue_dates = load_min_issue_dates(conn, trust_product_id)
     synced_at = datetime.now(timezone.utc)
     source_file_name = excel_file.name
 
@@ -470,10 +497,16 @@ def run_assetinfo_pipeline(
 
         last_payment_date = payment_dates.get(custody)
         max_payment_date = last_payment_date
+        remaining = float(row["remaining_amount"])
         if last_payment_date:
             overdue_days = max(0, (data_date - last_payment_date).days)
+        elif remaining <= RECONCILIATION_TOLERANCE:
+            overdue_days = None
         else:
-            overdue_days = 0
+            issue_date = issue_dates.get(str(custody))
+            overdue_days = (
+                max(0, (data_date - issue_date).days) if issue_date else None
+            )
 
         monitor_source_file = row.get("source_file_name")
         if monitor_source_file is None or (isinstance(monitor_source_file, float) and pd.isna(monitor_source_file)):

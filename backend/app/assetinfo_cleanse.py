@@ -15,6 +15,7 @@ RECONCILIATION_TOLERANCE = 0.01
 # 语义字段 → Excel 列名别名（通用，不按产品写死）
 COL_ALIASES: dict[str, tuple[str, ...]] = {
     "remaining_amount": ("剩余还款金额", "剩余应还款余额"),
+    "last_renovation_payment_date": ("最后一期装修款付款时间",),
 }
 
 MONITOR_FIXED_COLUMNS: tuple[str, ...] = (

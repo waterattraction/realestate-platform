@@ -341,6 +341,7 @@ RECORD_COLUMN_LABELS: dict[str, str] = {
     "repaid_amount": "已还款金额",
     "remaining_amount": "剩余还款金额",
     "overdue_days": "逾期天数",
+    "last_renovation_payment_date": "最后一期装修款付款时间",
     "source_file_name": "文件名",
     "source_sheet_name": "Sheet名",
     "synced_at": "同步时间",
@@ -386,6 +387,7 @@ MONITOR_COLUMN_ORDER: tuple[str, ...] = (
     "initial_transfer_amount",
     "repaid_amount",
     "remaining_amount",
+    "last_renovation_payment_date",
     "source_file_name",
     "source_sheet_name",
     "synced_at",
@@ -421,6 +423,7 @@ RECORD_DATE_ONLY_COLUMNS: frozenset[str] = frozenset({
     "repayment_date",
     "last_payment_date",
     "max_payment_date",
+    "last_renovation_payment_date",
 })
 
 RECORD_TIMESTAMP_COLUMNS: frozenset[str] = frozenset({
@@ -609,6 +612,36 @@ def render_records_page(
                 查看历史快照
             </label>
         </div>"""
+        transferred_val = str(filters.get("transferred") or "")
+        transferred_disabled = "" if selected_product_id else " disabled"
+        transferred_hint = (
+            '<span class="muted" style="font-size:12px">须先选择信托产品</span>'
+            if not selected_product_id
+            else ""
+        )
+        filter_inputs += f"""
+        <div><label>已转让</label>
+        <select name="transferred" id="transferred-filter" form="f" style="width:100%"{transferred_disabled}>
+            <option value="">全部</option>
+            <option value="yes"{" selected" if transferred_val == "yes" else ""}>是</option>
+            <option value="no"{" selected" if transferred_val == "no" else ""}>否</option>
+        </select>
+        {transferred_hint}
+        </div>
+        <script>
+        (function() {{
+            var productSelect = document.querySelector('select[name="trust_product_id"]');
+            var transferredSelect = document.getElementById('transferred-filter');
+            if (!productSelect || !transferredSelect) return;
+            function syncTransferredFilter() {{
+                var hasProduct = !!productSelect.value;
+                transferredSelect.disabled = !hasProduct;
+                if (!hasProduct) transferredSelect.value = '';
+            }}
+            productSelect.addEventListener('change', syncTransferredFilter);
+            syncTransferredFilter();
+        }})();
+        </script>"""
 
     rows = ""
     headers = ""

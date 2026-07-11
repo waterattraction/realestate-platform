@@ -778,7 +778,12 @@ def _render_check_card(checks: dict | None) -> str:
         return '<div class="card-check"><span class="muted tiny">金额核对：—</span></div>'
     bal = checks["balance_equation"]
     cross = checks["cross_sheet_repayment"]
-    has_anomaly = not (bal["passed"] and cross["passed"])
+    code_mismatch = checks.get("code_mismatch")
+    has_anomaly = not (
+        bal["passed"]
+        and cross["passed"]
+        and (code_mismatch is None or code_mismatch.get("passed", True))
+    )
     alert_cls = " card-check-alert" if has_anomaly else ""
     bal_tip = f"剩余 {fmt_money(bal['left_amount'])} vs 初始−已还 {fmt_money(bal['right_amount'])}"
     cross_tip = (
@@ -796,10 +801,24 @@ def _render_check_card(checks: dict | None) -> str:
             f"</div>"
         )
 
+    code_row = ""
+    if code_mismatch is not None:
+        code_tip = (
+            f"还款明细 {code_mismatch['row_count']} 笔主编号与底层资产不一致，"
+            f"涉及 {fmt_money(code_mismatch['amount_sum'])}"
+        )
+        code_row = check_row(
+            "编码一致",
+            code_mismatch.get("passed", True),
+            code_tip,
+            code_mismatch.get("amount_sum", 0),
+        )
+
     return f"""<div class="card-check{alert_cls}">
         <div class="card-check-title">资产金额核对</div>
         {check_row("余额等式", bal["passed"], bal_tip, bal["diff_amount"])}
         {check_row("跨表已还", cross["passed"], cross_tip, cross["diff_amount"])}
+        {code_row}
         <p class="check-basis muted tiny">核对基准：{escape(RECONCILIATION_BASIS_LABEL)}</p>
     </div>"""
 

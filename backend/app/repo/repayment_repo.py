@@ -138,3 +138,75 @@ class RepaymentRepo:
                 },
             ).fetchone()
         return float(row.total) if row else 0.0
+
+    def sum_by_canonical_asset_code(self, trust_product_id: int, asset_code: str) -> float:
+        """按 trust_assets 权威主编号汇总还款（含事实表 asset_code 写错的行）。"""
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT COALESCE(SUM(r.actual_repayment_amount), 0) AS total
+                    FROM trust_repayment_detail_records r
+                    INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                    WHERE r.trust_product_id = :trust_product_id
+                      AND ta.asset_code = :asset_code
+                    """
+                ),
+                {
+                    "trust_product_id": trust_product_id,
+                    "asset_code": asset_code,
+                },
+            ).fetchone()
+        return float(row.total) if row else 0.0
+
+    def max_repayment_date_by_canonical_asset_code(
+        self, trust_product_id: int, asset_code: str
+    ) -> str | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT MAX(r.repayment_date) AS max_rd
+                    FROM trust_repayment_detail_records r
+                    INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                    WHERE r.trust_product_id = :trust_product_id
+                      AND ta.asset_code = :asset_code
+                    """
+                ),
+                {
+                    "trust_product_id": trust_product_id,
+                    "asset_code": asset_code,
+                },
+            ).fetchone()
+        if row is None or row.max_rd is None:
+            return None
+        return str(row.max_rd)
+
+    def fetch_code_mismatch_summary(
+        self, trust_product_id: int, canonical_asset_code: str
+    ) -> dict | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        COUNT(*) AS row_count,
+                        COALESCE(SUM(r.actual_repayment_amount), 0) AS amount_sum
+                    FROM trust_repayment_detail_records r
+                    INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                    WHERE r.trust_product_id = :trust_product_id
+                      AND ta.asset_code = :asset_code
+                      AND r.asset_code IS DISTINCT FROM ta.asset_code
+                    """
+                ),
+                {
+                    "trust_product_id": trust_product_id,
+                    "asset_code": canonical_asset_code,
+                },
+            ).fetchone()
+        if row is None or int(row.row_count) == 0:
+            return None
+        return {
+            "row_count": int(row.row_count),
+            "amount_sum": float(row.amount_sum),
+        }

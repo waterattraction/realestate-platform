@@ -32,6 +32,19 @@ def coerce_bool(value: str | int | bool | None) -> bool:
     return bool(parsed) if parsed is not None else False
 
 
+def _parse_transferred_filter(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text_val = str(value).strip().lower()
+    if not text_val:
+        return None
+    if text_val in ("yes", "y", "1", "true", "是"):
+        return "yes"
+    if text_val in ("no", "n", "0", "false", "否"):
+        return "no"
+    raise HTTPException(status_code=400, detail="已转让筛选仅支持：是/否")
+
+
 def build_record_filters(
     *,
     trust_product_id: str | int | None = None,
@@ -42,10 +55,15 @@ def build_record_filters(
     source_file_name: str | None = None,
     source_sheet_name: str | None = None,
     include_history: str | int | bool | None = None,
+    transferred: str | None = None,
 ) -> dict[str, Any]:
     """将查询参数中的空字符串规范为 None，避免 Optional[int] 解析失败."""
+    pid = coerce_optional_int(trust_product_id)
+    transferred_filter = _parse_transferred_filter(transferred)
+    if transferred_filter and pid is None:
+        raise HTTPException(status_code=400, detail="已转让筛选须先选择信托产品")
     return {
-        "trust_product_id": coerce_optional_int(trust_product_id),
+        "trust_product_id": pid,
         "data_date": data_date or None,
         "asset_code": asset_code or None,
         "custody_asset_code": custody_asset_code or None,
@@ -53,6 +71,7 @@ def build_record_filters(
         "source_file_name": source_file_name or None,
         "source_sheet_name": source_sheet_name or None,
         "include_history": coerce_bool(include_history),
+        "transferred": transferred_filter,
     }
 
 
@@ -76,6 +95,7 @@ COL_DATA_DATE = ("统计日期",)
 COL_INITIAL = ("初始受让金额",)
 COL_REPAID = ("已还款金额",)
 COL_REMAINING = cleanse.COL_ALIASES["remaining_amount"]
+COL_LAST_RENOVATION_PAYMENT = cleanse.COL_ALIASES["last_renovation_payment_date"]
 
 
 def upload_root() -> Path:
@@ -1035,6 +1055,7 @@ def _parse_monitor_rows(
     col_initial = cleanse.pick_column(df, *COL_INITIAL)
     col_repaid = cleanse.pick_column(df, *COL_REPAID)
     col_remaining = cleanse.pick_aliased_column(df, "remaining_amount")
+    col_last_renovation = cleanse.pick_aliased_column(df, "last_renovation_payment_date")
     remaining_label = cleanse.aliased_column_label("remaining_amount")
 
     required_column_mapping = {
@@ -1044,6 +1065,7 @@ def _parse_monitor_rows(
         "initial_transfer_amount": col_initial,
         "repaid_amount": col_repaid,
         "remaining_amount": col_remaining,
+        "last_renovation_payment_date": col_last_renovation,
     }
 
     missing = [label for label, col in [
@@ -1072,6 +1094,8 @@ def _parse_monitor_rows(
     skipped_reason_summary: dict[str, int] = {}
     errors: list[str] = []
     warnings: list[str] = []
+    if col_last_renovation is None:
+        warnings.append("可选列「最后一期装修款付款时间」缺失，将不写入 last_renovation_payment_date")
     row_dates: list[date] = []
     candidate_rows: list[dict] = []
 
@@ -1093,6 +1117,9 @@ def _parse_monitor_rows(
             _skip("invalid_amount")
             errors.append(f"行{idx + 2}: 金额字段无效")
             continue
+        last_renovation_payment_date = None
+        if col_last_renovation:
+            last_renovation_payment_date = cleanse.to_date_value(row[col_last_renovation])
         candidate_rows.append({
             "asset_code": asset_code,
             "custody_asset_code": custody,
@@ -1101,6 +1128,7 @@ def _parse_monitor_rows(
             "initial_transfer_amount": initial,
             "repaid_amount": repaid,
             "remaining_amount": remaining,
+            "last_renovation_payment_date": last_renovation_payment_date,
         })
 
     if not candidate_rows:
@@ -1409,6 +1437,11 @@ def recompute_monitor_payment_fields(
 ) -> list[str]:
     """重算 last_payment_date / overdue_days；返回数据质量警告."""
     warnings: list[str] = []
+    params = {
+        "pid": trust_product_id,
+        "dd": data_date,
+        "tolerance": RECONCILIATION_TOLERANCE,
+    }
 
     conn.execute(
         text("""
@@ -1417,49 +1450,125 @@ def recompute_monitor_payment_fields(
                 last_payment_date = sub.max_rd,
                 max_payment_date = sub.max_rd,
                 overdue_days = CASE
-                    WHEN sub.max_rd IS NULL THEN NULL
+                    WHEN m.remaining_amount <= :tolerance THEN NULL
                     ELSE GREATEST(0, m.data_date - sub.max_rd)
                 END
             FROM (
-                SELECT trust_asset_id, MAX(repayment_date) AS max_rd
-                FROM trust_repayment_detail_records
-                WHERE trust_product_id = :pid
-                GROUP BY trust_asset_id
+                SELECT r.trust_product_id, ta.asset_code, MAX(r.repayment_date) AS max_rd
+                FROM trust_repayment_detail_records r
+                INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                WHERE r.trust_product_id = :pid
+                GROUP BY r.trust_product_id, ta.asset_code
             ) sub
             WHERE m.trust_product_id = :pid
               AND m.data_date = :dd
-              AND m.trust_asset_id = sub.trust_asset_id
+              AND m.asset_code = sub.asset_code
         """),
-        {"pid": trust_product_id, "dd": data_date},
+        params,
     )
 
-    null_rows = conn.execute(
+    conn.execute(
+        text("""
+            UPDATE trust_asset_monitor_records m
+            SET
+                last_payment_date = NULL,
+                max_payment_date = NULL,
+                overdue_days = CASE
+                    WHEN m.remaining_amount <= :tolerance THEN NULL
+                    ELSE GREATEST(0, m.data_date - iss.min_issue_date)
+                END
+            FROM (
+                SELECT
+                    m2.id AS monitor_id,
+                    COALESCE(ip.min_issue_date, ia.min_issue_date) AS min_issue_date
+                FROM trust_asset_monitor_records m2
+                LEFT JOIN (
+                    SELECT
+                        i.trust_product_id,
+                        regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '') AS custody_norm,
+                        MIN(i.issue_date) AS min_issue_date
+                    FROM trust_product_issuance_asset_records i
+                    WHERE i.trust_product_id = :pid
+                    GROUP BY i.trust_product_id, custody_norm
+                ) ip
+                  ON ip.trust_product_id = m2.trust_product_id
+                 AND ip.custody_norm = regexp_replace(
+                     COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\\.0$', ''
+                 )
+                LEFT JOIN (
+                    SELECT
+                        regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '') AS custody_norm,
+                        MIN(i.issue_date) AS min_issue_date
+                    FROM trust_product_issuance_asset_records i
+                    GROUP BY custody_norm
+                ) ia
+                  ON ia.custody_norm = regexp_replace(
+                      COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\\.0$', ''
+                  )
+                WHERE m2.trust_product_id = :pid
+                  AND m2.data_date = :dd
+                  AND COALESCE(ip.min_issue_date, ia.min_issue_date) IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM trust_repayment_detail_records r
+                      INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                      WHERE r.trust_product_id = :pid
+                        AND ta.asset_code = m2.asset_code
+                  )
+            ) iss
+            WHERE m.id = iss.monitor_id
+        """),
+        params,
+    )
+
+    missing_rows = conn.execute(
         text("""
             SELECT m.asset_code FROM trust_asset_monitor_records m
             WHERE m.trust_product_id = :pid AND m.data_date = :dd
-              AND m.last_payment_date IS NULL
+              AND m.remaining_amount > :tolerance
               AND NOT EXISTS (
-                  SELECT 1 FROM trust_repayment_detail_records r
-                  WHERE r.trust_product_id = :pid AND r.trust_asset_id = m.trust_asset_id
+                  SELECT 1
+                  FROM trust_repayment_detail_records r
+                  INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                  WHERE r.trust_product_id = :pid
+                    AND ta.asset_code = m.asset_code
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM trust_product_issuance_asset_records i
+                  WHERE regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '')
+                      = regexp_replace(
+                          COALESCE(m.custody_asset_code, m.asset_code, ''), '\\.0$', ''
+                      )
               )
         """),
-        {"pid": trust_product_id, "dd": data_date},
+        params,
     )
-    for r in null_rows:
-        warnings.append(f"{r.asset_code}: 缺少还款明细，无法计算最后回款日")
+    for r in missing_rows:
+        warnings.append(f"{r.asset_code}: 无还款明细且无发行日，无法计算逾期天数")
 
     conn.execute(
         text("""
             UPDATE trust_asset_monitor_records m
             SET last_payment_date = NULL, max_payment_date = NULL, overdue_days = NULL
             WHERE m.trust_product_id = :pid AND m.data_date = :dd
-              AND m.last_payment_date IS NULL
               AND NOT EXISTS (
-                  SELECT 1 FROM trust_repayment_detail_records r
-                  WHERE r.trust_product_id = :pid AND r.trust_asset_id = m.trust_asset_id
+                  SELECT 1
+                  FROM trust_repayment_detail_records r
+                  INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                  WHERE r.trust_product_id = :pid
+                    AND ta.asset_code = m.asset_code
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM trust_product_issuance_asset_records i
+                  WHERE regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '')
+                      = regexp_replace(
+                          COALESCE(m.custody_asset_code, m.asset_code, ''), '\\.0$', ''
+                      )
               )
         """),
-        {"pid": trust_product_id, "dd": data_date},
+        params,
     )
     return warnings
 
@@ -1602,11 +1711,13 @@ def _import_monitor_sheet(
                     trust_product_id, trust_asset_id, asset_code,
                     custody_asset_code, source_asset_code,
                     data_date, initial_transfer_amount, repaid_amount, remaining_amount,
+                    last_renovation_payment_date,
                     overdue_days, last_payment_date, max_payment_date,
                     source_file_name, source_sheet_name, synced_at
                 ) VALUES (
                     :pid, :aid, :ac, :custody, :source,
                     :dd, :initial, :repaid, :remaining,
+                    :last_renovation,
                     NULL, NULL, NULL,
                     :file, :sheet, :synced
                 )
@@ -1621,6 +1732,7 @@ def _import_monitor_sheet(
                 "initial": r["initial_transfer_amount"],
                 "repaid": r["repaid_amount"],
                 "remaining": r["remaining_amount"],
+                "last_renovation": r.get("last_renovation_payment_date"),
                 "file": file_name,
                 "sheet": sheet_name,
                 "synced": synced_at,
@@ -1918,6 +2030,48 @@ def _monitor_latest_snapshot_join_sql() -> str:
     """
 
 
+def _monitor_custody_norm_match_sql(left_expr: str, right_expr: str) -> str:
+    return (
+        f"regexp_replace(COALESCE({left_expr}, ''), '\\.0$', '')"
+        f" = regexp_replace(COALESCE({right_expr}, ''), '\\.0$', '')"
+    )
+
+
+def _monitor_transferred_in_exists_sql() -> str:
+    """已转让=是：监控行在转入方，且存在从 trust_product_id 转出的发行记录。"""
+    custody_match = _monitor_custody_norm_match_sql(
+        "i.custody_asset_code",
+        "COALESCE(r.custody_asset_code, r.asset_code, '')",
+    )
+    return f"""
+        EXISTS (
+            SELECT 1
+            FROM trust_product_issuance_asset_records i
+            WHERE i.migration_type = 'transfer'
+              AND i.from_trust_product_id = :trust_product_id
+              AND i.trust_product_id = r.trust_product_id
+              AND {custody_match}
+        )
+    """
+
+
+def _monitor_transferred_out_exists_sql() -> str:
+    """已转让=否：排除已从 trust_product_id 转出的托管房源。"""
+    custody_match = _monitor_custody_norm_match_sql(
+        "i.custody_asset_code",
+        "COALESCE(r.custody_asset_code, r.asset_code, '')",
+    )
+    return f"""
+        EXISTS (
+            SELECT 1
+            FROM trust_product_issuance_asset_records i
+            WHERE i.migration_type = 'transfer'
+              AND i.from_trust_product_id = :trust_product_id
+              AND {custody_match}
+        )
+    """
+
+
 def fetch_paginated_records(
     conn: Connection,
     table: str,
@@ -1939,6 +2093,7 @@ def fetch_paginated_records(
 
     where_parts = ["1=1"]
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
+    transferred = filters.get("transferred") if table == "monitor" else None
 
     for key in (
         "trust_product_id", "data_date", "asset_code",
@@ -1947,6 +2102,9 @@ def fetch_paginated_records(
     ):
         val = filters.get(key)
         if val is not None and val != "":
+            if key == "trust_product_id" and transferred == "yes":
+                params[key] = int(val)
+                continue
             where_parts.append(f"r.{key} = :{key}")
             params[key] = int(val) if key == "trust_product_id" else val
 
@@ -1954,6 +2112,13 @@ def fetch_paginated_records(
     snapshot_join = ""
     if table == "monitor" and _monitor_snapshot_view_mode(filters) == "latest_effective":
         snapshot_join = _monitor_latest_snapshot_join_sql()
+
+    if table == "monitor" and transferred in ("yes", "no"):
+        if transferred == "yes":
+            where_parts.append(_monitor_transferred_in_exists_sql())
+        else:
+            where_parts.append(f"NOT ({_monitor_transferred_out_exists_sql()})")
+        where_sql = " AND ".join(where_parts)
 
     count_row = conn.execute(
         text(f"""
@@ -2002,4 +2167,6 @@ def fetch_paginated_records(
     if table == "monitor":
         result["view_mode"] = _monitor_snapshot_view_mode(filters)
         result["include_history"] = bool(filters.get("include_history"))
+        if filters.get("transferred"):
+            result["transferred"] = filters["transferred"]
     return result

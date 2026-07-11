@@ -113,6 +113,12 @@ class OverdueWorkbenchService:
         repayment_items = self._repayment.fetch_by_product_asset_code(
             trust_product_id, resolved_asset
         )
+        code_mismatch = self._repayment.fetch_code_mismatch_summary(
+            trust_product_id, resolved_asset
+        )
+        canonical_recent_repay = self._repayment.max_repayment_date_by_canonical_asset_code(
+            trust_product_id, resolved_asset
+        )
 
         trust_asset_ids = [int(s["trust_asset_id"]) for s in splits_raw]
         followup_history = self._followup.fetch_by_trust_asset_ids(trust_asset_ids)
@@ -127,12 +133,12 @@ class OverdueWorkbenchService:
                 if is_es
                 else checks_service.calc_risk_level(int(row.get("overdue_days") or 0), remaining)
             )
-            detail_total = repayment_total
             checks = checks_service.run_asset_checks(
                 float(row.get("initial_transfer_amount") or 0),
                 float(row.get("repaid_amount") or 0),
                 remaining,
-                detail_total,
+                repayment_total,
+                code_mismatch=code_mismatch,
             )
             active = self._followup.fetch_active_by_trust_asset_id(int(row["trust_asset_id"]))
             queue.append(
@@ -185,7 +191,9 @@ class OverdueWorkbenchService:
                 "custody_followup_history": custody_history,
             }
 
-        custody_checks = checks_service.run_custody_checks(queue, repayment_total)
+        custody_checks = checks_service.run_custody_checks(
+            queue, repayment_total, code_mismatch=code_mismatch
+        )
 
         custody_agg = {
             "initial_transfer_amount": sum(q["initial_transfer_amount"] for q in queue),
@@ -207,9 +215,11 @@ class OverdueWorkbenchService:
                     remaining_sum,
                 )
 
-        recent_repay = None
-        if repayment_items:
+        recent_repay = canonical_recent_repay
+        if recent_repay is None and repayment_items:
             recent_repay = repayment_items[0].get("repayment_date")
+            if recent_repay is not None:
+                recent_repay = str(recent_repay)
 
         case_row = self._followup.fetch_case_by_asset_code(
             trust_product_id, resolved_asset, active_only=False
@@ -242,6 +252,7 @@ class OverdueWorkbenchService:
             has_check_anomaly = not (
                 custody_checks["balance_equation"]["passed"]
                 and custody_checks["cross_sheet_repayment"]["passed"]
+                and custody_checks.get("code_mismatch", {}).get("passed", True)
             )
         summary = {
             "delinquency_bucket": custody_agg.get("delinquency_bucket")
@@ -258,6 +269,7 @@ class OverdueWorkbenchService:
             "split_count": custody_agg.get("split_count"),
             "internal_status": (trust_mark or {}).get("internal_status"),
             "has_check_anomaly": has_check_anomaly,
+            "last_payment_date": canonical_recent_repay,
         }
 
         followup_case = self._followup.fetch_case_by_asset_code(
@@ -297,7 +309,9 @@ class OverdueWorkbenchService:
                 "total_repaid": repayment_total,
                 "items": repayment_items,
                 "recent_repayment_date": recent_repay,
+                "canonical_recent_repayment_date": canonical_recent_repay,
                 "period_count": len(repayment_items),
+                "code_mismatch": code_mismatch,
             },
             "monitor": {"custody": custody_agg, "splits": queue},
             "checks": custody_checks,

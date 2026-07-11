@@ -43,3 +43,4 @@ migrations/20260702_drop_trust_product_fundraising_columns.sql
 migrations/20260703_drop_trust_product_open_close_dates.sql
 migrations/20260704_trust_products_trust_end_date.sql
 migrations/20260710_spatial_asset_locations.sql
+migrations/20260711_monitor_last_renovation_payment_date.sql
