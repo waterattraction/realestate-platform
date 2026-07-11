@@ -21,7 +21,8 @@
 | [data_mapping_config.md](data_mapping_config.md) | `data_mapping_config` | 导入配置 |
 | [trust_product_aliases.md](trust_product_aliases.md) | `trust_product_aliases` | 发行 |
 | [trust_asset_trust_marks.md](trust_asset_trust_marks.md) | `trust_asset_trust_marks` | 托管标记 |
-| [overdue.md](overdue.md) | `trust_overdue_followups` | 逾期（遗留台账） |
+| [overdue.md](overdue.md) | `trust_overdue_followups` | 逾期（已 DROP） |
+| [trust_risk_cases.md](trust_risk_cases.md) | `trust_risk_cases` | 风险案件 |
 | [overdue_followup_cases.md](overdue_followup_cases.md) | `trust_overdue_followup_cases` | 逾期跟进案件 |
 | [overdue_followup_entries.md](overdue_followup_entries.md) | `trust_overdue_followup_entries` | 逾期跟进记录 |
 | [overdue_followup_attachments.md](overdue_followup_attachments.md) | `trust_overdue_followup_attachments` | 跟进附件 |

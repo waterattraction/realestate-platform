@@ -141,10 +141,14 @@ class EventRepo:
             rows = conn.execute(
                 text(
                     """
-                    SELECT id, status, created_at, updated_at
-                    FROM trust_overdue_followups
-                    WHERE trust_asset_id = :trust_asset_id
-                    ORDER BY created_at DESC
+                    SELECT e.id, e.status_snapshot, e.created_at, c.id AS case_id
+                    FROM trust_overdue_followup_entries e
+                    INNER JOIN trust_overdue_followup_cases c ON c.id = e.case_id
+                    INNER JOIN trust_assets ta
+                        ON ta.trust_product_id = c.trust_product_id
+                       AND ta.asset_code = c.asset_code
+                    WHERE ta.id = :trust_asset_id
+                    ORDER BY e.created_at DESC
                     LIMIT :limit
                     """
                 ),
@@ -153,17 +157,17 @@ class EventRepo:
         events = []
         for row in rows:
             rec = row_to_dict(row)
-            fid = rec["id"]
+            eid = rec["id"]
             events.append(
                 standard_event(
-                    event_id=f"followup:{fid}",
+                    event_id=f"followup:{eid}",
                     event_type="FOLLOWUP_CREATED",
                     occurred_at=rec.get("created_at"),
                     source="ops",
-                    correlation_id=f"followup:{fid}",
-                    recorded_at=rec.get("updated_at") or rec.get("created_at"),
-                    source_ref=str(fid),
-                    payload_summary=f"Follow-up {rec.get('status')}",
+                    correlation_id=f"followup:case:{rec.get('case_id')}",
+                    recorded_at=rec.get("created_at"),
+                    source_ref=str(eid),
+                    payload_summary=f"Follow-up {rec.get('status_snapshot')}",
                 )
             )
         return events

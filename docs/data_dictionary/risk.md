@@ -5,7 +5,7 @@
 | 项 | 值 |
 |----|-----|
 | 表中文名 | 风险预警 / 风险扩展 |
-| 表英文名 | `risk_alerts`；扩展列在 `trust_asset_monitor_records`、`trust_overdue_followups` |
+| 表英文名 | `risk_alerts`、`trust_risk_cases`；评分列在 `trust_asset_monitor_records` |
 | Schema 来源 | `db/modules/risk/schema.sql` |
 | 主键 | `risk_alerts.id` |
 | 业务唯一标识 | 开放预警：`uq_risk_alerts_open_rule (trust_asset_id, data_date, risk_type)` WHERE open |
@@ -13,9 +13,10 @@
 ## 表用途
 
 - **`risk_alerts`**：系统生成的风险预警记录
-- **扩展列**：监控表上的 `risk_score`/`risk_level`；跟进表上的 Case/SLA 字段
+- **`trust_risk_cases`**：分笔维度风险案件（SLA、优先级）
+- **扩展列**：监控表上的 `risk_score`/`risk_level`
 
-> 平台**无**独立 `risk_cases`、`risk_scores` 物理表；Canonical「RiskCase」为逻辑对象。
+> 运营跟进见 `trust_overdue_followup_cases`，与风险案件分表。
 
 ## 生命周期
 
@@ -48,7 +49,7 @@
 | 表 | 字段 | 用途 |
 |----|------|------|
 | `trust_asset_monitor_records` | `risk_score`, `risk_level` | 资产级风险分 |
-| `trust_overdue_followups` | `risk_score`, `risk_level`, `sla_*`, `case_priority` | 案件级风险 |
+| `trust_risk_cases` | `risk_score`, `risk_level`, `sla_*`, `case_priority` | 案件级风险 |
 
 ## 索引说明
 
@@ -72,7 +73,7 @@
 
 ## 注意事项
 
-- 查「风险案件」时查 `trust_overdue_followups` 扩展列，非独立表。
+- 查「风险案件」时查 `trust_risk_cases`。
 - `data_date` 与监控快照对齐。
 
 ## 变更记录

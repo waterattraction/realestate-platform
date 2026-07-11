@@ -120,9 +120,6 @@ class OverdueWorkbenchService:
             trust_product_id, resolved_asset
         )
 
-        trust_asset_ids = [int(s["trust_asset_id"]) for s in splits_raw]
-        followup_history = self._followup.fetch_by_trust_asset_ids(trust_asset_ids)
-
         queue = []
         for row in splits_raw:
             remaining = float(row.get("remaining_amount") or 0)
@@ -180,16 +177,6 @@ class OverdueWorkbenchService:
             selected_id = queue[0]["trust_asset_id"] if queue else None
 
         detail = next((q for q in queue if q["trust_asset_id"] == selected_id), None)
-        if detail:
-            asset_history = [f for f in followup_history if f["trust_asset_id"] == selected_id]
-            custody_history = [
-                f for f in followup_history if f["trust_asset_id"] in trust_asset_ids
-            ]
-            detail = {
-                **detail,
-                "followup_history": asset_history,
-                "custody_followup_history": custody_history,
-            }
 
         custody_checks = checks_service.run_custody_checks(
             queue, repayment_total, code_mismatch=code_mismatch
@@ -235,7 +222,7 @@ class OverdueWorkbenchService:
             attachments_by_entry.setdefault(int(att["entry_id"]), []).append(att)
 
         timeline = _build_timeline(
-            repayment_items, followup_history, entry_list, attachments_by_entry
+            repayment_items, entry_list, attachments_by_entry
         )
         followup_entries = []
         for entry in entry_list:
@@ -501,26 +488,11 @@ class OverdueWorkbenchService:
         }
 
 
-def _migrated_legacy_followup_ids(entries: list[dict]) -> set[int]:
-    ids: set[int] = set()
-    for entry in entries:
-        note = entry.get("note") or ""
-        if not note.startswith("legacy_followup_id:"):
-            continue
-        raw = note.removeprefix("legacy_followup_id:").strip()
-        head = raw.split(None, 1)[0] if raw else ""
-        if head.isdigit():
-            ids.add(int(head))
-    return ids
-
-
 def _build_timeline(
     repayment_items: list[dict],
-    legacy_followups: list[dict],
     entries: list[dict],
     attachments_by_entry: dict[int, list] | None = None,
 ) -> list[dict]:
-    migrated_legacy_ids = _migrated_legacy_followup_ids(entries)
     events: list[dict] = []
     for item in repayment_items:
         occurred = item.get("repayment_date") or item.get("synced_at") or item.get("created_at")
@@ -554,27 +526,6 @@ def _build_timeline(
                 "entry_id": eid,
                 "attachments": entry_attachments,
                 "legacy": False,
-            }
-        )
-    for fu in legacy_followups:
-        if fu.get("id") in migrated_legacy_ids:
-            continue
-        occurred = fu.get("last_follow_up_at") or fu.get("created_at")
-        events.append(
-            {
-                "event_type": "followup",
-                "occurred_at": occurred,
-                "title": f"跟进 · {fu.get('status') or '—'}",
-                "status_snapshot": fu.get("status"),
-                "owner_name": fu.get("owner_name"),
-                "overdue_reason": fu.get("overdue_reason"),
-                "follow_up_plan": fu.get("follow_up_plan"),
-                "trust_feedback": fu.get("trust_feedback"),
-                "note": None,
-                "entry_id": None,
-                "attachments": [],
-                "legacy": True,
-                "legacy_label": "历史台账",
             }
         )
     events.sort(key=lambda e: str(e.get("occurred_at") or ""), reverse=True)

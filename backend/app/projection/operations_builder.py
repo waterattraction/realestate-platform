@@ -37,7 +37,7 @@ class OperationsBuilder:
                     "owner_name": row.get("owner_name"),
                     "data_date": row.get("data_date"),
                     "created_at": row.get("created_at"),
-                    "updated_at": row.get("updated_at"),
+                    "updated_at": row.get("created_at"),
                 }
                 for row in raw
             ]

@@ -71,33 +71,12 @@ CREATE INDEX idx_trust_repayment_asset_date
     ON trust_repayment_detail_records (trust_asset_id, data_date);
 
 -- ------------------------------------------------------------
--- 4. 逾期跟进台账
+-- 4. 逾期跟进（V2 cases/entries 见 migrations/20260623_*）
+-- 遗留 trust_overdue_followups 已 DROP（见 migrations/20260713_*）
 -- ------------------------------------------------------------
-CREATE TABLE trust_overdue_followups (
-    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    trust_product_id    BIGINT NOT NULL REFERENCES trust_products (id),
-    trust_asset_id      BIGINT NOT NULL REFERENCES trust_assets (id),
-    data_date           DATE NOT NULL,
-    trigger_source      VARCHAR(32) NOT NULL DEFAULT 'system',
-    overdue_reason      TEXT,
-    follow_up_plan      TEXT,
-    status              VARCHAR(32) NOT NULL DEFAULT 'open',
-    owner_name          VARCHAR(100),
-    last_follow_up_at   TIMESTAMPTZ,
-    trust_feedback      TEXT,
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_trust_overdue_followups_status ON trust_overdue_followups (status);
-CREATE INDEX idx_trust_overdue_followups_product_asset
-    ON trust_overdue_followups (trust_product_id, trust_asset_id);
 
 -- ------------------------------------------------------------
 -- 自动更新 updated_at（复用 schema.sql 中的 set_updated_at）
 -- ------------------------------------------------------------
 CREATE TRIGGER trg_trust_assets_updated_at
     BEFORE UPDATE ON trust_assets FOR EACH ROW EXECUTE FUNCTION set_updated_at();
-
-CREATE TRIGGER trg_trust_overdue_followups_updated_at
-    BEFORE UPDATE ON trust_overdue_followups FOR EACH ROW EXECUTE FUNCTION set_updated_at();

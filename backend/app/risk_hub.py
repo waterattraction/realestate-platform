@@ -383,9 +383,10 @@ def sync_risk_cases(conn, trust_product_id: int | None = None) -> dict:
         priority = CASE_PRIORITY_MAP.get(row.risk_level, "P3")
         existing = conn.execute(
             text("""
-                SELECT id, status FROM trust_overdue_followups
+                SELECT id, status FROM trust_risk_cases
                 WHERE trust_asset_id = :trust_asset_id
                   AND status IN ('open', 'in_progress')
+                ORDER BY id DESC
                 LIMIT 1
             """),
             {"trust_asset_id": row.trust_asset_id},
@@ -396,7 +397,7 @@ def sync_risk_cases(conn, trust_product_id: int | None = None) -> dict:
         if existing is None:
             conn.execute(
                 text("""
-                    INSERT INTO trust_overdue_followups (
+                    INSERT INTO trust_risk_cases (
                         trust_product_id, trust_asset_id, data_date,
                         trigger_source, status, risk_score, risk_level,
                         case_priority, alert_source, sla_due_date, sla_status
@@ -422,7 +423,7 @@ def sync_risk_cases(conn, trust_product_id: int | None = None) -> dict:
         else:
             conn.execute(
                 text("""
-                    UPDATE trust_overdue_followups SET
+                    UPDATE trust_risk_cases SET
                         risk_score = :risk_score,
                         risk_level = :risk_level,
                         case_priority = :case_priority,
@@ -448,7 +449,7 @@ def sync_risk_cases(conn, trust_product_id: int | None = None) -> dict:
 def _refresh_case_sla_statuses(conn, trust_product_id: int | None = None):
     sql = """
         SELECT id, sla_due_date, status, created_at
-        FROM trust_overdue_followups
+        FROM trust_risk_cases
         WHERE sla_due_date IS NOT NULL
     """
     params: dict = {}
@@ -459,7 +460,7 @@ def _refresh_case_sla_statuses(conn, trust_product_id: int | None = None):
     for row in conn.execute(text(sql), params):
         sla_status = compute_sla_status(row.sla_due_date, row.status, row.created_at)
         conn.execute(
-            text("UPDATE trust_overdue_followups SET sla_status = :sla_status WHERE id = :id"),
+            text("UPDATE trust_risk_cases SET sla_status = :sla_status WHERE id = :id"),
             {"id": row.id, "sla_status": sla_status},
         )
 
@@ -526,7 +527,7 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
 
     sla_breached = conn.execute(
         text("""
-            SELECT COUNT(*) AS cnt FROM trust_overdue_followups
+            SELECT COUNT(*) AS cnt FROM trust_risk_cases
             WHERE sla_status IN ('overdue', 'breached')
               AND status IN ('open', 'in_progress')
         """)
@@ -563,9 +564,14 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
             FROM trust_asset_monitor_records m
             INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
             INNER JOIN trust_products tp ON tp.id = m.trust_product_id
-            LEFT JOIN trust_overdue_followups f
-                ON f.trust_asset_id = m.trust_asset_id
-               AND f.status IN ('open', 'in_progress')
+            LEFT JOIN LATERAL (
+                SELECT f.id, f.status, f.sla_status, f.case_priority
+                FROM trust_risk_cases f
+                WHERE f.trust_asset_id = m.trust_asset_id
+                  AND f.status IN ('open', 'in_progress')
+                ORDER BY f.id DESC
+                LIMIT 1
+            ) f ON TRUE
             WHERE {monitor_filter}
             ORDER BY m.risk_score DESC NULLS LAST,
                      COALESCE(m.overdue_days, 0) DESC,
@@ -658,8 +664,14 @@ def fetch_risk_assets(conn, trust_product_id: int | None = None, risk_level: str
         FROM trust_asset_monitor_records m
         INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
         INNER JOIN trust_products tp ON tp.id = m.trust_product_id
-        LEFT JOIN trust_overdue_followups f
-            ON f.trust_asset_id = m.trust_asset_id AND f.status IN ('open', 'in_progress')
+        LEFT JOIN LATERAL (
+            SELECT f.sla_status, f.case_priority
+            FROM trust_risk_cases f
+            WHERE f.trust_asset_id = m.trust_asset_id
+              AND f.status IN ('open', 'in_progress')
+            ORDER BY f.id DESC
+            LIMIT 1
+        ) f ON TRUE
         WHERE {monitor_filter}
     """
     if risk_level:
@@ -934,7 +946,7 @@ def fetch_risk_cases(
             f.risk_score, f.risk_level, f.sla_due_date, f.sla_status,
             f.case_priority, f.next_action_date,
             f.created_at, f.updated_at
-        FROM trust_overdue_followups f
+        FROM trust_risk_cases f
         INNER JOIN trust_assets ta ON ta.id = f.trust_asset_id
         INNER JOIN trust_products tp ON tp.id = f.trust_product_id
         WHERE 1=1
@@ -1004,7 +1016,7 @@ def create_risk_case(conn, payload: dict) -> dict:
 
     result = conn.execute(
         text("""
-            INSERT INTO trust_overdue_followups (
+            INSERT INTO trust_risk_cases (
                 trust_product_id, trust_asset_id, data_date,
                 trigger_source, alert_source, overdue_reason, follow_up_plan,
                 status, owner_name, trust_feedback,
@@ -1045,7 +1057,7 @@ def create_risk_case(conn, payload: dict) -> dict:
 
 def patch_risk_case(conn, case_id: int, fields: dict) -> dict | None:
     row = conn.execute(
-        text("SELECT id FROM trust_overdue_followups WHERE id = :id"),
+        text("SELECT id FROM trust_risk_cases WHERE id = :id"),
         {"id": case_id},
     ).fetchone()
     if row is None:
@@ -1077,7 +1089,7 @@ def patch_risk_case(conn, case_id: int, fields: dict) -> dict | None:
         return next((c for c in cases if c["id"] == case_id), None)
 
     conn.execute(
-        text(f"UPDATE trust_overdue_followups SET {', '.join(sets)} WHERE id = :id"),
+        text(f"UPDATE trust_risk_cases SET {', '.join(sets)} WHERE id = :id"),
         params,
     )
     _refresh_case_sla_statuses(conn)

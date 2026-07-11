@@ -1508,62 +1508,10 @@ def recalculate_overdue_days(
     }
 
 
-def fetch_overdue_followups(conn, trust_product_id: int | None = None, status: str | None = None):
-    sql = """
-        SELECT
-            f.id,
-            f.trust_product_id,
-            tp.name AS trust_product_name,
-            f.trust_asset_id,
-            ta.asset_code,
-            ta.asset_name,
-            f.data_date,
-            f.trigger_source,
-            f.overdue_reason,
-            f.follow_up_plan,
-            f.status,
-            f.owner_name,
-            f.last_follow_up_at,
-            f.trust_feedback,
-            f.created_at,
-            f.updated_at
-        FROM trust_overdue_followups f
-        INNER JOIN trust_assets ta ON ta.id = f.trust_asset_id
-        INNER JOIN trust_products tp ON tp.id = f.trust_product_id
-        WHERE 1 = 1
-    """
-    params: dict = {}
-    if trust_product_id is not None:
-        sql += " AND f.trust_product_id = :trust_product_id"
-        params["trust_product_id"] = trust_product_id
-    if status is not None:
-        sql += " AND f.status = :status"
-        params["status"] = status
-    sql += " ORDER BY f.last_follow_up_at DESC NULLS LAST, f.id DESC"
+def fetch_overdue_followups(trust_product_id: int | None = None, status: str | None = None):
+    from app.repo.followup_repo import FollowupRepo
 
-    rows = conn.execute(text(sql), params)
-    items = []
-    for row in rows:
-        items.append({
-            "id": row.id,
-            "trust_product_id": row.trust_product_id,
-            "trust_product_name": row.trust_product_name,
-            "trust_asset_id": row.trust_asset_id,
-            "asset_code": row.asset_code,
-            "asset_name": row.asset_name,
-            "data_date": str(row.data_date),
-            "trigger_source": row.trigger_source,
-            "overdue_reason": row.overdue_reason,
-            "follow_up_plan": row.follow_up_plan,
-            "status": row.status,
-            "owner_name": row.owner_name,
-            "last_follow_up_at": str(row.last_follow_up_at) if row.last_follow_up_at else None,
-            "trust_feedback": row.trust_feedback,
-            "created_at": str(row.created_at),
-            "updated_at": str(row.updated_at),
-        })
-
-    return items
+    return FollowupRepo(engine).fetch_cases_list(trust_product_id, status)
 
 
 def fmt_asset_identity(item: dict) -> str:
@@ -1852,8 +1800,8 @@ def render_overdue_html(
     for item in followups[:10]:
         followup_rows += f"""
             <tr>
-                <td>{escape(item["asset_code"])}</td>
-                <td>{escape(TRIGGER_SOURCE_LABELS.get(item["trigger_source"], item["trigger_source"]))}</td>
+                <td>{escape(item.get("asset_code") or "—")}</td>
+                <td>{escape(item.get("custody_asset_code") or "—")}</td>
                 <td>{escape(FOLLOWUP_STATUS_LABELS.get(item["status"], item["status"]))}</td>
                 <td>{escape(item["owner_name"] or "—")}</td>
                 <td>{escape(item["last_follow_up_at"] or "—")}</td>
@@ -2140,7 +2088,7 @@ def render_overdue_html(
             <div class="card table-wrap">
                 <table>
                     <thead>
-                        <tr><th>房源</th><th>来源</th><th>状态</th><th>负责人</th><th>最近跟进</th></tr>
+                        <tr><th>资产编号</th><th>托管号</th><th>状态</th><th>负责人</th><th>最近跟进</th></tr>
                     </thead>
                     <tbody>{followup_rows}</tbody>
                 </table>
@@ -3659,12 +3607,10 @@ def overdue_reconciliation(trust_product_id: str | None = None, data_date: str |
 
 @app.get("/overdue/followups")
 def overdue_followups(trust_product_id: str | None = None, status: str | None = None):
-    with engine.connect() as conn:
-        return fetch_overdue_followups(
-            conn,
-            query_utils.parse_optional_int(trust_product_id),
-            query_utils.clean_optional_str(status),
-        )
+    return fetch_overdue_followups(
+        query_utils.parse_optional_int(trust_product_id),
+        query_utils.clean_optional_str(status),
+    )
 
 
 @app.post("/overdue/reconciliation/recalculate")
@@ -3774,7 +3720,7 @@ def overdue_dashboard(
             custody_asset_code=parsed_custody,
         )
         recon_data = fetch_reconciliation(conn, pid)
-        followups = fetch_overdue_followups(conn, pid)
+        followups = fetch_overdue_followups(pid)
         products = fetch_trust_products(conn)
 
     html = render_overdue_html(

@@ -14,19 +14,49 @@ CREATE INDEX IF NOT EXISTS idx_trust_asset_monitor_risk_level
     ON trust_asset_monitor_records (risk_level);
 
 -- ------------------------------------------------------------
--- 2. 扩展跟进台账 → 风险案件（Case）
+-- 2. 风险案件（分笔维度）
 -- ------------------------------------------------------------
-ALTER TABLE trust_overdue_followups
-    ADD COLUMN IF NOT EXISTS risk_score INT,
-    ADD COLUMN IF NOT EXISTS risk_level VARCHAR(2),
-    ADD COLUMN IF NOT EXISTS sla_due_date TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS sla_status VARCHAR(32),
-    ADD COLUMN IF NOT EXISTS alert_source VARCHAR(32) DEFAULT 'system',
-    ADD COLUMN IF NOT EXISTS case_priority VARCHAR(8),
-    ADD COLUMN IF NOT EXISTS next_action_date DATE;
+CREATE TABLE IF NOT EXISTS trust_risk_cases (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    trust_product_id    BIGINT NOT NULL REFERENCES trust_products (id),
+    trust_asset_id      BIGINT NOT NULL REFERENCES trust_assets (id),
+    data_date           DATE NOT NULL,
+    trigger_source      VARCHAR(32) NOT NULL DEFAULT 'system',
+    alert_source        VARCHAR(32) DEFAULT 'system',
+    status              VARCHAR(32) NOT NULL DEFAULT 'open',
+    owner_name          VARCHAR(100),
+    overdue_reason      TEXT,
+    follow_up_plan      TEXT,
+    trust_feedback      TEXT,
+    last_follow_up_at   TIMESTAMPTZ,
+    risk_score          INT,
+    risk_level          VARCHAR(2),
+    sla_due_date        TIMESTAMPTZ,
+    sla_status          VARCHAR(32),
+    case_priority       VARCHAR(8),
+    next_action_date    DATE,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_trust_risk_cases_status
+        CHECK (status IN ('open', 'in_progress', 'resolved', 'closed'))
+);
 
-CREATE INDEX IF NOT EXISTS idx_trust_overdue_followups_sla_status
-    ON trust_overdue_followups (sla_status);
+CREATE INDEX IF NOT EXISTS idx_trust_risk_cases_product_status
+    ON trust_risk_cases (trust_product_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_trust_risk_cases_asset_status
+    ON trust_risk_cases (trust_asset_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_trust_risk_cases_sla
+    ON trust_risk_cases (sla_status)
+    WHERE status IN ('open', 'in_progress');
+
+CREATE INDEX IF NOT EXISTS idx_trust_risk_cases_asset_date
+    ON trust_risk_cases (trust_asset_id, data_date DESC);
+
+CREATE TRIGGER trg_trust_risk_cases_updated_at
+    BEFORE UPDATE ON trust_risk_cases
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- ------------------------------------------------------------
 -- 3. 风险预警

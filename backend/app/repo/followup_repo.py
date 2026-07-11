@@ -11,28 +11,150 @@ class FollowupRepo:
     def __init__(self, engine: Engine):
         self._engine = engine
 
+    def fetch_cases_list(
+        self,
+        trust_product_id: int | None = None,
+        status: str | None = None,
+        limit: int = 500,
+    ) -> list[dict]:
+        sql = """
+            SELECT
+                c.id,
+                c.trust_product_id,
+                tp.name AS trust_product_name,
+                c.asset_code,
+                c.custody_asset_code,
+                c.data_date,
+                c.status,
+                c.owner_name,
+                c.opened_at,
+                c.closed_at,
+                c.last_follow_up_at,
+                c.created_by,
+                c.updated_by,
+                c.created_at,
+                c.updated_at
+            FROM trust_overdue_followup_cases c
+            INNER JOIN trust_products tp ON tp.id = c.trust_product_id
+            WHERE 1=1
+        """
+        params: dict = {"limit": limit}
+        if trust_product_id is not None:
+            sql += " AND c.trust_product_id = :trust_product_id"
+            params["trust_product_id"] = trust_product_id
+        if status is not None:
+            sql += " AND c.status = :status"
+            params["status"] = status
+        sql += " ORDER BY c.last_follow_up_at DESC NULLS LAST, c.id DESC LIMIT :limit"
+        with self._engine.connect() as conn:
+            rows = conn.execute(text(sql), params).fetchall()
+        items = []
+        for row in rows:
+            rec = row_to_dict(row)
+            items.append(
+                {
+                    **rec,
+                    "data_date": str(rec["data_date"]) if rec.get("data_date") else None,
+                    "opened_at": str(rec["opened_at"]) if rec.get("opened_at") else None,
+                    "closed_at": str(rec["closed_at"]) if rec.get("closed_at") else None,
+                    "last_follow_up_at": (
+                        str(rec["last_follow_up_at"]) if rec.get("last_follow_up_at") else None
+                    ),
+                    "created_at": str(rec["created_at"]) if rec.get("created_at") else None,
+                    "updated_at": str(rec["updated_at"]) if rec.get("updated_at") else None,
+                }
+            )
+        return items
+
+    def _resolve_asset_code(self, conn, trust_asset_id: int) -> tuple[int, str] | None:
+        row = conn.execute(
+            text(
+                """
+                SELECT trust_product_id, asset_code
+                FROM trust_assets
+                WHERE id = :trust_asset_id
+                """
+            ),
+            {"trust_asset_id": trust_asset_id},
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row.trust_product_id), str(row.asset_code)
+
+    def _case_summary_for_asset(self, conn, trust_asset_id: int) -> dict | None:
+        resolved = self._resolve_asset_code(conn, trust_asset_id)
+        if resolved is None:
+            return None
+        trust_product_id, asset_code = resolved
+        case = conn.execute(
+            text(
+                """
+                SELECT id, trust_product_id, asset_code, data_date, status,
+                       owner_name, last_follow_up_at, opened_at, created_at, updated_at
+                FROM trust_overdue_followup_cases
+                WHERE trust_product_id = :trust_product_id
+                  AND asset_code = :asset_code
+                  AND status IN ('open', 'in_progress')
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ),
+            {"trust_product_id": trust_product_id, "asset_code": asset_code},
+        ).fetchone()
+        if case is None:
+            return None
+        latest_entry = conn.execute(
+            text(
+                """
+                SELECT overdue_reason, follow_up_plan, trust_feedback
+                FROM trust_overdue_followup_entries
+                WHERE case_id = :case_id
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            ),
+            {"case_id": case.id},
+        ).fetchone()
+        return {
+            "id": case.id,
+            "trust_product_id": case.trust_product_id,
+            "trust_asset_id": trust_asset_id,
+            "data_date": str(case.data_date),
+            "status": case.status,
+            "owner_name": case.owner_name,
+            "last_follow_up_at": (
+                str(case.last_follow_up_at) if case.last_follow_up_at else None
+            ),
+            "overdue_reason": latest_entry.overdue_reason if latest_entry else None,
+            "follow_up_plan": latest_entry.follow_up_plan if latest_entry else None,
+            "trust_feedback": latest_entry.trust_feedback if latest_entry else None,
+            "created_at": str(case.created_at),
+            "updated_at": str(case.updated_at),
+        }
+
     def fetch_by_trust_asset_id(self, trust_asset_id: int, limit: int = 100) -> list[dict]:
         with self._engine.connect() as conn:
             rows = conn.execute(
                 text(
                     """
                     SELECT
-                        id,
-                        trust_product_id,
-                        trust_asset_id,
-                        data_date,
-                        trigger_source,
-                        overdue_reason,
-                        follow_up_plan,
-                        status,
-                        owner_name,
-                        last_follow_up_at,
-                        trust_feedback,
-                        created_at,
-                        updated_at
-                    FROM trust_overdue_followups
-                    WHERE trust_asset_id = :trust_asset_id
-                    ORDER BY created_at DESC
+                        e.id,
+                        c.trust_product_id,
+                        ta.id AS trust_asset_id,
+                        c.data_date,
+                        e.status_snapshot AS status,
+                        e.overdue_reason,
+                        e.follow_up_plan,
+                        e.owner_name,
+                        e.created_at,
+                        e.trust_feedback
+                    FROM trust_overdue_followup_entries e
+                    INNER JOIN trust_overdue_followup_cases c ON c.id = e.case_id
+                    INNER JOIN trust_assets ta
+                        ON ta.trust_product_id = c.trust_product_id
+                       AND ta.asset_code = c.asset_code
+                    WHERE ta.id = :trust_asset_id
+                    ORDER BY e.created_at DESC
                     LIMIT :limit
                     """
                 ),
@@ -42,68 +164,12 @@ class FollowupRepo:
 
     def fetch_active_by_trust_asset_id(self, trust_asset_id: int) -> dict | None:
         with self._engine.connect() as conn:
-            row = conn.execute(
-                text(
-                    """
-                    SELECT
-                        id,
-                        trust_product_id,
-                        trust_asset_id,
-                        data_date,
-                        trigger_source,
-                        overdue_reason,
-                        follow_up_plan,
-                        status,
-                        owner_name,
-                        last_follow_up_at,
-                        trust_feedback,
-                        created_at,
-                        updated_at
-                    FROM trust_overdue_followups
-                    WHERE trust_asset_id = :trust_asset_id
-                      AND status IN ('open', 'in_progress')
-                    ORDER BY id DESC
-                    LIMIT 1
-                    """
-                ),
-                {"trust_asset_id": trust_asset_id},
-            ).fetchone()
-        return row_to_dict(row)
+            return self._case_summary_for_asset(conn, trust_asset_id)
 
     def fetch_by_trust_asset_ids(
         self, trust_asset_ids: list[int], limit: int = 200
     ) -> list[dict]:
-        if not trust_asset_ids:
-            return []
-        with self._engine.connect() as conn:
-            rows = conn.execute(
-                text(
-                    """
-                    SELECT
-                        f.id,
-                        f.trust_product_id,
-                        f.trust_asset_id,
-                        ta.asset_code,
-                        f.data_date,
-                        f.trigger_source,
-                        f.overdue_reason,
-                        f.follow_up_plan,
-                        f.status,
-                        f.owner_name,
-                        f.last_follow_up_at,
-                        f.trust_feedback,
-                        f.created_at,
-                        f.updated_at
-                    FROM trust_overdue_followups f
-                    INNER JOIN trust_assets ta ON ta.id = f.trust_asset_id
-                    WHERE f.trust_asset_id = ANY(:trust_asset_ids)
-                    ORDER BY f.created_at DESC
-                    LIMIT :limit
-                    """
-                ),
-                {"trust_asset_ids": trust_asset_ids, "limit": limit},
-            ).fetchall()
-        return rows_to_dicts(rows)
+        return []
 
     def fetch_case_by_asset_code(
         self, trust_product_id: int, asset_code: str, active_only: bool = False

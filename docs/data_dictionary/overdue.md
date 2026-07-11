@@ -1,16 +1,14 @@
-# 逾期跟进台账（`trust_overdue_followups`）— 遗留
+# 逾期跟进台账（`trust_overdue_followups`）— 已废弃
 
-> **状态：遗留只读。** V2.2 起运营跟进写入 `trust_overdue_followup_cases` + `trust_overdue_followup_entries`。本表由 `risk_hub` 等历史路径只读引用；新功能禁止写入。
+> **状态：已 DROP（2026-07-13）。** 风险案件 → `trust_risk_cases`；运营跟进 → `trust_overdue_followup_cases` + `trust_overdue_followup_entries`。
 
 ## 基本信息
 
 | 项 | 值 |
 |----|-----|
-| 表中文名 | 逾期跟进台账 |
-| 表英文名 | `trust_overdue_followups` |
-| Schema 来源 | `db/modules/overdue/schema.sql` + `db/modules/risk/schema.sql` |
-| 主键 | `id` |
-| 业务唯一标识 | TODO：按 `(trust_product_id, trust_asset_id, data_date)` 或案件维度 |
+| 表中文名 | 逾期跟进台账（遗留） |
+| 表英文名 | `trust_overdue_followups`（已删除） |
+| 替代 | 风险：`trust_risk_cases`；运营：`trust_overdue_followup_cases` |
 
 ## 表用途
 
