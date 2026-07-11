@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from html import escape
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from app.ui_css import BTN_CSS, FORM_FIELD_CSS, PAGE_CHROME_CSS, STANDARD_HEADER_CSS, TABLE_SCROLL_CSS
@@ -314,17 +315,17 @@ def render_upload_page(trust_products: list[dict]) -> str:
 
 
 def _filter_query_string(filters: dict, page: int | None = None) -> str:
-    parts = []
+    params: dict[str, str] = {}
     for key, val in filters.items():
         if key == "include_history":
             if val:
-                parts.append("include_history=1")
+                params["include_history"] = "1"
             continue
         if val is not None and val != "":
-            parts.append(f"{key}={escape(str(val))}")
+            params[key] = str(val)
     if page is not None:
-        parts.append(f"page={page}")
-    return "&".join(parts)
+        params["page"] = str(page)
+    return urlencode(params)
 
 
 RECORD_COLUMN_LABELS: dict[str, str] = {
@@ -573,18 +574,20 @@ def render_records_page(
         <select name="trust_product_id" form="f" style="width:100%">{product_options}</select></div>"""
 
     source_label = "资产信托号" if record_type == "monitor" else "资产分笔号"
-    for key, label in [
-        ("data_date", "数据日期"),
-        ("asset_code", "资产主编号"),
-        ("custody_asset_code", "托管房源号"),
-        ("source_asset_code", source_label),
-        ("source_file_name", "文件名"),
-        ("source_sheet_name", "Sheet名"),
-    ]:
+    field_specs = [
+        ("data_date", "数据日期", "date", False),
+        ("asset_code", "资产主编号", "text", True),
+        ("custody_asset_code", "托管房源号", "text", True),
+        ("source_asset_code", source_label, "text", True),
+        ("source_file_name", "文件名", "text", True),
+        ("source_sheet_name", "Sheet名", "text", True),
+    ]
+    for key, label, input_type, fuzzy in field_specs:
         val = escape(str(filters.get(key) or ""))
+        placeholder = ' placeholder="模糊匹配"' if fuzzy else ""
         filter_inputs += f"""
         <div><label>{label}</label>
-        <input name="{key}" value="{val}" form="f"></div>"""
+        <input type="{input_type}" name="{key}" value="{val}" form="f"{placeholder}></div>"""
 
     snapshot_banner = ""
     if record_type == "monitor":

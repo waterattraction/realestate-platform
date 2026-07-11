@@ -106,9 +106,35 @@ ISSUANCE_CONFIDENCE_FIELDS = (
     "from_trust_product_name",
 )
 
+# 仅指定来源文件启用的列别名（不影响其他 Excel 导入）
+MEIRUN1_INITIAL_TRANSFER_FILE = "美润1号服务信托房源明细（首期转让）.xlsx"
 
-def pick_column(df: pd.DataFrame, field_key: str) -> str | None:
-    return cleanse.pick_column(df, *COL_ALIASES.get(field_key, ()))
+FILE_SCOPED_COL_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+    MEIRUN1_INITIAL_TRANSFER_FILE: {
+        "min_institution_transferable_amount": ("金融机构可转让",),
+    },
+}
+
+
+def normalize_source_file_name(file_name: str | None) -> str:
+    if not file_name:
+        return ""
+    return file_name.strip().replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def aliases_for_field(field_key: str, file_name: str | None = None) -> tuple[str, ...]:
+    aliases = COL_ALIASES.get(field_key, ())
+    scoped = FILE_SCOPED_COL_ALIASES.get(normalize_source_file_name(file_name), {})
+    extra = scoped.get(field_key, ())
+    if extra:
+        return aliases + extra
+    return aliases
+
+
+def pick_column(
+    df: pd.DataFrame, field_key: str, *, file_name: str | None = None,
+) -> str | None:
+    return cleanse.pick_column(df, *aliases_for_field(field_key, file_name))
 
 
 def issuance_sheet_missing_core(df: pd.DataFrame) -> list[str]:

@@ -330,7 +330,10 @@ def parse_issuance_sheet(
     file_name: str,
     sheet_name: str,
 ) -> tuple[list[dict], list[str], list[str]]:
-    col_map = {key: ic.pick_column(df, key) for key in ic.COL_ALIASES}
+    col_map = {
+        key: ic.pick_column(df, key, file_name=file_name)
+        for key in ic.COL_ALIASES
+    }
     rows: list[dict] = []
     errors: list[str] = []
     warnings: list[str] = []
@@ -1130,6 +1133,61 @@ ISSUANCE_DATE_COLUMNS = frozenset({
 })
 
 
+ISSUANCE_CITY_UNKNOWN = "未知"
+
+ISSUANCE_FUZZY_FILTER_KEYS = frozenset({
+    "custody_asset_code",
+    "business_asset_key",
+    "source_file_name",
+    "source_sheet_name",
+    "from_trust_product_name",
+})
+
+
+def fetch_issuance_record_cities(
+    conn: Connection, trust_product_id: int | None = None
+) -> list[str]:
+    sql = """
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
+        FROM trust_product_issuance_asset_records
+        WHERE 1 = 1
+    """
+    params: dict[str, Any] = {"unknown": ISSUANCE_CITY_UNKNOWN}
+    if trust_product_id is not None:
+        sql += " AND trust_product_id = :trust_product_id"
+        params["trust_product_id"] = trust_product_id
+    sql += " ORDER BY city"
+    rows = conn.execute(text(sql), params)
+    cities = [str(row.city) for row in rows]
+    if ISSUANCE_CITY_UNKNOWN not in cities:
+        cities.append(ISSUANCE_CITY_UNKNOWN)
+        cities.sort()
+    return cities
+
+
+def _append_issuance_record_filter(
+    where_parts: list[str],
+    params: dict[str, Any],
+    key: str,
+    val: Any,
+) -> None:
+    if val is None or val == "":
+        return
+    if key == "city":
+        if val == ISSUANCE_CITY_UNKNOWN:
+            where_parts.append("(r.city IS NULL OR TRIM(r.city) = '')")
+        else:
+            where_parts.append("r.city = :city")
+            params["city"] = val
+        return
+    if key in ISSUANCE_FUZZY_FILTER_KEYS:
+        where_parts.append(f"r.{key}::text ILIKE :{key}")
+        params[key] = f"%{val}%"
+        return
+    where_parts.append(f"r.{key} = :{key}")
+    params[key] = val
+
+
 def fetch_paginated_records(
     conn: Connection,
     page: int,
@@ -1143,24 +1201,21 @@ def fetch_paginated_records(
     where_parts = ["1=1"]
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
 
-    exact_keys = {
-        "trust_product_id": "int",
-        "from_trust_product_id": "int",
-        "issue_date": "date",
-        "trust_product_name": "str",
-        "from_trust_product_name": "str",
-        "custody_asset_code": "str",
-        "business_asset_key": "str",
-        "city": "str",
-        "source_file_name": "str",
-        "source_sheet_name": "str",
-        "migration_type": "str",
-    }
-    for key, kind in exact_keys.items():
-        val = filters.get(key)
-        if val is not None and val != "":
-            where_parts.append(f"r.{key} = :{key}")
-            params[key] = val
+    filter_keys = (
+        "trust_product_id",
+        "from_trust_product_id",
+        "issue_date",
+        "trust_product_name",
+        "from_trust_product_name",
+        "custody_asset_code",
+        "business_asset_key",
+        "city",
+        "source_file_name",
+        "source_sheet_name",
+        "migration_type",
+    )
+    for key in filter_keys:
+        _append_issuance_record_filter(where_parts, params, key, filters.get(key))
 
     where_sql = " AND ".join(where_parts)
     count_row = conn.execute(

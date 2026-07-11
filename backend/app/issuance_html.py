@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from datetime import date
 from html import escape
+from urllib.parse import urlencode
 
 from app.ui_css import BTN_CSS, FORM_FIELD_CSS, PAGE_CHROME_CSS, STANDARD_HEADER_CSS, TABLE_SCROLL_CSS
 from app import issuance_cleanse as ic
 from app import issuance_labels as il
+from app import issuance_upload as iu
 from app.import_ui_labels import (
     PREVIEW_BTN_EXCLUDE_CONFIRM,
     PREVIEW_BTN_SELECT_IMPORT,
@@ -270,19 +272,29 @@ def render_upload_page(trust_products: list[dict]) -> str:
 
 
 def _filter_query_string(filters: dict, page: int | None = None) -> str:
-    parts = []
+    params: dict[str, str] = {}
     for key, val in filters.items():
         if val is not None and val != "":
-            parts.append(f"{key}={escape(str(val))}")
+            params[key] = str(val)
     if page is not None:
-        parts.append(f"page={page}")
-    return "&".join(parts)
+        params["page"] = str(page)
+    return urlencode(params)
+
+
+_ISSUANCE_FUZZY_PLACEHOLDER_FIELDS = frozenset({
+    "custody_asset_code",
+    "business_asset_key",
+    "source_file_name",
+    "source_sheet_name",
+    "from_trust_product_name",
+})
 
 
 def render_records_page(
     filters: dict,
     data: dict,
     trust_products: list[dict] | None = None,
+    city_options: list[str] | None = None,
 ) -> str:
     selected_product_id = str(filters.get("trust_product_id") or "")
     product_options = '<option value="">全部</option>'
@@ -294,14 +306,12 @@ def render_records_page(
         )
 
     filter_fields = [
-        ("trust_product_id", None),
-        ("issue_date", "发行日期"),
-        ("custody_asset_code", "托管房源号"),
-        ("business_asset_key", "发行资产标识"),
-        ("city", "城市"),
-        ("source_file_name", "文件名"),
-        ("source_sheet_name", "工作表名"),
-        ("from_trust_product_name", "转出信托产品"),
+        ("issue_date", "发行日期", "date"),
+        ("custody_asset_code", "托管房源号", "text"),
+        ("business_asset_key", "发行资产标识", "text"),
+        ("source_file_name", "文件名", "text"),
+        ("source_sheet_name", "工作表名", "text"),
+        ("from_trust_product_name", "转出信托产品", "text"),
     ]
     filter_inputs = f"""
         <div><label>信托产品</label>
@@ -314,11 +324,23 @@ def render_records_page(
     filter_inputs += f"""
         <div><label>迁移类型</label>
         <select name="migration_type" form="f" style="width:100%">{migration_options}</select></div>"""
-    for key, label in filter_fields[1:]:
+
+    selected_city = str(filters.get("city") or "")
+    city_option_items = city_options if city_options is not None else [iu.ISSUANCE_CITY_UNKNOWN]
+    city_select = '<option value="">全部城市</option>'
+    for city_name in city_option_items:
+        sel = " selected" if city_name == selected_city else ""
+        city_select += f'<option value="{escape(city_name)}"{sel}>{escape(city_name)}</option>'
+    filter_inputs += f"""
+        <div><label>城市</label>
+        <select name="city" form="f" style="width:100%">{city_select}</select></div>"""
+
+    for key, label, input_type in filter_fields:
         val = escape(str(filters.get(key) or ""))
+        placeholder = ' placeholder="模糊匹配"' if key in _ISSUANCE_FUZZY_PLACEHOLDER_FIELDS else ""
         filter_inputs += f"""
         <div><label>{label}</label>
-        <input name="{key}" value="{val}" form="f"></div>"""
+        <input type="{input_type}" name="{key}" value="{val}" form="f"{placeholder}></div>"""
 
     rows = ""
     headers = ""

@@ -114,21 +114,29 @@ INTERNAL_STATUS_OPTIONS = ["待跟进", "跟进中", "已解决", "已关闭"]
 TRUST_MARKER_DEFAULT = "未标记"
 INTERNAL_STATUS_DEFAULT = "待跟进"
 
-CUSTODY_LIST_HEADERS = [
-    "资产主编号",
-    "托管房源号",
-    "信托产品",
-    "等级",
-    "逾期天数 / 提前结清日期",
-    "最后回款日",
-    "信托标记",
-    "内部状态",
-    "跟进台账",
-    "数据日期",
-    "初始受让金额",
-    "已还款金额",
-    "剩余还款金额",
+ISSUANCE_CITY_UNKNOWN = "未知"
+
+PORTFOLIO_LIST_COLUMNS: list[tuple[str | None, str, str | None]] = [
+    ("asset_code", "资产主编号", "text"),
+    ("custody_asset_code", "托管房源号", "text"),
+    ("trust_product_name", "信托产品", "text"),
+    ("city", "城市", "text"),
+    ("delinquency_bucket", "等级", "text"),
+    ("overdue_sort", "逾期天数 / 提前结清日期", "text"),
+    ("last_payment_date", "最后回款日", "text"),
+    ("trust_marker", "信托标记", "text"),
+    ("internal_status", "内部状态", "text"),
+    (None, "跟进台账", None),
+    ("data_date", "数据日期", "text"),
+    ("initial_transfer_amount", "初始受让金额", "number"),
+    ("repaid_amount", "已还款金额", "number"),
+    ("remaining_amount", "剩余还款金额", "number"),
 ]
+PORTFOLIO_COL_COUNT = len(PORTFOLIO_LIST_COLUMNS)
+PORTFOLIO_AMOUNT_COL_COUNT = 3
+PORTFOLIO_LABEL_COL_COUNT = PORTFOLIO_COL_COUNT - PORTFOLIO_AMOUNT_COL_COUNT
+
+CUSTODY_LIST_HEADERS = [label for _, label, _ in PORTFOLIO_LIST_COLUMNS]
 
 RECONCILIATION_TOLERANCE = RECONCILIATION_TOLERANCE_DEFAULT
 
@@ -455,7 +463,64 @@ def _apply_custody_list_filters(item: dict, filters: dict | None) -> bool:
     custody_q = (filters.get("custody_asset_code") or "").strip().lower()
     if custody_q and custody_q not in item["custody_asset_code"].lower():
         return False
+    city_filter = (filters.get("city") or "").strip()
+    if city_filter and item.get("city_filter") != city_filter:
+        return False
     return True
+
+
+def _issuance_city_lateral_join_sql() -> str:
+    return """
+            LEFT JOIN LATERAL (
+                SELECT i.city
+                FROM trust_product_issuance_asset_records i
+                WHERE i.trust_product_id = mc.trust_product_id
+                  AND (
+                      i.custody_asset_code = mc.custody_asset_code
+                      OR split_part(i.custody_asset_code, '-', 1) = mc.asset_code
+                  )
+                ORDER BY i.issue_date DESC NULLS LAST, i.id DESC
+                LIMIT 1
+            ) iss ON TRUE
+    """
+
+
+def _normalize_portfolio_city(raw) -> tuple[str, str]:
+    if raw is None:
+        return "—", ISSUANCE_CITY_UNKNOWN
+    text = str(raw).strip()
+    if not text:
+        return "—", ISSUANCE_CITY_UNKNOWN
+    return text, text
+
+
+def fetch_overdue_issuance_cities(conn, trust_product_id: int | None = None) -> list[str]:
+    sql = """
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
+        FROM trust_product_issuance_asset_records
+        WHERE 1 = 1
+    """
+    params: dict = {"unknown": ISSUANCE_CITY_UNKNOWN}
+    if trust_product_id is not None:
+        sql += " AND trust_product_id = :trust_product_id"
+        params["trust_product_id"] = trust_product_id
+    sql += " ORDER BY city"
+    rows = conn.execute(text(sql), params)
+    return [str(row.city) for row in rows]
+
+
+def _bucket_amount_totals(items: list) -> dict:
+    return {
+        "count": len(items),
+        "initial_transfer_amount": sum(float(i["initial_transfer_amount"]) for i in items),
+        "repaid_amount": sum(float(i["repaid_amount"]) for i in items),
+        "remaining_amount": sum(float(i["remaining_amount"]) for i in items),
+    }
+
+
+def _portfolio_city_fields(row) -> dict:
+    display, filter_key = _normalize_portfolio_city(getattr(row, "issuance_city", None))
+    return {"city": display, "city_filter": filter_key}
 
 
 def is_es_closed(remaining_amount: float, *, tolerance: float = RECONCILIATION_TOLERANCE) -> bool:
@@ -485,6 +550,7 @@ def _custody_item_from_row(row) -> dict:
     trust_marker = getattr(row, "trust_marker", None) or TRUST_MARKER_DEFAULT
     internal_status = getattr(row, "internal_status", None) or INTERNAL_STATUS_DEFAULT
     followup_count = int(getattr(row, "followup_count", 0) or 0)
+    city_fields = _portfolio_city_fields(row)
     base = {
         "trust_product_id": row.trust_product_id,
         "trust_product_name": row.trust_product_name,
@@ -500,16 +566,19 @@ def _custody_item_from_row(row) -> dict:
         "internal_status": internal_status,
         "followup_count": followup_count,
         "has_follow_up": bool(getattr(row, "has_follow_up", False)),
+        **city_fields,
     }
     if is_es_closed(remaining):
+        settlement = settlement_date
         return {
             **base,
             "risk_level": "ES",
             "delinquency_bucket": "ES",
             "status": "closed",
             "overdue_days": None,
-            "last_payment_date": settlement_date,
-            "settlement_date": settlement_date,
+            "last_payment_date": settlement,
+            "settlement_date": settlement,
+            "overdue_sort": settlement or "",
         }
     raw_od = row.overdue_days
     overdue_days = int(raw_od) if raw_od is not None else 0
@@ -523,6 +592,7 @@ def _custody_item_from_row(row) -> dict:
         "overdue_days": overdue_days,
         "last_payment_date": raw_last_payment,
         "settlement_date": None,
+        "overdue_sort": f"{overdue_days:06d}",
     }
 
 
@@ -804,6 +874,7 @@ def fetch_overdue_overview(
     has_followup: str | None = None,
     asset_code: str | None = None,
     custody_asset_code: str | None = None,
+    city: str | None = None,
 ):
     list_filters = {
         "trust_product_id": trust_product_id,
@@ -813,6 +884,7 @@ def fetch_overdue_overview(
         "has_followup": has_followup,
         "asset_code": asset_code,
         "custody_asset_code": custody_asset_code,
+        "city": city,
     }
     monitor_filter, params = _latest_monitor_filter(trust_product_id, data_date)
     custody_ctes = _monitor_custody_ctes(monitor_filter)
@@ -916,6 +988,9 @@ def fetch_overdue_overview(
             "reconciliation_count_basis": "asset_code",
             "active_followup_count": 0,
             "top_overdue_by_bucket": empty_buckets,
+            "bucket_totals": {k: _bucket_amount_totals([]) for k in empty_buckets},
+            "issuance_city_options": fetch_overdue_issuance_cities(conn, trust_product_id),
+            "list_filters": list_filters,
             **_fetch_overdue_recalc_meta(conn, trust_product_id, data_date),
         }
 
@@ -970,12 +1045,14 @@ def fetch_overdue_overview(
                 mc.max_payment_date,
                 mc.overdue_days,
                 mc.source_asset_codes,
+                iss.city AS issuance_city,
                 COALESCE(tm.trust_marker, :default_trust_marker) AS trust_marker,
                 COALESCE(tm.internal_status, :default_internal_status) AS internal_status,
                 {_custody_followup_count_sql()} AS followup_count,
                 {_custody_has_follow_up_sql()} AS has_follow_up
             FROM monitor_custody mc
             INNER JOIN trust_products tp ON tp.id = mc.trust_product_id
+            {_issuance_city_lateral_join_sql()}
             {_custody_marks_join_sql()}
             ORDER BY
                 {delinquency_buckets.sql_custody_list_sort_priority("mc.overdue_days", "mc.remaining_amount")},
@@ -1002,6 +1079,11 @@ def fetch_overdue_overview(
     for bucket, items in top_overdue_by_bucket.items():
         top_overdue_by_bucket[bucket] = _sort_custody_items_in_bucket(items, bucket)
 
+    bucket_totals = {
+        bucket: _bucket_amount_totals(items)
+        for bucket, items in top_overdue_by_bucket.items()
+    }
+
     es = int(row.es_count)
     m1 = int(row.m1_count)
     m2 = int(row.m2_count)
@@ -1027,6 +1109,8 @@ def fetch_overdue_overview(
         "reconciliation_count_basis": "asset_code",
         "active_followup_count": int(followup_row.cnt) if followup_row else 0,
         "top_overdue_by_bucket": top_overdue_by_bucket,
+        "bucket_totals": bucket_totals,
+        "issuance_city_options": fetch_overdue_issuance_cities(conn, trust_product_id),
         "list_filters": list_filters,
         **_fetch_overdue_recalc_meta(conn, trust_product_id, data_date),
     }
@@ -1559,9 +1643,69 @@ def _render_followup_cell(item: dict) -> str:
     return f'<a href="{base}&new_followup=1">新建</a>'
 
 
-def _render_overdue_custody_rows(items: list, *, empty_label: str = "暂无记录") -> str:
+def _render_portfolio_table_head() -> str:
+    cells = []
+    for sort_key, label, sort_type in PORTFOLIO_LIST_COLUMNS:
+        if sort_key and sort_type:
+            cells.append(
+                f'<th class="sortable" data-sort="{escape(sort_key)}" '
+                f'data-sort-type="{escape(sort_type)}">{escape(label)}</th>'
+            )
+        else:
+            cells.append(f"<th>{escape(label)}</th>")
+    return "".join(cells)
+
+
+def _portfolio_row_sort_attrs(item: dict) -> str:
+    parts = []
+    for sort_key, _, sort_type in PORTFOLIO_LIST_COLUMNS:
+        if not sort_key:
+            continue
+        raw = item.get(sort_key)
+        if sort_type == "number":
+            val = "" if raw is None else str(float(raw))
+        else:
+            val = "" if raw is None else str(raw)
+        parts.append(f'data-sort-{sort_key}="{escape(val)}"')
+    return " ".join(parts)
+
+
+def _render_portfolio_tfoot(totals: dict) -> str:
+    count = int(totals.get("count") or 0)
+    return f"""
+        <tfoot>
+            <tr class="portfolio-totals">
+                <td colspan="{PORTFOLIO_LABEL_COL_COUNT}">
+                    <strong>合计（本 Tab · {count} 条）</strong>
+                </td>
+                <td class="num">{fmt_money(float(totals.get("initial_transfer_amount") or 0))}</td>
+                <td class="num">{fmt_money(float(totals.get("repaid_amount") or 0))}</td>
+                <td class="num">{fmt_money(float(totals.get("remaining_amount") or 0))}</td>
+            </tr>
+        </tfoot>
+    """
+
+
+def _render_portfolio_table(items: list, *, totals: dict, empty_label: str = "暂无记录") -> str:
+    head = _render_portfolio_table_head()
     if not items:
-        return f'<tr><td colspan="{len(CUSTODY_LIST_HEADERS)}" class="empty">{escape(empty_label)}</td></tr>'
+        body = (
+            f'<tr class="empty-row"><td colspan="{PORTFOLIO_COL_COUNT}" class="empty">'
+            f"{escape(empty_label)}</td></tr>"
+        )
+    else:
+        body = _render_overdue_custody_rows(items)
+    foot = _render_portfolio_tfoot(totals)
+    return f"""
+        <table class="portfolio-table">
+            <thead><tr>{head}</tr></thead>
+            <tbody>{body}</tbody>
+            {foot}
+        </table>
+    """
+
+
+def _render_overdue_custody_rows(items: list) -> str:
     rows = ""
     for item in items:
         is_es = item.get("delinquency_bucket") == "ES"
@@ -1572,11 +1716,13 @@ def _render_overdue_custody_rows(items: list, *, empty_label: str = "暂无记�
             od = item.get("overdue_days")
             col5 = escape(str(od) if od is not None else "—")
             col6 = escape(item.get("last_payment_date") or "—")
+        sort_attrs = _portfolio_row_sort_attrs(item)
         rows += f"""
-            <tr>
+            <tr {sort_attrs}>
                 <td>{escape(item.get("asset_code") or "—")}</td>
                 <td>{escape(item["custody_asset_code"])}</td>
                 <td>{escape(item["trust_product_name"])}</td>
+                <td>{escape(item.get("city") or "—")}</td>
                 <td>{fmt_delinquency_badge(item["delinquency_bucket"])}</td>
                 <td class="num">{col5}</td>
                 <td>{col6}</td>
@@ -1593,11 +1739,11 @@ def _render_overdue_custody_rows(items: list, *, empty_label: str = "暂无记�
 
 
 def _render_custody_table_rows(items: list) -> str:
-    return _render_overdue_custody_rows(items, empty_label="暂无逾期房源")
+    return _render_overdue_custody_rows(items)
 
 
 def _render_custody_es_table_rows(items: list) -> str:
-    return _render_overdue_custody_rows(items, empty_label="暂无提前结清资产")
+    return _render_overdue_custody_rows(items)
 
 
 def _render_reconciliation_table_rows(reconciliation: list) -> str:
@@ -1669,6 +1815,8 @@ def render_overdue_html(
     code_mismatch_alerts: list | None = None,
 ):
     buckets = overview.get("top_overdue_by_bucket") or {}
+    bucket_totals = overview.get("bucket_totals") or {}
+    city_options_list = overview.get("issuance_city_options") or []
     tab_defs = [
         ("M3_PLUS", "M3+", buckets.get("M3_PLUS", [])),
         ("M3", "M3", buckets.get("M3", [])),
@@ -1697,7 +1845,6 @@ def render_overdue_html(
                 default_tab_idx = idx
                 break
 
-    table_head = "".join(f"<th>{escape(h)}</th>" for h in CUSTODY_LIST_HEADERS)
     tab_buttons = ""
     tab_panels = ""
     for idx, (key, label, items) in enumerate(tab_defs):
@@ -1707,12 +1854,12 @@ def render_overdue_html(
             f'{escape(label)} ({len(items)})</button>'
         )
         panel_style = "" if idx == default_tab_idx else ' style="display:none"'
+        totals = bucket_totals.get(key) or _bucket_amount_totals(items)
         tab_panels += f"""
             <div class="tab-panel {active}" id="tab-{key}"{panel_style}>
-                <table>
-                    <thead><tr>{table_head}</tr></thead>
-                    <tbody>{_render_overdue_custody_rows(items)}</tbody>
-                </table>
+                <div class="table-scroll-x">
+                    {_render_portfolio_table(items, totals=totals, empty_label="暂无资产")}
+                </div>
             </div>
         """
 
@@ -1751,6 +1898,11 @@ def render_overdue_html(
     asset_q = escape(f.get("asset_code") or "")
     custody_q = escape(f.get("custody_asset_code") or "")
 
+    city_options = '<option value="">全部城市</option>'
+    for city_name in city_options_list:
+        sel = " selected" if f.get("city") == city_name else ""
+        city_options += f'<option value="{escape(city_name)}"{sel}>{escape(city_name)}</option>'
+
     filter_bar = f"""
         <form class="filter-form" method="get" action="/overdue">
             <label>信托产品
@@ -1771,6 +1923,9 @@ def render_overdue_html(
                     <option value="yes"{followup_yes}>有台账</option>
                     <option value="no"{followup_no}>无台账</option>
                 </select>
+            </label>
+            <label>城市
+                <select name="city">{city_options}</select>
             </label>
             <label>资产主编号
                 <input type="text" name="asset_code" value="{asset_q}" placeholder="模糊匹配">
@@ -1981,6 +2136,30 @@ def render_overdue_html(
         .empty {{ color: #64748b; text-align: center; }}
         .card-hint {{ font-size: 0.72rem; color: #64748b; margin-top: 0.35rem; line-height: 1.3; }}
         .tabs {{ display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; }}
+        .portfolio-panel {{ overflow: visible; }}
+        .portfolio-panel .table-scroll-x {{
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            max-width: 100%;
+        }}
+        .portfolio-panel .table-scroll-x table {{
+            width: max-content;
+            min-width: 100%;
+            border-collapse: collapse;
+        }}
+        .portfolio-table th.sortable {{
+            cursor: pointer;
+            user-select: none;
+        }}
+        .portfolio-table th.sortable:hover {{ color: #e2e8f0; }}
+        .portfolio-table th.sortable.sort-asc::after {{ content: ' ▲'; font-size: 0.65rem; }}
+        .portfolio-table th.sortable.sort-desc::after {{ content: ' ▼'; font-size: 0.65rem; }}
+        tr.portfolio-totals td {{
+            font-weight: 600;
+            border-top: 2px solid rgba(255, 255, 255, 0.15);
+            background: rgba(255, 255, 255, 0.04);
+        }}
+        tr.portfolio-totals td:first-child {{ color: #e2e8f0; }}
         .header-row {{
             display: flex; justify-content: space-between; align-items: flex-start;
             flex-wrap: wrap; gap: 1rem;
@@ -2031,10 +2210,10 @@ def render_overdue_html(
 
         <section class="section">
             <h2 class="section-title">
-                逾期房源
+                资产组合管理
                 <a class="api-link" href="/overdue/checks">查看全部 JSON</a>
             </h2>
-            <div class="card table-wrap">
+            <div class="card portfolio-panel">
                 {filter_bar}
                 <div class="tabs">{tab_buttons}</div>
                 {tab_panels}
@@ -2282,7 +2461,7 @@ def render_overdue_html(
     document.querySelectorAll('.tab-btn[data-tab]').forEach(function(btn) {{
         btn.addEventListener('click', function() {{
             var key = btn.getAttribute('data-tab');
-            document.querySelectorAll('.tab-btn').forEach(function(b) {{ b.classList.remove('active'); }});
+            document.querySelectorAll('.tab-btn[data-tab]').forEach(function(b) {{ b.classList.remove('active'); }});
             document.querySelectorAll('.tab-panel').forEach(function(p) {{
                 p.style.display = 'none';
                 p.classList.remove('active');
@@ -2295,6 +2474,45 @@ def render_overdue_html(
             }}
         }});
     }});
+
+    (function() {{
+        document.querySelectorAll('.portfolio-table').forEach(function(table) {{
+            var thead = table.querySelector('thead');
+            if (!thead) return;
+            thead.querySelectorAll('th.sortable').forEach(function(th) {{
+                th.addEventListener('click', function() {{
+                    var key = th.getAttribute('data-sort');
+                    var sortType = th.getAttribute('data-sort-type') || 'text';
+                    var tbody = table.querySelector('tbody');
+                    if (!tbody || !key) return;
+                    var rows = Array.from(tbody.querySelectorAll('tr')).filter(function(row) {{
+                        return !row.classList.contains('empty-row');
+                    }});
+                    if (!rows.length) return;
+                    var dir = th.getAttribute('data-sort-dir') === 'asc' ? 'desc' : 'asc';
+                    thead.querySelectorAll('th.sortable').forEach(function(h) {{
+                        h.removeAttribute('data-sort-dir');
+                        h.classList.remove('sort-asc', 'sort-desc');
+                    }});
+                    th.setAttribute('data-sort-dir', dir);
+                    th.classList.add(dir === 'asc' ? 'sort-asc' : 'sort-desc');
+                    var attr = 'data-sort-' + key;
+                    rows.sort(function(a, b) {{
+                        var av = a.getAttribute(attr) || '';
+                        var bv = b.getAttribute(attr) || '';
+                        var cmp;
+                        if (sortType === 'number') {{
+                            cmp = (parseFloat(av) || 0) - (parseFloat(bv) || 0);
+                        }} else {{
+                            cmp = av.localeCompare(bv, 'zh-CN');
+                        }}
+                        return dir === 'asc' ? cmp : -cmp;
+                    }});
+                    rows.forEach(function(row) {{ tbody.appendChild(row); }});
+                }});
+            }});
+        }});
+    }})();
     </script>
 </body>
 </html>"""
@@ -3568,6 +3786,7 @@ def overdue_overview(
     has_followup: str | None = None,
     asset_code: str | None = None,
     custody_asset_code: str | None = None,
+    city: str | None = None,
 ):
     pid = query_utils.parse_optional_int(trust_product_id)
     dd = query_utils.parse_optional_date(data_date)
@@ -3582,6 +3801,7 @@ def overdue_overview(
             has_followup=query_utils.clean_optional_str(has_followup),
             asset_code=query_utils.clean_optional_str(asset_code),
             custody_asset_code=query_utils.clean_optional_str(custody_asset_code),
+            city=query_utils.clean_optional_str(city),
         )
 
 
@@ -3691,6 +3911,7 @@ def overdue_dashboard(
     has_followup: str | None = None,
     asset_code: str | None = None,
     custody_asset_code: str | None = None,
+    city: str | None = None,
 ):
     pid = query_utils.parse_optional_int(trust_product_id)
     parsed_delinquency = query_utils.clean_optional_str(delinquency_bucket)
@@ -3699,6 +3920,7 @@ def overdue_dashboard(
     parsed_has_followup = query_utils.clean_optional_str(has_followup)
     parsed_asset = query_utils.clean_optional_str(asset_code)
     parsed_custody = query_utils.clean_optional_str(custody_asset_code)
+    parsed_city = query_utils.clean_optional_str(city)
     filters = {
         "trust_product_id": pid,
         "delinquency_bucket": parsed_delinquency,
@@ -3707,6 +3929,7 @@ def overdue_dashboard(
         "has_followup": parsed_has_followup,
         "asset_code": parsed_asset,
         "custody_asset_code": parsed_custody,
+        "city": parsed_city,
     }
     with engine.connect() as conn:
         overview = fetch_overdue_overview(
@@ -3718,6 +3941,7 @@ def overdue_dashboard(
             has_followup=parsed_has_followup,
             asset_code=parsed_asset,
             custody_asset_code=parsed_custody,
+            city=parsed_city,
         )
         recon_data = fetch_reconciliation(conn, pid)
         followups = fetch_overdue_followups(pid)
@@ -4236,6 +4460,18 @@ def _parse_asset_stats_dates(
     return date_from, date_to
 
 
+def _parse_asset_stats_issue_date(issue_date: str | None) -> str | None:
+    cleaned = query_utils.clean_optional_str(issue_date)
+    if not cleaned:
+        return None
+    if cleaned.lower() == repayment_analytics.ISSUE_DATE_ALL:
+        return repayment_analytics.ISSUE_DATE_ALL
+    parsed = query_utils.parse_optional_date(cleaned)
+    if parsed:
+        return parsed[:10]
+    raise HTTPException(status_code=400, detail="issue_date 无效")
+
+
 @app.get("/assetinfo/asset-stats/issue-dates")
 def asset_stats_issue_dates(
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -4246,7 +4482,8 @@ def asset_stats_issue_dates(
         raise HTTPException(status_code=400, detail="trust_product_id 无效")
     with engine.connect() as conn:
         items = repayment_analytics.fetch_issue_dates(conn, pid)
-    return {"items": items}
+        all_summary = repayment_analytics.fetch_all_issue_summary(conn, pid)
+    return {"items": items, "all": all_summary}
 
 
 @app.get("/assetinfo/asset-stats/cities")
@@ -4258,11 +4495,9 @@ def asset_stats_cities(
     pid = query_utils.parse_optional_int(trust_product_id)
     if pid is None:
         raise HTTPException(status_code=400, detail="trust_product_id 无效")
-    parsed_issue = query_utils.parse_optional_date(issue_date)
-    if not parsed_issue:
-        raise HTTPException(status_code=400, detail="issue_date 无效")
+    issue_key = _parse_asset_stats_issue_date(issue_date)
     with engine.connect() as conn:
-        items = repayment_analytics.fetch_issuance_cities(conn, pid, parsed_issue[:10])
+        items = repayment_analytics.fetch_issuance_cities(conn, pid, issue_key)
     return {"items": items}
 
 
@@ -4282,8 +4517,7 @@ def asset_stats_data(
     if period not in ("week", "month", "year"):
         raise HTTPException(status_code=400, detail="period 须为 week/month/year")
     d_from, d_to = _parse_asset_stats_dates(date_from, date_to)
-    parsed_issue = query_utils.parse_optional_date(issue_date)
-    issue_str = parsed_issue[:10] if parsed_issue else None
+    issue_str = _parse_asset_stats_issue_date(issue_date)
     city_filter = query_utils.clean_optional_str(city)
     with engine.connect() as conn:
         try:
@@ -4311,7 +4545,7 @@ def asset_stats_page(
     city: str | None = Query(default=None),
 ):
     pid = query_utils.parse_optional_int(trust_product_id)
-    parsed_issue = query_utils.parse_optional_date(issue_date)
+    issue_str = _parse_asset_stats_issue_date(issue_date) if issue_date else None
     period_val = period if period in ("week", "month", "year") else "month"
     with engine.connect() as conn:
         products = [
@@ -4321,7 +4555,7 @@ def asset_stats_page(
     html = repayment_analytics_html.render_asset_stats_page(
         products,
         trust_product_id=pid,
-        issue_date=parsed_issue[:10] if parsed_issue else None,
+        issue_date=issue_str,
         period=period_val,
         date_from=date_from,
         date_to=date_to,
@@ -4457,5 +4691,8 @@ def issuance_records_page(
             {"id": r.id, "name": r.name}
             for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         ]
-    html = issuance_html.render_records_page(filters, data, products)
+        city_options = issuance_upload.fetch_issuance_record_cities(
+            conn, filters.get("trust_product_id")
+        )
+    html = issuance_html.render_records_page(filters, data, products, city_options)
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))

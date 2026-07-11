@@ -576,5 +576,49 @@ class TestAssetTransferDiscountRatePrecheckStats(unittest.TestCase):
         self.assertTrue(any("发现疑似资产转让折扣率列" in w for w in result["warnings"]))
 
 
+class TestFileScopedMinColumnAliases(unittest.TestCase):
+    def _issuance_df(self, min_col: str | None = None) -> pd.DataFrame:
+        data = {
+            "房源编码": ["107112371893"],
+            "实际成交价（应收账款合同金额）": [179771.0],
+            "应收账款转让价款": [149209.93],
+        }
+        if min_col:
+            data[min_col] = [120000.0]
+        return pd.DataFrame(data)
+
+    def test_meirun_initial_transfer_maps_financial_institution_column(self):
+        df = self._issuance_df("金融机构可转让")
+        col = ic.pick_column(
+            df,
+            "min_institution_transferable_amount",
+            file_name=ic.MEIRUN1_INITIAL_TRANSFER_FILE,
+        )
+        self.assertEqual(col, "金融机构可转让")
+
+    def test_other_file_does_not_map_financial_institution_column(self):
+        df = self._issuance_df("金融机构可转让")
+        col = ic.pick_column(
+            df, "min_institution_transferable_amount", file_name="其他.xlsx",
+        )
+        self.assertIsNone(col)
+
+    def test_parse_row_populates_min_for_meirun_file(self):
+        df = self._issuance_df("金融机构可转让")
+        conn = MagicMock()
+        rows, errors, _ = iu.parse_issuance_sheet(
+            conn,
+            df,
+            trust_product_id=4,
+            trust_product_name="美润1号",
+            issue_date=date(2026, 3, 20),
+            file_name=ic.MEIRUN1_INITIAL_TRANSFER_FILE,
+            sheet_name="合同",
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["min_institution_transferable_amount"], 120000.0)
+
+
 if __name__ == "__main__":
     unittest.main()

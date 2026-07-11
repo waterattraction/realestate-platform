@@ -2072,6 +2072,39 @@ def _monitor_transferred_out_exists_sql() -> str:
     """
 
 
+ASSETINFO_FUZZY_FILTER_KEYS = frozenset({
+    "asset_code",
+    "custody_asset_code",
+    "source_asset_code",
+    "source_file_name",
+    "source_sheet_name",
+})
+
+
+def _append_assetinfo_record_filter(
+    where_parts: list[str],
+    params: dict[str, Any],
+    key: str,
+    val: Any,
+    *,
+    skip_trust_product_where: bool = False,
+) -> None:
+    if val is None or val == "":
+        return
+    if key == "trust_product_id":
+        params[key] = int(val)
+        if skip_trust_product_where:
+            return
+        where_parts.append("r.trust_product_id = :trust_product_id")
+        return
+    if key in ASSETINFO_FUZZY_FILTER_KEYS:
+        where_parts.append(f"r.{key}::text ILIKE :{key}")
+        params[key] = f"%{val}%"
+        return
+    where_parts.append(f"r.{key} = :{key}")
+    params[key] = val
+
+
 def fetch_paginated_records(
     conn: Connection,
     table: str,
@@ -2100,13 +2133,15 @@ def fetch_paginated_records(
         "custody_asset_code", "source_asset_code",
         "source_file_name", "source_sheet_name",
     ):
-        val = filters.get(key)
-        if val is not None and val != "":
-            if key == "trust_product_id" and transferred == "yes":
-                params[key] = int(val)
-                continue
-            where_parts.append(f"r.{key} = :{key}")
-            params[key] = int(val) if key == "trust_product_id" else val
+        _append_assetinfo_record_filter(
+            where_parts,
+            params,
+            key,
+            filters.get(key),
+            skip_trust_product_where=(
+                key == "trust_product_id" and transferred == "yes"
+            ),
+        )
 
     where_sql = " AND ".join(where_parts)
     snapshot_join = ""

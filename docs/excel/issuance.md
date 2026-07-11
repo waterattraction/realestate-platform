@@ -43,6 +43,13 @@
 | `receivable_transfer_amount` | 应收账款转让价款 |
 | `asset_transfer_discount_rate` | 资产转让折扣率(%)、资产转让折扣率（数值）(%)、资产转让折扣率(数值)(%)、资产转让折扣率 |
 | `min_institution_transferable_amount` | MIN金融机构可转让、MIN金额机构可转让最终 |
+
+**文件级别名（仅指定来源文件额外生效，不影响其他 Excel）：**
+
+| 来源文件 | 字段 | 额外 Excel 列名 |
+|----------|------|-----------------|
+| `美润1号服务信托房源明细（首期转让）.xlsx` | `min_institution_transferable_amount` | 金融机构可转让 |
+
 | `remaining_unpaid_amount_beike_not_withheld` | 剩余未还款金额--贝壳未代扣 |
 | `rental_price` | 出房价格 |
 | `total_rent_withholding_amount` | 总租金代扣金额、租金代扣金额 |
