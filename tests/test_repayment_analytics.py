@@ -105,6 +105,8 @@ class TestIssuanceStockAll(unittest.TestCase):
                 "transferred_min_transferable_total": 3673885.10,
                 "transferred_receivable_transfer_total": 3241271.63,
                 "pre_transfer_repaid_total": 525012.90,
+                "transferred_in_count": 0,
+                "transferred_out_dest_count": 47,
                 "monitor_snapshot_date": date(2026, 7, 3),
                 "monitor_asset_count": 127,
                 "initial_transfer_total": 9740396.44,
@@ -112,7 +114,23 @@ class TestIssuanceStockAll(unittest.TestCase):
                 "remaining_total": 7202878.46,
                 "paid_off_count": 4,
                 "unpaid_count": 123,
+                "overdue_asset_count": 80,
+                "current_asset_count": 43,
                 "no_monitor_count": 0,
+                "paid_off_asset_count": 4,
+                "paid_off_initial": 100000.0,
+                "paid_off_repaid": 100000.0,
+                "paid_off_remaining": 0.0,
+                "current_initial": 3000000.0,
+                "current_repaid": 800000.0,
+                "current_remaining": 2200000.0,
+                "overdue_initial": 6440396.44,
+                "overdue_repaid": 1637517.98,
+                "overdue_remaining": 4802878.46,
+                "no_monitor_asset_count": 0,
+                "no_monitor_initial": 0.0,
+                "no_monitor_repaid": 0.0,
+                "no_monitor_remaining": 0.0,
             }
             result.mappings.return_value = mappings
             return result
@@ -120,6 +138,12 @@ class TestIssuanceStockAll(unittest.TestCase):
         conn.execute = execute
         stock, monitor = ra.fetch_issuance_stock_with_monitor(conn, 4, "all")
         self.assertEqual(stock["effective_asset_count"], 127)
+        self.assertEqual(monitor["overdue_count"], 80)
+        self.assertEqual(monitor["current_count"], 43)
+        self.assertEqual(monitor["by_bucket"]["overdue"]["asset_count"], 80)
+        self.assertEqual(stock["transferred_out_dest_count"], 47)
+        self.assertEqual(stock["transferred_in_count"], 0)
+        self.assertEqual(stock["transferred_out_count"], stock["transferred_out_dest_count"])
         self.assertEqual(stock["transferred_min_transferable_total"], 3673885.10)
         self.assertEqual(stock["pre_transfer_repaid_total"], 525012.90)
         self.assertAlmostEqual(
@@ -129,8 +153,8 @@ class TestIssuanceStockAll(unittest.TestCase):
             stock["min_transferable_total"],
         )
         self.assertEqual(monitor["initial_transfer_total"], 9740396.44)
-        self.assertIn("pre_transfer_repaid", captured["sql"])
-        self.assertIn("from_trust_product_id", captured["sql"])
+        self.assertIn("transferred_in_counts", captured["sql"])
+        self.assertIn("transferred_out_dest", captured["sql"])
 
 
 class TestDisplayIssueDate(unittest.TestCase):

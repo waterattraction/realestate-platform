@@ -9,10 +9,12 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from app import assetinfo_cleanse as cleanse
+from app.overdue.buckets import M1_MAX_DAYS
 
 PeriodKind = Literal["week", "month", "year"]
 
 RECONCILIATION_TOLERANCE = cleanse.RECONCILIATION_TOLERANCE
+STATS_OVERDUE_THRESHOLD_DAYS = M1_MAX_DAYS  # 未逾期: overdue_days <= 35; 逾期: > 35 (M2+)
 
 PRIMARY_FROM_CUSTODY_SQL = """
     CASE
@@ -181,6 +183,8 @@ def _empty_issuance_stock() -> dict[str, Any]:
         "transferred_min_transferable_total": 0.0,
         "transferred_receivable_transfer_total": 0.0,
         "pre_transfer_repaid_total": 0.0,
+        "transferred_in_count": 0,
+        "transferred_out_dest_count": 0,
         "paid_off_count": None,
         "unpaid_count": None,
         "no_monitor_count": 0,
@@ -189,14 +193,41 @@ def _empty_issuance_stock() -> dict[str, Any]:
 
 
 def _empty_monitor_summary() -> dict[str, Any]:
+    empty_bucket = _empty_monitor_bucket()
     return {
         "monitor_snapshot_date": None,
         "monitor_asset_count": None,
         "paid_off_count": None,
         "unpaid_count": None,
+        "overdue_count": None,
+        "current_count": None,
         "initial_transfer_total": None,
         "repaid_total": None,
         "remaining_total": None,
+        "by_bucket": {
+            "paid_off": empty_bucket,
+            "current": empty_bucket,
+            "overdue": empty_bucket,
+            "no_monitor": empty_bucket,
+        },
+    }
+
+
+def _empty_monitor_bucket() -> dict[str, Any]:
+    return {
+        "asset_count": 0,
+        "initial_transfer_total": 0.0,
+        "repaid_total": 0.0,
+        "remaining_total": 0.0,
+    }
+
+
+def _monitor_bucket_from_row(row: dict[str, Any], prefix: str) -> dict[str, Any]:
+    return {
+        "asset_count": int(row[f"{prefix}_asset_count"] or 0),
+        "initial_transfer_total": float(row[f"{prefix}_initial"] or 0),
+        "repaid_total": float(row[f"{prefix}_repaid"] or 0),
+        "remaining_total": float(row[f"{prefix}_remaining"] or 0),
     }
 
 
@@ -220,6 +251,8 @@ def _split_stock_and_monitor(row: dict[str, Any]) -> tuple[dict[str, Any], dict[
             row["transferred_receivable_transfer_total"] or 0
         ),
         "pre_transfer_repaid_total": float(row["pre_transfer_repaid_total"] or 0),
+        "transferred_in_count": int(row["transferred_in_count"] or 0),
+        "transferred_out_dest_count": int(row["transferred_out_dest_count"] or 0),
         "paid_off_count": int(row["paid_off_count"] or 0) if has_monitor else None,
         "unpaid_count": int(row["unpaid_count"] or 0) if has_monitor else None,
         "no_monitor_count": int(row["no_monitor_count"] or 0),
@@ -230,9 +263,17 @@ def _split_stock_and_monitor(row: dict[str, Any]) -> tuple[dict[str, Any], dict[
         "monitor_asset_count": int(row["monitor_asset_count"] or 0) if has_monitor else None,
         "paid_off_count": stock["paid_off_count"],
         "unpaid_count": stock["unpaid_count"],
+        "overdue_count": int(row["overdue_asset_count"] or 0) if has_monitor else None,
+        "current_count": int(row["current_asset_count"] or 0) if has_monitor else None,
         "initial_transfer_total": float(row["initial_transfer_total"] or 0) if has_monitor else None,
         "repaid_total": float(row["repaid_total"] or 0) if has_monitor else None,
         "remaining_total": float(row["remaining_total"] or 0) if has_monitor else None,
+        "by_bucket": {
+            "paid_off": _monitor_bucket_from_row(row, "paid_off"),
+            "current": _monitor_bucket_from_row(row, "current"),
+            "overdue": _monitor_bucket_from_row(row, "overdue"),
+            "no_monitor": _monitor_bucket_from_row(row, "no_monitor"),
+        },
     }
     return stock, monitor_summary
 
@@ -376,6 +417,7 @@ def fetch_issuance_stock_with_monitor(
     params: dict[str, Any] = {
         "pid": trust_product_id,
         "tolerance": RECONCILIATION_TOLERANCE,
+        "overdue_threshold": STATS_OVERDUE_THRESHOLD_DAYS,
         **issue_params,
     }
     if city:
@@ -463,6 +505,22 @@ def fetch_issuance_stock_with_monitor(
                   AND r.repayment_date IS NOT NULL
                   AND r.repayment_date < t.transfer_issue_date
             ),
+            transferred_in_counts AS (
+                SELECT COUNT(DISTINCT i.custody_asset_code) AS transferred_in_count
+                FROM trust_product_issuance_asset_records i
+                WHERE i.trust_product_id = :pid
+                  AND i.from_trust_product_id IS NOT NULL
+                  AND i.from_trust_product_id <> :pid
+                  {issue_date_filter}
+                  {city_filter}
+            ),
+            transferred_out_dest AS (
+                SELECT COUNT(DISTINCT dst.custody_asset_code) AS transferred_out_dest_count
+                FROM trust_product_issuance_asset_records dst
+                INNER JOIN transferred t ON t.custody_asset_code = dst.custody_asset_code
+                WHERE dst.from_trust_product_id = :pid
+                  AND dst.trust_product_id <> :pid
+            ),
             monitor_latest AS (
                 SELECT MAX(data_date) AS data_date
                 FROM trust_asset_monitor_records
@@ -473,7 +531,8 @@ def fetch_issuance_stock_with_monitor(
                     m.asset_code,
                     SUM(m.initial_transfer_amount) AS initial_transfer_amount,
                     SUM(m.repaid_amount) AS repaid_amount,
-                    SUM(m.remaining_amount) AS remaining_amount
+                    SUM(m.remaining_amount) AS remaining_amount,
+                    MAX(m.overdue_days) AS overdue_days
                 FROM trust_asset_monitor_records m
                 INNER JOIN monitor_latest ml ON m.data_date = ml.data_date
                 WHERE m.trust_product_id = :pid
@@ -482,19 +541,59 @@ def fetch_issuance_stock_with_monitor(
             active_primaries AS (
                 SELECT DISTINCT primary_asset_code FROM active_pool
             ),
-            classified AS (
-                SELECT a.custody_asset_code, m.remaining_amount
-                FROM active_pool a
-                LEFT JOIN monitor_by_primary m ON m.asset_code = a.primary_asset_code
+            active_monitor AS (
+                SELECT
+                    ap.primary_asset_code,
+                    m.asset_code,
+                    COALESCE(m.initial_transfer_amount, 0) AS initial_transfer_amount,
+                    COALESCE(m.repaid_amount, 0) AS repaid_amount,
+                    m.remaining_amount,
+                    m.overdue_days
+                FROM active_primaries ap
+                LEFT JOIN monitor_by_primary m ON m.asset_code = ap.primary_asset_code
+            ),
+            asset_bucket AS (
+                SELECT
+                    primary_asset_code,
+                    initial_transfer_amount,
+                    repaid_amount,
+                    remaining_amount,
+                    CASE
+                        WHEN asset_code IS NULL OR remaining_amount IS NULL THEN 'no_monitor'
+                        WHEN remaining_amount <= :tolerance THEN 'paid_off'
+                        WHEN overdue_days > :overdue_threshold THEN 'overdue'
+                        ELSE 'current'
+                    END AS bucket
+                FROM active_monitor
             ),
             monitor_totals AS (
                 SELECT
-                    COUNT(*) FILTER (WHERE m.asset_code IS NOT NULL) AS monitor_asset_count,
-                    COALESCE(SUM(m.initial_transfer_amount), 0) AS initial_transfer_total,
-                    COALESCE(SUM(m.repaid_amount), 0) AS repaid_total,
-                    COALESCE(SUM(m.remaining_amount), 0) AS remaining_total
-                FROM active_primaries ap
-                LEFT JOIN monitor_by_primary m ON m.asset_code = ap.primary_asset_code
+                    COUNT(*) FILTER (WHERE bucket <> 'no_monitor') AS monitor_asset_count,
+                    COALESCE(SUM(initial_transfer_amount), 0) AS initial_transfer_total,
+                    COALESCE(SUM(repaid_amount), 0) AS repaid_total,
+                    COALESCE(SUM(remaining_amount), 0) AS remaining_total,
+                    COUNT(*) FILTER (WHERE bucket = 'paid_off') AS paid_off_count,
+                    COUNT(*) FILTER (WHERE bucket IN ('current', 'overdue', 'no_monitor')) AS unpaid_count,
+                    COUNT(*) FILTER (WHERE bucket = 'overdue') AS overdue_asset_count,
+                    COUNT(*) FILTER (WHERE bucket = 'current') AS current_asset_count,
+                    COUNT(*) FILTER (WHERE bucket = 'no_monitor') AS no_monitor_count,
+                    COUNT(*) FILTER (WHERE bucket = 'paid_off') AS paid_off_asset_count,
+                    COALESCE(SUM(initial_transfer_amount) FILTER (WHERE bucket = 'paid_off'), 0) AS paid_off_initial,
+                    COALESCE(SUM(repaid_amount) FILTER (WHERE bucket = 'paid_off'), 0) AS paid_off_repaid,
+                    COALESCE(SUM(remaining_amount) FILTER (WHERE bucket = 'paid_off'), 0) AS paid_off_remaining,
+                    COUNT(*) FILTER (WHERE bucket = 'current') AS current_asset_count_dup,
+                    COALESCE(SUM(initial_transfer_amount) FILTER (WHERE bucket = 'current'), 0) AS current_initial,
+                    COALESCE(SUM(repaid_amount) FILTER (WHERE bucket = 'current'), 0) AS current_repaid,
+                    COALESCE(SUM(remaining_amount) FILTER (WHERE bucket = 'current'), 0) AS current_remaining,
+                    COUNT(*) FILTER (WHERE bucket = 'overdue') AS overdue_asset_count_dup,
+                    COALESCE(SUM(initial_transfer_amount) FILTER (WHERE bucket = 'overdue'), 0) AS overdue_initial,
+                    COALESCE(SUM(repaid_amount) FILTER (WHERE bucket = 'overdue'), 0) AS overdue_repaid,
+                    COALESCE(SUM(remaining_amount) FILTER (WHERE bucket = 'overdue'), 0) AS overdue_remaining,
+                    COUNT(*) FILTER (WHERE bucket = 'no_monitor') AS no_monitor_asset_count,
+                    COALESCE(SUM(initial_transfer_amount) FILTER (WHERE bucket = 'no_monitor'), 0) AS no_monitor_initial,
+                    COALESCE(SUM(repaid_amount) FILTER (WHERE bucket = 'no_monitor'), 0) AS no_monitor_repaid,
+                    COALESCE(SUM(remaining_amount) FILTER (WHERE bucket = 'no_monitor'), 0) AS no_monitor_remaining
+                FROM asset_bucket
             )
             SELECT
                 (SELECT COUNT(DISTINCT custody_asset_code) FROM scoped_rows) AS issued_asset_count,
@@ -507,20 +606,38 @@ def fetch_issuance_stock_with_monitor(
                 transferred_amounts.transferred_min_transferable_total,
                 transferred_amounts.transferred_receivable_transfer_total,
                 pre_transfer_repaid.pre_transfer_repaid_total,
+                transferred_in_counts.transferred_in_count,
+                transferred_out_dest.transferred_out_dest_count,
                 ml.data_date AS monitor_snapshot_date,
                 monitor_totals.monitor_asset_count,
                 monitor_totals.initial_transfer_total,
                 monitor_totals.repaid_total,
                 monitor_totals.remaining_total,
-                (SELECT COUNT(*) FROM classified
-                 WHERE remaining_amount IS NOT NULL AND remaining_amount <= :tolerance) AS paid_off_count,
-                (SELECT COUNT(*) FROM classified
-                 WHERE remaining_amount IS NULL OR remaining_amount > :tolerance) AS unpaid_count,
-                (SELECT COUNT(*) FROM classified WHERE remaining_amount IS NULL) AS no_monitor_count
+                monitor_totals.paid_off_count,
+                monitor_totals.unpaid_count,
+                monitor_totals.overdue_asset_count,
+                monitor_totals.current_asset_count,
+                monitor_totals.no_monitor_count,
+                monitor_totals.paid_off_asset_count,
+                monitor_totals.paid_off_initial,
+                monitor_totals.paid_off_repaid,
+                monitor_totals.paid_off_remaining,
+                monitor_totals.current_initial,
+                monitor_totals.current_repaid,
+                monitor_totals.current_remaining,
+                monitor_totals.overdue_initial,
+                monitor_totals.overdue_repaid,
+                monitor_totals.overdue_remaining,
+                monitor_totals.no_monitor_asset_count,
+                monitor_totals.no_monitor_initial,
+                monitor_totals.no_monitor_repaid,
+                monitor_totals.no_monitor_remaining
             FROM amounts
             CROSS JOIN active_amounts
             CROSS JOIN transferred_amounts
             CROSS JOIN pre_transfer_repaid
+            CROSS JOIN transferred_in_counts
+            CROSS JOIN transferred_out_dest
             CROSS JOIN monitor_latest ml
             CROSS JOIN monitor_totals
         """),

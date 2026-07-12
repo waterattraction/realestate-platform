@@ -113,11 +113,7 @@ def render_asset_stats_page(
     <div id="warnings" class="warn-box" style="display:none;"></div>
 
     <div class="card" id="baseline-card" style="display:none;">
-        <h2 class="section-h">发行基准</h2>
-        <div class="kpi-grid kpi-grid-baseline-1" id="baseline-row-1"></div>
-        <div class="kpi-grid kpi-grid-baseline-2" id="baseline-row-2"></div>
-        <h3 class="subsection-h">资产监控数据</h3>
-        <div class="kpi-grid kpi-grid-monitor" id="monitor-row"></div>
+        <div class="stats-overview" id="stats-overview"></div>
         <p class="muted" id="monitor-footnote"></p>
     </div>
 
@@ -241,30 +237,276 @@ def render_asset_stats_page(
         }});
     }}
 
-    function kpiCard(label, value, kind, fullLabel) {{
-        const tip = fullLabel ? ` title="${{fullLabel}}"` : '';
-        return `<div class="kpi kpi-${{kind}}"><span class="kpi-label"${{tip}}>${{label}}</span><strong>${{value}}</strong></div>`;
+    function checkOk(a, b) {{
+        return Math.abs(Number(a || 0) - Number(b || 0)) < 0.02;
     }}
 
-    function renderMinIdentityFormula(base) {{
-        const derived = Number(base.min_transferable_total || 0)
-            - Number(base.transferred_min_transferable_total || 0)
-            - Number(base.pre_transfer_repaid_total || 0);
-        const active = Number(base.active_min_transferable_total || 0);
-        const ok = Math.abs(derived - active) < 0.02;
+    function bucket(mon, name) {{
+        const b = (mon.by_bucket || {{}})[name];
+        return b || {{ asset_count: 0, initial_transfer_total: 0, repaid_total: 0, remaining_total: 0 }};
+    }}
+
+    function unpaidMetric(mon, field) {{
+        return Number(bucket(mon, 'current')[field] || 0)
+            + Number(bucket(mon, 'overdue')[field] || 0)
+            + Number(bucket(mon, 'no_monitor')[field] || 0);
+    }}
+
+    let lockedCheckId = null;
+
+    function setActiveChecks(ids, locked) {{
+        const overview = document.getElementById('stats-overview');
+        if (!overview) return;
+        const active = (ids || []).filter(Boolean);
+        overview.classList.toggle('check-highlight-on', active.length > 0);
+        overview.classList.toggle('check-locked', !!locked);
+        const anyFailed = active.some(id => {{
+            const line = overview.querySelector('.check-line[data-check-id="' + id + '"]');
+            return line && line.classList.contains('check-warn');
+        }});
+        const tone = anyFailed ? 'warn' : 'ok';
+        overview.querySelectorAll('[data-check-cells]').forEach(el => {{
+            el.classList.remove(
+                'check-cell-active', 'check-cell-dim', 'check-cell-ok', 'check-cell-warn'
+            );
+            if (!active.length) return;
+            const cellChecks = (el.dataset.checkCells || '').split(/\\s+/).filter(Boolean);
+            const matched = active.filter(id => cellChecks.includes(id));
+            if (matched.length) {{
+                el.classList.add('check-cell-active', 'check-cell-' + tone);
+            }} else {{
+                el.classList.add('check-cell-dim');
+            }}
+        }});
+        overview.querySelectorAll('.check-line[data-check-id]').forEach(line => {{
+            const on = active.includes(line.dataset.checkId);
+            line.classList.toggle('check-line-active', on);
+            line.classList.toggle('check-line-dim', active.length > 0 && !on);
+            line.classList.toggle('check-line-locked', !!locked && on);
+        }});
+    }}
+
+    function clearActiveCheck() {{
+        lockedCheckId = null;
+        setActiveChecks([], false);
+    }}
+
+    function bindCheckLinking() {{
+        const card = document.getElementById('baseline-card');
+        if (!card || card.dataset.checkLinkBound) return;
+        card.dataset.checkLinkBound = '1';
+
+        card.addEventListener('click', (e) => {{
+            const line = e.target.closest('.check-line[data-check-id]');
+            if (line) {{
+                e.preventDefault();
+                const id = line.dataset.checkId;
+                if (lockedCheckId === id) {{
+                    clearActiveCheck();
+                }} else {{
+                    lockedCheckId = id;
+                    setActiveChecks([id], true);
+                }}
+                return;
+            }}
+            if (lockedCheckId && !e.target.closest('[data-check-cells]')) {{
+                clearActiveCheck();
+            }}
+        }});
+
+        card.addEventListener('mouseover', (e) => {{
+            if (lockedCheckId) return;
+            const line = e.target.closest('.check-line[data-check-id]');
+            if (line) {{
+                setActiveChecks([line.dataset.checkId], false);
+                return;
+            }}
+            const cell = e.target.closest('[data-check-cells]');
+            if (cell) {{
+                const ids = (cell.dataset.checkCells || '').split(/\\s+/).filter(Boolean);
+                setActiveChecks(ids, false);
+            }}
+        }});
+
+        card.addEventListener('mouseout', (e) => {{
+            if (lockedCheckId) return;
+            const to = e.relatedTarget;
+            if (to && card.contains(to) && (to.closest('[data-check-cells]') || to.closest('.check-line[data-check-id]'))) {{
+                return;
+            }}
+            setActiveChecks([], false);
+        }});
+
+        card.addEventListener('keydown', (e) => {{
+            const line = e.target.closest('.check-line[data-check-id]');
+            if (!line) return;
+            if (e.key === 'Enter' || e.key === ' ') {{
+                e.preventDefault();
+                line.click();
+            }}
+        }});
+
+        document.addEventListener('keydown', (e) => {{
+            if (e.key === 'Escape' && lockedCheckId) clearActiveCheck();
+        }});
+    }}
+
+    function fieldTag(label) {{
+        return `<span class="field-tag">${{label}}</span>`;
+    }}
+
+    function renderCheckLineHtml(html, ok, checkId) {{
+        const cls = ok ? 'check-ok' : 'check-warn';
         const mark = ok ? '✓' : '⚠';
-        const cls = ok ? 'kpi-formula' : 'kpi-formula kpi-formula-warn';
-        return `<div class="${{cls}}">`
-            + '<span class="kpi-formula-eq">=</span> '
-            + '<span class="kpi-formula-part">MIN可转让金额合计</span> '
-            + '<span class="kpi-formula-op">−</span> '
-            + '<span class="kpi-formula-part">MIN可转让（转出）</span> '
-            + '<span class="kpi-formula-op">−</span> '
-            + '<span class="kpi-formula-part">转出前已还款</span> '
-            + '<span class="kpi-formula-arrow">→</span> '
-            + `<strong>${{fmtNum(base.active_min_transferable_total)}}</strong> `
-            + `<span class="kpi-formula-mark">${{mark}}</span>`
-            + '</div>';
+        return `<div class="check-line ${{cls}}" data-check-id="${{checkId}}" role="button" tabindex="0" title="悬停或点击高亮源数据">`
+            + `${{html}} <span class="check-mark">${{mark}}</span></div>`;
+    }}
+
+    function renderTransferCheck(base) {{
+        const outCount = Number(base.transferred_out_count || 0);
+        const destCount = Number(base.transferred_out_dest_count || 0);
+        const ok = outCount === destCount;
+        const html = `${{fieldTag('资产数（已转出）')}} = ${{fieldTag('资产数（已在其他产品发行）')}}`
+            + ` <span class="check-values">(${{fmtInt(outCount)}} = ${{fmtInt(destCount)}})</span>`;
+        return renderCheckLineHtml(html, ok, 'c4');
+    }}
+
+    function renderMonitorMeta(base) {{
+        const destCount = Number(base.transferred_out_dest_count || 0);
+        return `<div class="stats-meta-item">
+                <span class="stats-meta-label">资产数（已在其他产品发行）</span>
+                <span class="stats-meta-value" data-check-cells="c4">${{fmtInt(destCount)}}</span>
+            </div>
+            <div class="stats-meta-item">
+                <span class="stats-meta-label">还款金额（转出前）</span>
+                <span class="stats-meta-value" data-check-cells="c1">${{fmtNum(base.pre_transfer_repaid_total)}}</span>
+            </div>`;
+    }}
+
+    function renderIssuanceMatrix(base, mon) {{
+        const minOk = checkOk(
+            Number(base.min_transferable_total || 0)
+                - Number(base.transferred_min_transferable_total || 0)
+                - Number(base.active_min_transferable_total || 0),
+            base.pre_transfer_repaid_total
+        );
+        const countOk = checkOk(base.effective_asset_count, mon.monitor_asset_count);
+        const minRetainOk = checkOk(base.active_min_transferable_total, mon.initial_transfer_total);
+        const checks = renderCheckLineHtml(
+            `${{fieldTag('MIN（发行）')}} − ${{fieldTag('MIN（已转出）')}} − ${{fieldTag('MIN（留存）')}} = ${{fieldTag('还款金额（转出前）')}}`,
+            minOk,
+            'c1'
+        ) + renderCheckLineHtml(
+            `${{fieldTag('资产数（留存）')}} = ${{fieldTag('资产数（监控合计）')}}`,
+            countOk,
+            'c2'
+        ) + renderCheckLineHtml(
+            `${{fieldTag('MIN（留存）')}} = ${{fieldTag('初始受让金额')}}`,
+            minRetainOk,
+            'c3'
+        ) + renderTransferCheck(base);
+        return `<div class="stats-panel">
+            <div class="stats-panel-title">发行基准</div>
+            <div class="stats-panel-date">发行日期：${{base.issue_date || '—'}}</div>
+            <div class="stats-panel-scroll">
+            <table class="stats-matrix">
+                <thead>
+                    <tr>
+                        <th class="row-label">指标</th>
+                        <th class="col-num">发行（全量）</th>
+                        <th class="col-num">已转出</th>
+                        <th class="col-num">留存</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <th class="row-label">资产数</th>
+                        <td class="col-num">${{fmtInt(base.issued_asset_count)}}</td>
+                        <td class="col-num" data-check-cells="c4">${{fmtInt(base.transferred_out_count)}}</td>
+                        <td class="col-num" data-check-cells="c2">${{fmtInt(base.effective_asset_count)}}</td>
+                    </tr>
+                    <tr>
+                        <th class="row-label">MIN可转让金额</th>
+                        <td class="col-num" data-check-cells="c1">${{fmtNum(base.min_transferable_total)}}</td>
+                        <td class="col-num" data-check-cells="c1">${{fmtNum(base.transferred_min_transferable_total)}}</td>
+                        <td class="col-num" data-check-cells="c1 c3">${{fmtNum(base.active_min_transferable_total)}}</td>
+                    </tr>
+                    <tr>
+                        <th class="row-label">应收账款转让金额</th>
+                        <td class="col-num">${{fmtNum(base.receivable_transfer_total)}}</td>
+                        <td class="col-num">${{fmtNum(base.transferred_receivable_transfer_total)}}</td>
+                        <td class="col-num">${{fmtNum(base.active_receivable_transfer_total)}}</td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+            <div class="stats-checks">
+                <div class="stats-checks-hint">悬停或点击检查公式高亮源数据；再次点击或 Esc 取消锁定</div>
+                ${{checks}}
+            </div>
+        </div>`;
+    }}
+
+    function renderMonitorMatrix(base, mon) {{
+        const paid = bucket(mon, 'paid_off');
+        const current = bucket(mon, 'current');
+        const overdue = bucket(mon, 'overdue');
+        const snap = mon.monitor_snapshot_date || '—';
+        return `<div class="stats-panel">
+            <div class="stats-panel-title">资产监控</div>
+            <div class="stats-panel-date">资产监控日期：${{snap}}</div>
+            <div class="stats-meta-bar">
+                ${{renderMonitorMeta(base)}}
+            </div>
+            <div class="stats-panel-scroll">
+            <table class="stats-matrix">
+                <thead>
+                    <tr>
+                        <th class="row-label">指标</th>
+                        <th class="col-num">合计</th>
+                        <th class="col-num">已还清</th>
+                        <th class="col-num">未还清</th>
+                        <th class="col-num">未逾期</th>
+                        <th class="col-num">逾期</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <th class="row-label">资产数</th>
+                        <td class="col-num" data-check-cells="c2">${{fmtInt(mon.monitor_asset_count)}}</td>
+                        <td class="col-num">${{fmtInt(paid.asset_count)}}</td>
+                        <td class="col-num">${{fmtInt(mon.unpaid_count)}}</td>
+                        <td class="col-num">${{fmtInt(mon.current_count)}}</td>
+                        <td class="col-num">${{fmtInt(mon.overdue_count)}}</td>
+                    </tr>
+                    <tr>
+                        <th class="row-label">初始受让金额</th>
+                        <td class="col-num" data-check-cells="c3">${{fmtNum(mon.initial_transfer_total)}}</td>
+                        <td class="col-num">${{fmtNum(paid.initial_transfer_total)}}</td>
+                        <td class="col-num">${{fmtNum(unpaidMetric(mon, 'initial_transfer_total'))}}</td>
+                        <td class="col-num">${{fmtNum(current.initial_transfer_total)}}</td>
+                        <td class="col-num">${{fmtNum(overdue.initial_transfer_total)}}</td>
+                    </tr>
+                    <tr>
+                        <th class="row-label">还款金额</th>
+                        <td class="col-num">${{fmtNum(mon.repaid_total)}}</td>
+                        <td class="col-num">${{fmtNum(paid.repaid_total)}}</td>
+                        <td class="col-num">${{fmtNum(unpaidMetric(mon, 'repaid_total'))}}</td>
+                        <td class="col-num">${{fmtNum(current.repaid_total)}}</td>
+                        <td class="col-num">${{fmtNum(overdue.repaid_total)}}</td>
+                    </tr>
+                    <tr>
+                        <th class="row-label">剩余还款金额</th>
+                        <td class="col-num">${{fmtNum(mon.remaining_total)}}</td>
+                        <td class="col-num">${{fmtNum(paid.remaining_total)}}</td>
+                        <td class="col-num">${{fmtNum(unpaidMetric(mon, 'remaining_total'))}}</td>
+                        <td class="col-num">${{fmtNum(current.remaining_total)}}</td>
+                        <td class="col-num">${{fmtNum(overdue.remaining_total)}}</td>
+                    </tr>
+                </tbody>
+            </table>
+            </div>
+        </div>`;
     }}
 
     function renderReport(data) {{
@@ -280,34 +522,15 @@ def render_asset_stats_page(
         const mon = data.monitor_summary || {{}};
         const baseCard = document.getElementById('baseline-card');
         if (base) {{
+            clearActiveCheck();
             baseCard.style.display = 'block';
-            document.getElementById('baseline-row-1').innerHTML = `
-                ${{kpiCard('发行基准日', base.issue_date, 'date')}}
-                ${{kpiCard('发行资产数', fmtInt(base.issued_asset_count), 'count')}}
-                ${{kpiCard('已转出资产数', fmtInt(base.transferred_out_count), 'count')}}
-                ${{kpiCard('MIN可转让金额合计', fmtNum(base.min_transferable_total), 'amount')}}
-                ${{kpiCard('MIN可转让（转出）', fmtNum(base.transferred_min_transferable_total), 'amount', 'MIN金融机构可转让（转出金额）')}}
-                ${{kpiCard('转出前已还款', fmtNum(base.pre_transfer_repaid_total), 'amount', '转出前已还款金额')}}
-                ${{kpiCard('应收账款合计', fmtNum(base.receivable_transfer_total), 'amount', '应收账款转让价款合计')}}
-                ${{kpiCard('应收账款（转出）', fmtNum(base.transferred_receivable_transfer_total), 'amount', '应收账款转让价款（转出金额）')}}
-                ${{kpiCard('应收账款（未转出）', fmtNum(base.active_receivable_transfer_total), 'amount', '应收账款转让价款合计（未转出）')}}`;
-            document.getElementById('baseline-row-2').innerHTML = `
-                ${{kpiCard('有效资产数', fmtInt(base.effective_asset_count), 'count')}}
-                ${{kpiCard('已还清', fmtInt(base.paid_off_count), 'count', '已还清资产数')}}
-                ${{kpiCard('未还清', fmtInt(base.unpaid_count), 'count', '未还清资产数')}}
-                ${{kpiCard('MIN可转让（未转出）', fmtNum(base.active_min_transferable_total), 'amount', 'MIN可转让金额合计（未转出）')}}
-                ${{renderMinIdentityFormula(base)}}`;
-            document.getElementById('monitor-row').innerHTML = `
-                ${{kpiCard('监控资产数', fmtInt(mon.monitor_asset_count), 'count')}}
-                ${{kpiCard('已还清', fmtInt(mon.paid_off_count), 'count', '已还清资产数')}}
-                ${{kpiCard('未还清', fmtInt(mon.unpaid_count), 'count', '未还清资产数')}}
-                ${{kpiCard('初始受让金额', fmtNum(mon.initial_transfer_total), 'amount')}}
-                ${{kpiCard('已还款金额', fmtNum(mon.repaid_total), 'amount')}}
-                ${{kpiCard('剩余还款金额', fmtNum(mon.remaining_total), 'amount')}}`;
+            document.getElementById('stats-overview').innerHTML =
+                renderIssuanceMatrix(base, mon) + renderMonitorMatrix(base, mon);
             const snap = mon.monitor_snapshot_date || '—';
             document.getElementById('monitor-footnote').textContent =
-                '有效资产数 = 发行资产数 − 已转出资产数。转出 MIN/应收账款取自转入目标产品发行表。'
-                + '已还清/未还清截至监控快照日：' + snap
+                '留存资产数 = 发行资产数 − 已转出资产数。转出 MIN/应收账款转让金额取自转入目标产品发行表。'
+                + '未逾期：overdue_days ≤ 35；逾期：overdue_days > 35（与 M2+ 口径一致）。'
+                + '已还清/未还清/逾期细分截至监控快照日：' + snap
                 + '；不含已转出资产。周期表累计还款占比分母为初始受让金额。';
         }} else {{
             baseCard.style.display = 'none';
@@ -328,7 +551,7 @@ def render_asset_stats_page(
                 const b = block.issuance_baseline || {{}};
                 const bm = block.monitor_summary || {{}};
                 wrap.innerHTML = `<h3>${{block.city}}</h3>
-                    <p class="muted">发行 ${{fmtInt(b.issued_asset_count)}} · 已转出 ${{fmtInt(b.transferred_out_count)}} · MIN（未转出） ${{fmtNum(b.active_min_transferable_total)}} · 初始受让 ${{fmtNum(bm.initial_transfer_total)}}</p>`;
+                    <p class="muted">发行 ${{fmtInt(b.issued_asset_count)}} · 已转出 ${{fmtInt(b.transferred_out_count)}} · MIN（留存） ${{fmtNum(b.active_min_transferable_total)}} · 初始受让 ${{fmtNum(bm.initial_transfer_total)}}</p>`;
                 const table = document.createElement('table');
                 table.className = 'records-table';
                 table.innerHTML = `<thead><tr>
@@ -369,6 +592,7 @@ def render_asset_stats_page(
     }});
 
     (async function init() {{
+        bindCheckLinking();
         if (initialProductId) {{
             await loadIssueDates(initialProductId);
             await loadCities(initialProductId, issueDateForCities());
@@ -420,116 +644,183 @@ def _page_shell(title: str, body: str) -> str:
         th {{ color: #94a3b8; }}
         .records-table {{ font-size: 0.85rem; width: 100%; }}
         .records-table th.col-num, .records-table td.col-num {{ text-align: right; }}
-        .kpi-grid {{
+        .stats-overview {{
             display: grid;
-            gap: 0.75rem;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            align-items: start;
         }}
-        .kpi-grid-baseline-1 {{
-            grid-template-columns: 72px repeat(2, 68px) repeat(6, minmax(112px, 1fr));
-            margin-bottom: 0.75rem;
+        @media (max-width: 1100px) {{
+            .stats-overview {{ grid-template-columns: 1fr; }}
         }}
-        .kpi-grid-baseline-2 {{
-            grid-template-columns: repeat(3, 68px) minmax(112px, 0.95fr) minmax(180px, 2fr);
-            margin-bottom: 0.75rem;
-            align-items: stretch;
-        }}
-        .kpi-grid-monitor {{
-            grid-template-columns: repeat(3, 68px) repeat(3, minmax(112px, 1fr));
-            margin-bottom: 0.75rem;
-        }}
-        @media (max-width: 1280px) {{
-            .kpi-grid-baseline-1 {{
-                grid-template-columns: 72px repeat(2, 68px) repeat(3, minmax(108px, 1fr));
-            }}
-            .kpi-grid-baseline-2 {{
-                grid-template-columns: repeat(4, minmax(68px, 0.7fr));
-            }}
-            .kpi-formula {{
-                grid-column: 1 / -1;
-            }}
-            .kpi-grid-monitor {{
-                grid-template-columns: repeat(3, 68px) repeat(3, minmax(100px, 1fr));
-            }}
-        }}
-        @media (max-width: 960px) {{
-            .kpi-grid-baseline-1,
-            .kpi-grid-baseline-2,
-            .kpi-grid-monitor {{
-                grid-template-columns: repeat(3, minmax(0, 1fr));
-            }}
-            .kpi-formula {{
-                grid-column: 1 / -1;
-            }}
-        }}
-        .kpi {{
-            background: rgba(15,23,42,0.5);
+        .stats-panel {{
+            background: rgba(15,23,42,0.35);
             border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 8px;
-            padding: 0.75rem;
+            border-radius: 10px;
+            padding: 0.85rem;
             min-width: 0;
-        }}
-        .kpi-count {{
-            padding: 0.75rem 0.5rem;
-            text-align: center;
-        }}
-        .kpi-count .kpi-label {{
-            font-size: 0.72rem;
-            white-space: nowrap;
-        }}
-        .kpi-count strong {{
-            font-size: 1.15rem;
-        }}
-        .kpi-date {{
-            padding: 0.75rem 0.5rem;
-            text-align: center;
-        }}
-        .kpi-date .kpi-label {{
-            font-size: 0.72rem;
-            white-space: nowrap;
-        }}
-        .kpi-amount .kpi-label {{
-            white-space: nowrap;
             overflow: hidden;
-            text-overflow: ellipsis;
-            font-size: 0.74rem;
         }}
-        .kpi-formula {{
+        .stats-panel-scroll {{
+            overflow-x: auto;
+            margin-bottom: 0.5rem;
+        }}
+        .stats-meta-bar {{
             display: flex;
             flex-wrap: wrap;
-            align-items: center;
+            gap: 0.75rem 1.25rem;
+            margin-bottom: 0.65rem;
+            padding: 0.55rem 0.65rem;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 6px;
+        }}
+        .stats-meta-item {{
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
             gap: 0.35rem 0.5rem;
-            padding: 0.75rem 1rem;
-            background: rgba(15,23,42,0.35);
-            border: 1px dashed rgba(255,255,255,0.12);
-            border-radius: 8px;
-            font-size: 0.78rem;
-            color: #94a3b8;
             min-width: 0;
         }}
-        .kpi-formula-warn {{
-            border-color: rgba(251,191,36,0.45);
-            color: #fde68a;
-        }}
-        .kpi-formula-eq,
-        .kpi-formula-op,
-        .kpi-formula-arrow {{
-            color: #64748b;
-        }}
-        .kpi-formula-part {{
+        .stats-meta-label {{
+            color: #94a3b8;
+            font-size: 0.74rem;
             white-space: nowrap;
         }}
-        .kpi-formula strong {{
+        .stats-meta-value {{
             color: #f1f5f9;
-            font-size: 0.95rem;
+            font-size: 0.82rem;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
         }}
-        .kpi-formula-mark {{
-            color: #4ade80;
+        .stats-panel-title {{
+            font-size: 1rem;
             font-weight: 600;
+            color: #e2e8f0;
+            margin-bottom: 0.25rem;
         }}
-        .kpi-formula-warn .kpi-formula-mark {{
-            color: #fbbf24;
+        .stats-panel-date {{
+            font-size: 0.78rem;
+            color: #94a3b8;
+            margin-bottom: 0.65rem;
         }}
-        .kpi-label {{ display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.25rem; }}
+        .stats-matrix {{
+            width: 100%;
+            min-width: 420px;
+            border-collapse: collapse;
+            font-size: 0.78rem;
+            table-layout: auto;
+        }}
+        .stats-matrix th,
+        .stats-matrix td {{
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 0.45rem 0.55rem;
+            vertical-align: middle;
+            overflow: hidden;
+        }}
+        .stats-matrix thead th {{
+            background: rgba(255,255,255,0.04);
+            color: #94a3b8;
+            font-weight: 500;
+            text-align: center;
+            white-space: nowrap;
+        }}
+        .stats-matrix .row-label {{
+            color: #94a3b8;
+            font-weight: 500;
+            text-align: left;
+            white-space: nowrap;
+            background: rgba(255,255,255,0.02);
+            min-width: 88px;
+            max-width: 120px;
+        }}
+        .stats-matrix .col-num {{
+            text-align: right;
+            color: #f1f5f9;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+            min-width: 72px;
+        }}
+        .stats-checks {{
+            margin-top: 0.65rem;
+            padding: 0.55rem 0.65rem;
+            background: rgba(255,255,255,0.03);
+            border: 1px dashed rgba(255,255,255,0.1);
+            border-radius: 6px;
+            font-size: 0.72rem;
+        }}
+        .stats-checks-hint {{
+            color: #64748b;
+            font-size: 0.66rem;
+            margin-bottom: 0.45rem;
+        }}
+        .check-line {{
+            margin-bottom: 0.35rem;
+            line-height: 1.5;
+            word-break: break-word;
+            cursor: pointer;
+            border-radius: 4px;
+            padding: 0.2rem 0.35rem 0.2rem 0.45rem;
+            border-left: 3px solid transparent;
+            transition: background 0.12s, border-color 0.12s, opacity 0.12s, color 0.12s;
+            color: #cbd5e1;
+        }}
+        .check-line:hover {{
+            background: rgba(255,255,255,0.04);
+        }}
+        .check-line:last-child {{ margin-bottom: 0; }}
+        .check-line-active.check-ok {{
+            border-left-color: #4ade80;
+            background: rgba(74, 222, 128, 0.1);
+            color: #bbf7d0;
+        }}
+        .check-line-active.check-ok .field-tag {{ color: #86efac; }}
+        .check-line-active.check-warn {{
+            border-left-color: #fb923c;
+            background: rgba(251, 146, 60, 0.1);
+            color: #fed7aa;
+        }}
+        .check-line-active.check-warn .field-tag {{ color: #fdba74; }}
+        .check-line-locked {{
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,0.12);
+        }}
+        .check-line-dim {{ opacity: 0.42; }}
+        .check-info {{ color: #94a3b8; }}
+        .check-info .check-hint {{ color: #64748b; font-size: 0.68rem; }}
+        .check-values {{ color: inherit; font-variant-numeric: tabular-nums; opacity: 0.85; }}
+        .check-line .check-mark {{ color: #64748b; font-weight: 600; }}
+        .check-line-active.check-ok .check-mark {{ color: #4ade80; }}
+        .check-line-active.check-warn .check-mark {{ color: #fb923c; }}
+        #stats-overview.check-highlight-on [data-check-cells] {{
+            transition: opacity 0.12s, background 0.12s, box-shadow 0.12s, color 0.12s;
+        }}
+        .check-cell-dim {{ opacity: 0.28; }}
+        .check-cell-active {{
+            opacity: 1;
+            font-weight: 600;
+            border-radius: 4px;
+        }}
+        .stats-matrix .check-cell-active {{ padding: 0.45rem 0.55rem; }}
+        .stats-meta-value.check-cell-active {{
+            padding: 0.12rem 0.4rem;
+            border-radius: 4px;
+        }}
+        .check-cell-ok {{
+            background: rgba(74, 222, 128, 0.18);
+            box-shadow: inset 0 0 0 2px rgba(74, 222, 128, 0.5);
+            color: #bbf7d0;
+        }}
+        .check-cell-warn {{
+            background: rgba(251, 146, 60, 0.18);
+            box-shadow: inset 0 0 0 2px rgba(251, 146, 60, 0.55);
+            color: #fed7aa;
+        }}
+        .field-tag {{
+            display: inline;
+            font-weight: 500;
+            white-space: nowrap;
+            color: inherit;
+        }}
         .warn-box {{
             background: rgba(251,191,36,0.08);
             border: 1px solid rgba(251,191,36,0.35);
