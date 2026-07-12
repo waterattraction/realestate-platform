@@ -37,6 +37,53 @@ def clean_optional_str(value) -> str | None:
     return text or None
 
 
+def parse_trust_product_ids(
+    trust_product_id=None,
+    trust_product_ids: list | None = None,
+) -> list[int] | None:
+    """解析信托产品筛选：None 表示全部；非空 list 表示限定在这些 id。"""
+    ids: list[int] = []
+    if trust_product_ids:
+        for value in trust_product_ids:
+            if value in _EMPTY_VALUES:
+                continue
+            ids.append(int(value))
+    if trust_product_id not in _EMPTY_VALUES:
+        single = int(trust_product_id)
+        if single not in ids:
+            ids.append(single)
+    if not ids:
+        return None
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for pid in ids:
+        if pid not in seen:
+            seen.add(pid)
+            ordered.append(pid)
+    return ordered
+
+
+def sql_in_int_column(
+    column: str,
+    ids: list[int] | None,
+    *,
+    param_prefix: str = "tpid",
+) -> tuple[str, dict]:
+    """返回 SQL 片段（含前导 AND）与 bind 参数；ids 为 None 时不加条件。"""
+    if ids is None:
+        return ("", {})
+    if len(ids) == 1:
+        key = f"{param_prefix}_0"
+        return (f" AND {column} = :{key}", {key: ids[0]})
+    params: dict = {}
+    placeholders: list[str] = []
+    for index, pid in enumerate(ids):
+        key = f"{param_prefix}_{index}"
+        params[key] = pid
+        placeholders.append(f":{key}")
+    return (f" AND {column} IN ({', '.join(placeholders)})", params)
+
+
 def parse_pagination(
     page,
     page_size,

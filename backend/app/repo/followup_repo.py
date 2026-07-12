@@ -1,6 +1,7 @@
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app import query_utils
 from app.repo._serialize import row_to_dict, rows_to_dicts
 from app.service.followup_upload import upload_root
 
@@ -13,7 +14,7 @@ class FollowupRepo:
 
     def fetch_cases_list(
         self,
-        trust_product_id: int | None = None,
+        trust_product_ids: list[int] | None = None,
         status: str | None = None,
         limit: int = 500,
     ) -> list[dict]:
@@ -39,9 +40,11 @@ class FollowupRepo:
             WHERE 1=1
         """
         params: dict = {"limit": limit}
-        if trust_product_id is not None:
-            sql += " AND c.trust_product_id = :trust_product_id"
-            params["trust_product_id"] = trust_product_id
+        product_sql, product_params = query_utils.sql_in_int_column(
+            "c.trust_product_id", trust_product_ids, param_prefix="fpid"
+        )
+        sql += product_sql
+        params.update(product_params)
         if status is not None:
             sql += " AND c.status = :status"
             params["status"] = status

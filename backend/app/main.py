@@ -327,6 +327,12 @@ def _render_overdue_header_meta(overview: dict) -> str:
             '<br><span class="meta-hint">提示：当前逾期天数可能仍按监控快照日导入时计算，'
             "与快照日不同，请以重算后「逾期天数截至」为准。</span>"
         )
+    multi_product_note = ""
+    selected_ids = overview.get("trust_product_ids")
+    if selected_ids and len(selected_ids) > 1:
+        multi_product_note = (
+            '<br><span class="meta-hint">已选多个信托产品，各产品监控快照日可能不一致。</span>'
+        )
     return f"""
         <p>
             监控快照日期：<strong>{snapshot}</strong>
@@ -334,6 +340,7 @@ def _render_overdue_header_meta(overview: dict) -> str:
             · 最近重算：{escape(last_recalc)}
             <br><span class="meta-hint">监控快照日期为资产表数据截止日；逾期天数 = 重算基准日 − 最后回款日。</span>
             {stale_note}
+            {multi_product_note}
             · <a href="/overdue/workbench">逾期工作台 →</a>
         </p>
     """
@@ -436,8 +443,9 @@ def _sort_custody_items_in_bucket(items: list, bucket: str) -> list:
 def _apply_custody_list_filters(item: dict, filters: dict | None) -> bool:
     if not filters:
         return True
-    if filters.get("trust_product_id") is not None:
-        if item["trust_product_id"] != filters["trust_product_id"]:
+    trust_product_ids = filters.get("trust_product_ids")
+    if trust_product_ids is not None:
+        if item["trust_product_id"] not in trust_product_ids:
             return False
     if filters.get("delinquency_bucket"):
         from app.overdue.buckets import matches_delinquency_bucket_filter
@@ -494,16 +502,18 @@ def _normalize_portfolio_city(raw) -> tuple[str, str]:
     return text, text
 
 
-def fetch_overdue_issuance_cities(conn, trust_product_id: int | None = None) -> list[str]:
+def fetch_overdue_issuance_cities(conn, trust_product_ids: list[int] | None = None) -> list[str]:
     sql = """
         SELECT DISTINCT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
         FROM trust_product_issuance_asset_records
         WHERE 1 = 1
     """
     params: dict = {"unknown": ISSUANCE_CITY_UNKNOWN}
-    if trust_product_id is not None:
-        sql += " AND trust_product_id = :trust_product_id"
-        params["trust_product_id"] = trust_product_id
+    product_sql, product_params = query_utils.sql_in_int_column(
+        "trust_product_id", trust_product_ids, param_prefix="icity"
+    )
+    sql += product_sql
+    params.update(product_params)
     sql += " ORDER BY city"
     rows = conn.execute(text(sql), params)
     return [str(row.city) for row in rows]
@@ -596,10 +606,10 @@ def _custody_item_from_row(row) -> dict:
     }
 
 
-def _reconciliation_query_sql(monitor_filter: str, trust_product_id: int | None) -> str:
+def _reconciliation_query_sql(monitor_filter: str, trust_product_ids: list[int] | None) -> str:
     custody_ctes = _monitor_custody_ctes(monitor_filter)
-    product_filter = (
-        "AND r.trust_product_id = :trust_product_id" if trust_product_id is not None else ""
+    product_filter, _ = query_utils.sql_in_int_column(
+        "r.trust_product_id", trust_product_ids, param_prefix="tp"
     )
     return f"""
         WITH {custody_ctes},
@@ -633,11 +643,11 @@ def _reconciliation_query_sql(monitor_filter: str, trust_product_id: int | None)
     """
 
 
-def _reconciliation_query_sql_by_asset(monitor_filter: str, trust_product_id: int | None) -> str:
+def _reconciliation_query_sql_by_asset(monitor_filter: str, trust_product_ids: list[int] | None) -> str:
     """金额核对 SQL —— 按资产主编号（asset_code）粒度聚合，替代 custody_asset_code 版本。"""
     custody_ctes = _monitor_custody_ctes(monitor_filter)
-    product_filter = (
-        "AND r.trust_product_id = :trust_product_id" if trust_product_id is not None else ""
+    product_filter, _ = query_utils.sql_in_int_column(
+        "r.trust_product_id", trust_product_ids, param_prefix="tp"
     )
     return f"""
         WITH {custody_ctes},
@@ -751,15 +761,12 @@ def _reconciliation_summary(items: list[dict]) -> dict[str, int]:
 
 def _fetch_repayment_code_mismatch_alerts(
     conn,
-    trust_product_id: int | None = None,
+    trust_product_ids: list[int] | None = None,
 ) -> list[dict]:
     """还款事实表 asset_code 与 trust_assets 权威主编号不一致的独立告警。"""
-    product_filter = (
-        "AND r.trust_product_id = :trust_product_id" if trust_product_id is not None else ""
+    product_filter, params = query_utils.sql_in_int_column(
+        "r.trust_product_id", trust_product_ids, param_prefix="rpid"
     )
-    params: dict = {}
-    if trust_product_id is not None:
-        params["trust_product_id"] = trust_product_id
     rows = conn.execute(
         text(f"""
             SELECT
@@ -795,27 +802,48 @@ def _fetch_repayment_code_mismatch_alerts(
 RECONCILIATION_BASIS_LABEL = "监控快照日 + 全量还款明细"
 
 
-def _latest_monitor_filter(trust_product_id: int | None, data_date: str | None) -> tuple[str, dict]:
+def _latest_monitor_filter(
+    trust_product_ids: list[int] | None,
+    data_date: str | None,
+) -> tuple[str, dict]:
     params: dict = {}
     if data_date:
-        if trust_product_id is not None:
-            return (
-                "m.trust_product_id = :trust_product_id AND m.data_date = :data_date",
-                {"trust_product_id": trust_product_id, "data_date": data_date},
-            )
-        return ("m.data_date = :data_date", {"data_date": data_date})
-
-    if trust_product_id is not None:
+        product_sql, product_params = query_utils.sql_in_int_column(
+            "m.trust_product_id", trust_product_ids, param_prefix="tp"
+        )
+        params.update(product_params)
         return (
-            """
-            m.trust_product_id = :trust_product_id
+            f"m.data_date = :data_date{product_sql}",
+            {**params, "data_date": data_date},
+        )
+
+    if trust_product_ids is not None:
+        product_sql, product_params = query_utils.sql_in_int_column(
+            "m.trust_product_id", trust_product_ids, param_prefix="tp"
+        )
+        params.update(product_params)
+        if len(trust_product_ids) == 1:
+            return (
+                f"""
+                m.trust_product_id = :tp_0
+                AND m.data_date = (
+                    SELECT MAX(data_date)
+                    FROM trust_asset_monitor_records
+                    WHERE trust_product_id = :tp_0
+                )
+                """.strip(),
+                product_params,
+            )
+        return (
+            f"""
+            1=1{product_sql}
             AND m.data_date = (
                 SELECT MAX(data_date)
-                FROM trust_asset_monitor_records
-                WHERE trust_product_id = :trust_product_id
+                FROM trust_asset_monitor_records m2
+                WHERE m2.trust_product_id = m.trust_product_id
             )
-            """,
-            {"trust_product_id": trust_product_id},
+            """.strip(),
+            product_params,
         )
 
     return (
@@ -830,10 +858,10 @@ def _latest_monitor_filter(trust_product_id: int | None, data_date: str | None) 
 
 def _fetch_overdue_recalc_meta(
     conn,
-    trust_product_id: int | None,
+    trust_product_ids: list[int] | None,
     data_date: str | None,
 ) -> dict:
-    monitor_filter, params = _latest_monitor_filter(trust_product_id, data_date)
+    monitor_filter, params = _latest_monitor_filter(trust_product_ids, data_date)
     row = conn.execute(
         text(f"""
             SELECT
@@ -863,9 +891,23 @@ def _fetch_overdue_recalc_meta(
     }
 
 
+def _recon_monitor_filter(
+    monitor_filter: str,
+    trust_product_ids: list[int] | None,
+    params: dict,
+) -> str:
+    if "data_date" in params:
+        return monitor_filter
+    if trust_product_ids is None:
+        return "m.data_date = :data_date"
+    if len(trust_product_ids) == 1:
+        return "m.trust_product_id = :tp_0 AND m.data_date = :data_date"
+    return monitor_filter
+
+
 def fetch_overdue_overview(
     conn,
-    trust_product_id: int | None = None,
+    trust_product_ids: list[int] | None = None,
     data_date: str | None = None,
     *,
     delinquency_bucket: str | None = None,
@@ -877,7 +919,7 @@ def fetch_overdue_overview(
     city: str | None = None,
 ):
     list_filters = {
-        "trust_product_id": trust_product_id,
+        "trust_product_ids": trust_product_ids,
         "delinquency_bucket": delinquency_bucket,
         "trust_marker": trust_marker,
         "internal_status": internal_status,
@@ -886,7 +928,7 @@ def fetch_overdue_overview(
         "custody_asset_code": custody_asset_code,
         "city": city,
     }
-    monitor_filter, params = _latest_monitor_filter(trust_product_id, data_date)
+    monitor_filter, params = _latest_monitor_filter(trust_product_ids, data_date)
     custody_ctes = _monitor_custody_ctes(monitor_filter)
 
     query_params = dict(params)
@@ -897,7 +939,7 @@ def fetch_overdue_overview(
         text(f"""
             WITH {custody_ctes}
             SELECT
-                mc.data_date,
+                MAX(mc.data_date) AS data_date,
                 COUNT(*) FILTER (
                     WHERE {sql_exposure_asset_filter("mc.overdue_days", "mc.remaining_amount")}
                 ) AS exposure_count,
@@ -961,7 +1003,6 @@ def fetch_overdue_overview(
                 COUNT(*) AS total_asset_count,
                 COUNT(DISTINCT mc.asset_code) AS total_asset_code_count
             FROM monitor_custody mc
-            GROUP BY mc.data_date
         """),
         query_params,
     ).fetchone()
@@ -972,7 +1013,7 @@ def fetch_overdue_overview(
         kpi = build_overdue_kpi_metrics(0, 0, 0, 0, 0)
         return {
             "data_date": data_date,
-            "trust_product_id": trust_product_id,
+            "trust_product_ids": trust_product_ids,
             "overdue_count": 0,
             "overdue_count_deprecated": True,
             "es_count": 0,
@@ -989,26 +1030,22 @@ def fetch_overdue_overview(
             "active_followup_count": 0,
             "top_overdue_by_bucket": empty_buckets,
             "bucket_totals": {k: _bucket_amount_totals([]) for k in empty_buckets},
-            "issuance_city_options": fetch_overdue_issuance_cities(conn, trust_product_id),
+            "issuance_city_options": fetch_overdue_issuance_cities(conn, trust_product_ids),
             "list_filters": list_filters,
-            **_fetch_overdue_recalc_meta(conn, trust_product_id, data_date),
+            **_fetch_overdue_recalc_meta(conn, trust_product_ids, data_date),
         }
 
-    resolved_data_date = str(row.data_date)
+    resolved_data_date = str(row.data_date) if row.data_date else data_date
     recon_params = dict(params)
-    if "data_date" not in recon_params:
+    if "data_date" not in recon_params and resolved_data_date:
         recon_params["data_date"] = resolved_data_date
 
-    recon_filter = monitor_filter
-    if trust_product_id is not None and "data_date" not in params:
-        recon_filter = "m.trust_product_id = :trust_product_id AND m.data_date = :data_date"
-    elif trust_product_id is None and "data_date" not in params:
-        recon_filter = "m.data_date = :data_date"
+    recon_filter = _recon_monitor_filter(monitor_filter, trust_product_ids, recon_params)
 
     recon_row = conn.execute(
         text(f"""
             SELECT COUNT(*) AS failed_count
-            FROM ({_reconciliation_query_sql_by_asset(recon_filter, trust_product_id)}) recon
+            FROM ({_reconciliation_query_sql_by_asset(recon_filter, trust_product_ids)}) recon
             WHERE ABS(recon.balance_remainder) > :tolerance
                OR ABS(recon.cross_diff) > :tolerance
                OR recon.code_mismatch_count > 0
@@ -1022,9 +1059,11 @@ def fetch_overdue_overview(
         WHERE status IN ('open', 'in_progress')
     """
     followup_params: dict = {}
-    if trust_product_id is not None:
-        followup_sql += " AND trust_product_id = :trust_product_id"
-        followup_params["trust_product_id"] = trust_product_id
+    followup_product_sql, followup_product_params = query_utils.sql_in_int_column(
+        "trust_product_id", trust_product_ids, param_prefix="fpid"
+    )
+    followup_sql += followup_product_sql
+    followup_params.update(followup_product_params)
 
     followup_row = conn.execute(text(followup_sql), followup_params).fetchone()
 
@@ -1093,7 +1132,7 @@ def fetch_overdue_overview(
 
     return {
         "data_date": resolved_data_date,
-        "trust_product_id": trust_product_id,
+        "trust_product_ids": trust_product_ids,
         "overdue_count": kpi["exposure_total"],
         "overdue_count_deprecated": True,
         "es_count": es,
@@ -1110,9 +1149,9 @@ def fetch_overdue_overview(
         "active_followup_count": int(followup_row.cnt) if followup_row else 0,
         "top_overdue_by_bucket": top_overdue_by_bucket,
         "bucket_totals": bucket_totals,
-        "issuance_city_options": fetch_overdue_issuance_cities(conn, trust_product_id),
+        "issuance_city_options": fetch_overdue_issuance_cities(conn, trust_product_ids),
         "list_filters": list_filters,
-        **_fetch_overdue_recalc_meta(conn, trust_product_id, data_date),
+        **_fetch_overdue_recalc_meta(conn, trust_product_ids, data_date),
     }
 
 
@@ -1255,8 +1294,8 @@ def fetch_trust_products(conn) -> list[dict]:
     return [{"id": r.id, "name": r.name} for r in rows]
 
 
-def fetch_overdue_checks(conn, trust_product_id: int | None = None, data_date: str | None = None):
-    monitor_filter, params = _latest_monitor_filter(trust_product_id, data_date)
+def fetch_overdue_checks(conn, trust_product_ids: list[int] | None = None, data_date: str | None = None):
+    monitor_filter, params = _latest_monitor_filter(trust_product_ids, data_date)
     custody_ctes = _monitor_custody_ctes(monitor_filter)
 
     rows = conn.execute(
@@ -1295,8 +1334,8 @@ def fetch_overdue_checks(conn, trust_product_id: int | None = None, data_date: s
     return {"data_date": resolved_date, "items": items}
 
 
-def fetch_reconciliation(conn, trust_product_id: int | None = None, data_date: str | None = None):
-    monitor_filter, params = _latest_monitor_filter(trust_product_id, data_date)
+def fetch_reconciliation(conn, trust_product_ids: list[int] | None = None, data_date: str | None = None):
+    monitor_filter, params = _latest_monitor_filter(trust_product_ids, data_date)
 
     row = conn.execute(
         text(f"""
@@ -1321,7 +1360,7 @@ def fetch_reconciliation(conn, trust_product_id: int | None = None, data_date: s
             "cross_fail_count": 0,
             "code_mismatch_pass_count": 0,
             "code_mismatch_fail_count": 0,
-            "code_mismatch_alerts": _fetch_repayment_code_mismatch_alerts(conn, trust_product_id),
+            "code_mismatch_alerts": _fetch_repayment_code_mismatch_alerts(conn, trust_product_ids),
         }
 
     resolved_data_date = str(row.data_date)
@@ -1329,22 +1368,17 @@ def fetch_reconciliation(conn, trust_product_id: int | None = None, data_date: s
     if "data_date" not in query_params:
         query_params["data_date"] = resolved_data_date
 
-    recon_filter = monitor_filter
-    if "data_date" not in params:
-        if trust_product_id is not None:
-            recon_filter = "m.trust_product_id = :trust_product_id AND m.data_date = :data_date"
-        else:
-            recon_filter = "m.data_date = :data_date"
+    recon_filter = _recon_monitor_filter(monitor_filter, trust_product_ids, query_params)
 
     rows = conn.execute(
-        text(_reconciliation_query_sql_by_asset(recon_filter, trust_product_id)),
+        text(_reconciliation_query_sql_by_asset(recon_filter, trust_product_ids)),
         query_params,
     )
 
     items = [_reconciliation_item_from_row(r) for r in rows]
     anomaly_count = sum(1 for item in items if item["has_anomaly"])
     summary = _reconciliation_summary(items)
-    code_mismatch_alerts = _fetch_repayment_code_mismatch_alerts(conn, trust_product_id)
+    code_mismatch_alerts = _fetch_repayment_code_mismatch_alerts(conn, trust_product_ids)
 
     return {
         "data_date": resolved_data_date,
@@ -1359,13 +1393,13 @@ def fetch_reconciliation(conn, trust_product_id: int | None = None, data_date: s
 
 def recalculate_reconciliation(
     conn,
-    trust_product_id: int | None = None,
+    trust_product_ids: list[int] | None = None,
     data_date: str | None = None,
 ) -> dict:
     """基于当前监控快照与全量还款明细重算金额核对统计（不落库）。"""
     from datetime import datetime, timezone
 
-    payload = fetch_reconciliation(conn, trust_product_id, data_date)
+    payload = fetch_reconciliation(conn, trust_product_ids, data_date)
     as_of = datetime.now(timezone.utc).isoformat()
     total = int(payload["total_count"])
     balance_fail = int(payload["balance_fail_count"])
@@ -1373,7 +1407,7 @@ def recalculate_reconciliation(
     code_mismatch_fail = int(payload["code_mismatch_fail_count"])
     return {
         "data_date": payload.get("data_date"),
-        "trust_product_id": trust_product_id,
+        "trust_product_ids": trust_product_ids,
         "as_of": as_of,
         "basis": RECONCILIATION_BASIS_LABEL,
         "recalculated_count": total,
@@ -1592,10 +1626,13 @@ def recalculate_overdue_days(
     }
 
 
-def fetch_overdue_followups(trust_product_id: int | None = None, status: str | None = None):
+def fetch_overdue_followups(
+    trust_product_ids: list[int] | None = None,
+    status: str | None = None,
+):
     from app.repo.followup_repo import FollowupRepo
 
-    return FollowupRepo(engine).fetch_cases_list(trust_product_id, status)
+    return FollowupRepo(engine).fetch_cases_list(trust_product_ids, status)
 
 
 def fmt_asset_identity(item: dict) -> str:
@@ -1805,6 +1842,46 @@ def _render_code_mismatch_alert_banner(alerts: list) -> str:
     """
 
 
+def _trust_product_filter_label(products: list[dict], selected_ids: list[int] | None) -> str:
+    if not selected_ids:
+        return "全部信托产品"
+    name_by_id = {int(p["id"]): str(p["name"]) for p in products}
+    names = [name_by_id.get(pid, str(pid)) for pid in selected_ids]
+    if len(names) <= 2:
+        return " · ".join(names)
+    return f"已选 {len(names)} 个产品"
+
+
+def _render_trust_product_multiselect(
+    products: list[dict],
+    selected_ids: list[int] | None,
+) -> str:
+    all_mode = selected_ids is None
+    trigger = escape(_trust_product_filter_label(products, selected_ids))
+    options = (
+        f'<label class="multiselect-option multiselect-all">'
+        f'<input type="checkbox" class="tp-all"{" checked" if all_mode else ""}> 全部</label>'
+    )
+    for product in products:
+        pid = int(product["id"])
+        checked = (not all_mode) and (pid in selected_ids)
+        options += (
+            f'<label class="multiselect-option">'
+            f'<input type="checkbox" class="tp-product" name="trust_product_ids" '
+            f'value="{pid}"{" checked" if checked else ""}> '
+            f'{escape(str(product["name"]))}</label>'
+        )
+    return f"""
+        <div class="filter-multiselect" data-multiselect="trust-product">
+            <span class="filter-multiselect-label">信托产品</span>
+            <button type="button" class="multiselect-trigger" aria-haspopup="listbox">{trigger}</button>
+            <div class="multiselect-panel" hidden>
+                {options}
+            </div>
+        </div>
+    """
+
+
 def render_overdue_html(
     overview: dict,
     reconciliation: list,
@@ -1834,7 +1911,7 @@ def render_overdue_html(
     elif (filters or {}).get("asset_code") or (filters or {}).get("custody_asset_code") or any(
         (filters or {}).get(k)
         for k in (
-            "trust_product_id",
+            "trust_product_ids",
             "trust_marker",
             "internal_status",
             "has_followup",
@@ -1865,12 +1942,8 @@ def render_overdue_html(
 
     f = filters or {}
     products = products or []
-    product_options = '<option value="">全部信托产品</option>'
-    for p in products:
-        sel = " selected" if f.get("trust_product_id") == p["id"] else ""
-        product_options += (
-            f'<option value="{p["id"]}"{sel}>{escape(p["name"])}</option>'
-        )
+    selected_product_ids = f.get("trust_product_ids")
+    trust_product_filter = _render_trust_product_multiselect(products, selected_product_ids)
 
     def bucket_option(val: str, label: str) -> str:
         sel = " selected" if f.get("delinquency_bucket") == val else ""
@@ -1905,9 +1978,7 @@ def render_overdue_html(
 
     filter_bar = f"""
         <form class="filter-form" method="get" action="/overdue">
-            <label>信托产品
-                <select name="trust_product_id">{product_options}</select>
-            </label>
+            {trust_product_filter}
             <label>等级
                 <select name="delinquency_bucket">{bucket_options}</select>
             </label>
@@ -1944,11 +2015,19 @@ def render_overdue_html(
     code_mismatch_alerts = code_mismatch_alerts or []
     code_mismatch_banner = _render_code_mismatch_alert_banner(code_mismatch_alerts)
     data_date = overview.get("data_date") or "—"
-    trust_product_id = overview.get("trust_product_id")
+    selected_ids = overview.get("trust_product_ids")
+    recalc_single_pid = selected_ids[0] if selected_ids and len(selected_ids) == 1 else None
+    recalc_disabled = "" if recalc_single_pid is not None else " disabled"
+    recalc_title = (
+        ""
+        if recalc_single_pid is not None
+        else ' title="请先单选一个信托产品"'
+    )
+    recalc_hint_style = ' style="display:none;"' if recalc_single_pid is not None else ""
     recon_data_date = data_date
     recon_recalc_payload = {"data_date": recon_data_date if recon_data_date != "—" else None}
-    if trust_product_id is not None:
-        recon_recalc_payload["trust_product_id"] = trust_product_id
+    if recalc_single_pid is not None:
+        recon_recalc_payload["trust_product_id"] = recalc_single_pid
     recon_recalc_payload_json = json.dumps(recon_recalc_payload, ensure_ascii=False)
 
     followup_rows = ""
@@ -1967,8 +2046,8 @@ def render_overdue_html(
 
     header_meta = _render_overdue_header_meta(overview)
     recalc_payload = {"data_date": data_date if data_date != "—" else None}
-    if trust_product_id is not None:
-        recalc_payload["trust_product_id"] = trust_product_id
+    if recalc_single_pid is not None:
+        recalc_payload["trust_product_id"] = recalc_single_pid
     recalc_payload_json = json.dumps(recalc_payload, ensure_ascii=False)
 
     amounts = overview.get("amounts") or _zero_overdue_kpi_amounts()
@@ -2116,6 +2195,80 @@ def render_overdue_html(
             border: 1px solid rgba(255,255,255,0.15);
             background: rgba(0,0,0,0.2); color: #e2e8f0; font-size: 0.82rem;
         }}
+        .filter-multiselect {{
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+            min-width: 180px;
+        }}
+        .filter-multiselect-label {{
+            font-size: 0.75rem;
+            color: #94a3b8;
+        }}
+        .multiselect-trigger {{
+            padding: 0.35rem 0.5rem;
+            border-radius: 6px;
+            border: 1px solid rgba(255,255,255,0.15);
+            background: rgba(0,0,0,0.2);
+            color: #e2e8f0;
+            font-size: 0.82rem;
+            text-align: left;
+            cursor: pointer;
+            max-width: 220px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        .multiselect-panel {{
+            position: absolute;
+            top: calc(100% + 0.25rem);
+            left: 0;
+            z-index: 30;
+            min-width: 220px;
+            max-height: 240px;
+            overflow: auto;
+            padding: 0.45rem;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.12);
+            background: #0f172a;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+        }}
+        .multiselect-option {{
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: flex-start;
+            gap: 0.5rem;
+            padding: 0.3rem 0.35rem;
+            font-size: 0.82rem;
+            color: #e2e8f0;
+            cursor: pointer;
+            white-space: nowrap;
+            min-width: 0;
+        }}
+        .filter-form label.multiselect-option {{
+            flex-direction: row;
+            align-items: center;
+            min-width: 0;
+        }}
+        .multiselect-option input[type="checkbox"] {{
+            flex: 0 0 auto;
+            width: 0.95rem;
+            height: 0.95rem;
+            margin: 0;
+            cursor: pointer;
+        }}
+        .multiselect-option:hover {{ color: #f8fafc; }}
+        .multiselect-all {{
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            margin-bottom: 0.25rem;
+            padding-bottom: 0.35rem;
+        }}
+        .btn-recalc:disabled {{
+            opacity: 0.45;
+            cursor: not-allowed;
+        }}
         .custody-mark-select {{
             max-width: 140px; padding: 0.25rem 0.35rem; font-size: 0.78rem;
             border-radius: 6px; border: 1px solid rgba(255,255,255,0.15);
@@ -2199,8 +2352,9 @@ def render_overdue_html(
                     <h1>信托资产逾期管理</h1>
                     {header_meta}
                 </div>
-                <button type="button" class="btn-recalc" id="btn-recalc-overdue">重新计算逾期天数</button>
+                <button type="button" class="btn-recalc" id="btn-recalc-overdue"{recalc_disabled}{recalc_title}>重新计算逾期天数</button>
             </div>
+            <p class="card-hint" id="recalc-hint"{recalc_hint_style}>多选信托产品时无法重算逾期天数或金额核对，请先单选一个产品。</p>
             <div id="recalc-message" class="recalc-msg" style="display:none;"></div>
         </header>
 
@@ -2226,7 +2380,7 @@ def render_overdue_html(
                     金额核对
                     <a class="api-link" href="/overdue/reconciliation">JSON → /overdue/reconciliation</a>
                 </h2>
-                <button type="button" class="btn-recalc" id="btn-recalc-reconciliation">重新计算金额核对</button>
+                <button type="button" class="btn-recalc" id="btn-recalc-reconciliation"{recalc_disabled}{recalc_title}>重新计算金额核对</button>
             </div>
             <p class="recon-meta">
                 金额核对数据日期：<strong>{escape(recon_data_date)}</strong>
@@ -2280,11 +2434,87 @@ def render_overdue_html(
     (function() {{
         var filterForm = document.querySelector('form.filter-form');
         if (!filterForm) return;
+
+        function updateTrustProductTrigger() {{
+            var root = filterForm.querySelector('[data-multiselect="trust-product"]');
+            if (!root) return;
+            var trigger = root.querySelector('.multiselect-trigger');
+            var allBox = root.querySelector('.tp-all');
+            var productBoxes = root.querySelectorAll('.tp-product');
+            if (allBox && allBox.checked) {{
+                trigger.textContent = '全部信托产品';
+                return;
+            }}
+            var names = [];
+            productBoxes.forEach(function(box) {{
+                if (box.checked) names.push(box.parentElement.textContent.trim());
+            }});
+            if (!names.length) {{
+                trigger.textContent = '全部信托产品';
+                return;
+            }}
+            trigger.textContent = names.length <= 2 ? names.join(' · ') : ('已选 ' + names.length + ' 个产品');
+        }}
+
+        var productRoot = filterForm.querySelector('[data-multiselect="trust-product"]');
+        if (productRoot) {{
+            var panel = productRoot.querySelector('.multiselect-panel');
+            var trigger = productRoot.querySelector('.multiselect-trigger');
+            var allBox = productRoot.querySelector('.tp-all');
+            trigger.addEventListener('click', function(ev) {{
+                ev.stopPropagation();
+                panel.hidden = !panel.hidden;
+            }});
+            document.addEventListener('click', function(ev) {{
+                if (!productRoot.contains(ev.target)) panel.hidden = true;
+            }});
+            if (allBox) {{
+                allBox.addEventListener('change', function() {{
+                    if (allBox.checked) {{
+                        productRoot.querySelectorAll('.tp-product').forEach(function(box) {{
+                            box.checked = false;
+                            box.disabled = true;
+                        }});
+                    }} else {{
+                        productRoot.querySelectorAll('.tp-product').forEach(function(box) {{
+                            box.disabled = false;
+                        }});
+                    }}
+                    updateTrustProductTrigger();
+                }});
+                if (allBox.checked) {{
+                    productRoot.querySelectorAll('.tp-product').forEach(function(box) {{
+                        box.disabled = true;
+                    }});
+                }}
+            }}
+            productRoot.querySelectorAll('.tp-product').forEach(function(box) {{
+                box.addEventListener('change', function() {{
+                    if (box.checked && allBox) {{
+                        allBox.checked = false;
+                        productRoot.querySelectorAll('.tp-product').forEach(function(other) {{
+                            other.disabled = false;
+                        }});
+                    }}
+                    updateTrustProductTrigger();
+                }});
+            }});
+            updateTrustProductTrigger();
+        }}
+
         filterForm.addEventListener('submit', function(ev) {{
             ev.preventDefault();
             var params = new URLSearchParams();
+            var productRoot = filterForm.querySelector('[data-multiselect="trust-product"]');
+            var allBox = productRoot ? productRoot.querySelector('.tp-all') : null;
+            var useAllProducts = !productRoot || (allBox && allBox.checked);
             filterForm.querySelectorAll('input, select, textarea').forEach(function(el) {{
                 if (!el.name || el.disabled) return;
+                if (el.classList.contains('tp-product')) {{
+                    if (!useAllProducts && el.checked) params.append(el.name, el.value);
+                    return;
+                }}
+                if (el.classList.contains('tp-all')) return;
                 var val = (el.value || '').trim();
                 if (val) params.set(el.name, val);
             }});
@@ -3779,6 +4009,7 @@ def patch_trust_product(
 @app.get("/overdue/overview")
 def overdue_overview(
     trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
     data_date: str | None = None,
     delinquency_bucket: str | None = None,
     trust_marker: str | None = None,
@@ -3788,12 +4019,12 @@ def overdue_overview(
     custody_asset_code: str | None = None,
     city: str | None = None,
 ):
-    pid = query_utils.parse_optional_int(trust_product_id)
+    pids = query_utils.parse_trust_product_ids(trust_product_id, trust_product_ids)
     dd = query_utils.parse_optional_date(data_date)
     with engine.connect() as conn:
         return fetch_overdue_overview(
             conn,
-            pid,
+            pids,
             dd,
             delinquency_bucket=query_utils.clean_optional_str(delinquency_bucket),
             trust_marker=query_utils.clean_optional_str(trust_marker),
@@ -3806,29 +4037,41 @@ def overdue_overview(
 
 
 @app.get("/overdue/checks")
-def overdue_checks(trust_product_id: str | None = None, data_date: str | None = None):
+def overdue_checks(
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    data_date: str | None = None,
+):
     with engine.connect() as conn:
         return fetch_overdue_checks(
             conn,
-            query_utils.parse_optional_int(trust_product_id),
+            query_utils.parse_trust_product_ids(trust_product_id, trust_product_ids),
             query_utils.parse_optional_date(data_date),
         )
 
 
 @app.get("/overdue/reconciliation")
-def overdue_reconciliation(trust_product_id: str | None = None, data_date: str | None = None):
+def overdue_reconciliation(
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    data_date: str | None = None,
+):
     with engine.connect() as conn:
         return fetch_reconciliation(
             conn,
-            query_utils.parse_optional_int(trust_product_id),
+            query_utils.parse_trust_product_ids(trust_product_id, trust_product_ids),
             query_utils.parse_optional_date(data_date),
         )
 
 
 @app.get("/overdue/followups")
-def overdue_followups(trust_product_id: str | None = None, status: str | None = None):
+def overdue_followups(
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    status: str | None = None,
+):
     return fetch_overdue_followups(
-        query_utils.parse_optional_int(trust_product_id),
+        query_utils.parse_trust_product_ids(trust_product_id, trust_product_ids),
         query_utils.clean_optional_str(status),
     )
 
@@ -3905,6 +4148,7 @@ def update_custody_mark(
 def overdue_dashboard(
     page_user: Annotated[dict, Depends(get_page_user)],
     trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
     delinquency_bucket: str | None = None,
     trust_marker: str | None = None,
     internal_status: str | None = None,
@@ -3913,7 +4157,7 @@ def overdue_dashboard(
     custody_asset_code: str | None = None,
     city: str | None = None,
 ):
-    pid = query_utils.parse_optional_int(trust_product_id)
+    pids = query_utils.parse_trust_product_ids(trust_product_id, trust_product_ids)
     parsed_delinquency = query_utils.clean_optional_str(delinquency_bucket)
     parsed_trust_marker = query_utils.clean_optional_str(trust_marker)
     parsed_internal_status = query_utils.clean_optional_str(internal_status)
@@ -3922,7 +4166,7 @@ def overdue_dashboard(
     parsed_custody = query_utils.clean_optional_str(custody_asset_code)
     parsed_city = query_utils.clean_optional_str(city)
     filters = {
-        "trust_product_id": pid,
+        "trust_product_ids": pids,
         "delinquency_bucket": parsed_delinquency,
         "trust_marker": parsed_trust_marker,
         "internal_status": parsed_internal_status,
@@ -3934,7 +4178,7 @@ def overdue_dashboard(
     with engine.connect() as conn:
         overview = fetch_overdue_overview(
             conn,
-            pid,
+            pids,
             delinquency_bucket=parsed_delinquency,
             trust_marker=parsed_trust_marker,
             internal_status=parsed_internal_status,
@@ -3943,8 +4187,8 @@ def overdue_dashboard(
             custody_asset_code=parsed_custody,
             city=parsed_city,
         )
-        recon_data = fetch_reconciliation(conn, pid)
-        followups = fetch_overdue_followups(pid)
+        recon_data = fetch_reconciliation(conn, pids)
+        followups = fetch_overdue_followups(pids)
         products = fetch_trust_products(conn)
 
     html = render_overdue_html(
