@@ -1042,6 +1042,7 @@ def _panel_issuance(records: list) -> str:
             rec_cards = ""
             for rec in recs:
                 issue = escape(str(rec.get("issue_date") or "—"))
+                product = escape(str(rec.get("trust_product_name") or ""))
                 city = escape(str(rec.get("city") or ""))
                 addr = escape(str(rec.get("property_address") or ""))
                 debtor = escape(str(rec.get("debtor_name") or "—"))
@@ -1096,7 +1097,7 @@ def _panel_issuance(records: list) -> str:
                 source = escape(str(rec.get("source_file_name") or ""))
 
                 rec_cards += f"""<div class="issuance-record">
-                    <p class="issuance-issue-date">发行日 {issue}</p>
+                    <p class="issuance-issue-date">发行日 {issue}{f' · {product}' if product else ''}</p>
                     {f'<p class="issuance-line">{meta_line}</p>' if meta_line else ''}
                     <p class="issuance-line">{location_line}</p>
                     <p class="issuance-line">债务人：{debtor} · 合同：{contract}</p>

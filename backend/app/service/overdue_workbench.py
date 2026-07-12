@@ -2,8 +2,6 @@
 
 from sqlalchemy.engine import Engine
 
-DEFAULT_DELINQUENCY_BUCKET = "M2_PLUS"
-
 from app.repo.followup_repo import FollowupRepo
 from app.repo.issuance_repo import IssuanceRepo
 from app.repo.marks_repo import MarksRepo
@@ -13,6 +11,17 @@ from app.service import checks_service
 from app.service.location_service import build_location_service
 from app.service.ops_service import suggest_ops
 from app.overdue.buckets import matches_delinquency_bucket_filter
+
+DEFAULT_DELINQUENCY_BUCKET = "M2_PLUS"
+
+
+def _pick_issuance_identity_id(
+    issuance_records: list[dict], trust_product_id: int
+) -> int | None:
+    for rec in issuance_records:
+        if rec.get("trust_product_id") == trust_product_id:
+            return rec.get("id")
+    return issuance_records[0]["id"] if issuance_records else None
 
 
 class OverdueWorkbenchService:
@@ -90,10 +99,8 @@ class OverdueWorkbenchService:
             )
         )
 
-        issuance_records = self._issuance.fetch_for_asset_code(
-            trust_product_id, resolved_asset, custody_codes
-        )
-        identity_id = issuance_records[0]["id"] if issuance_records else None
+        issuance_records = self._issuance.fetch_by_primary_asset_code(resolved_asset)
+        identity_id = _pick_issuance_identity_id(issuance_records, trust_product_id)
 
         if not splits_raw:
             empty["data_date"] = resolved_date
