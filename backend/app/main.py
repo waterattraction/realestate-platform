@@ -21,6 +21,8 @@ from app.api.spatial import build_spatial_router
 from app import assetinfo_html
 from app import assetinfo_pipeline
 from app import assetinfo_upload
+from app import asset_swap
+from app import asset_swap_html
 from app import issuance_html
 from app import issuance_upload
 from app import query_utils
@@ -3768,6 +3770,10 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                             <svg viewBox="0 0 24 24"><path d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"/></svg>
                             产品管理
                         </a>
+                        <a href="/asset-swap" class="op-chip op-teal">
+                            <svg viewBox="0 0 24 24"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
+                            资产置换推荐
+                        </a>
                     </div>
                     <div class="mini-kpi-row">
                         <span>最近发行日 <strong>{dash_date(latest_issue_date)}</strong></span>
@@ -4791,6 +4797,45 @@ def assetinfo_monitor_records_export(
             "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
         },
     )
+
+
+@app.get("/asset-swap", response_class=HTMLResponse)
+def asset_swap_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
+):
+    with engine.connect() as conn:
+        products = asset_swap.fetch_meihaosheng_products(conn)
+    html = asset_swap_html.render_swap_page(
+        products,
+        username=page_user["username"],
+    )
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+@app.get("/asset-swap/data")
+def asset_swap_data(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str = Query(...),
+    asset_codes: list[str] = Query(default=[]),
+    exclude_asset_codes: list[str] = Query(default=[]),
+    required_asset_codes: list[str] = Query(default=[]),
+):
+    pid = query_utils.parse_optional_int(trust_product_id)
+    if pid is None:
+        raise HTTPException(status_code=400, detail="请选择信托产品")
+    parsed_codes = asset_swap.parse_asset_code_list(
+        asset_codes,
+        max_count=asset_swap.MAX_SOURCE_ASSETS,
+        field_label="转出资产编号",
+    )
+    with engine.connect() as conn:
+        return asset_swap.fetch_swap_recommendations(
+            conn,
+            trust_product_id=pid,
+            asset_codes=parsed_codes,
+            exclude_asset_codes=exclude_asset_codes or None,
+            required_asset_codes=required_asset_codes or None,
+        )
 
 
 def _parse_asset_stats_dates(
