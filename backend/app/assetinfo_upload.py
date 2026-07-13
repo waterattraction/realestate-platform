@@ -45,6 +45,62 @@ def _parse_transferred_filter(value: str | None) -> str | None:
     raise HTTPException(status_code=400, detail="已转让筛选仅支持：是/否")
 
 
+MONITOR_DISCOUNT_RATE_NONE = "__none__"
+
+MONITOR_SORT_COLUMNS: dict[str, str] = {
+    "trust_product_name": "tp.name",
+    "asset_code": "r.asset_code",
+    "custody_asset_code": "r.custody_asset_code",
+    "source_asset_code": "r.source_asset_code",
+    "data_date": "r.data_date",
+    "overdue_days": "r.overdue_days",
+    "initial_transfer_amount": "r.initial_transfer_amount",
+    "repaid_amount": "r.repaid_amount",
+    "remaining_amount": "r.remaining_amount",
+    "asset_transfer_discount_rate": "iss.asset_transfer_discount_rate",
+    "last_renovation_payment_date": "r.last_renovation_payment_date",
+}
+
+MONITOR_DEFAULT_ORDER_BY = """
+    r.data_date DESC,
+    r.custody_asset_code ASC NULLS LAST,
+    r.source_asset_code ASC NULLS LAST,
+    r.asset_code ASC,
+    r.id ASC
+"""
+
+
+def _parse_monitor_discount_rate_filter(raw) -> str | float | None:
+    if raw is None or raw == "":
+        return None
+    text = str(raw).strip()
+    if text == MONITOR_DISCOUNT_RATE_NONE:
+        return MONITOR_DISCOUNT_RATE_NONE
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _parse_monitor_sort_dir(raw) -> str:
+    return "asc" if str(raw or "").strip().lower() == "asc" else "desc"
+
+
+def build_monitor_order_by(sort_by: str | None, sort_dir: str | None) -> str:
+    if not sort_by:
+        return MONITOR_DEFAULT_ORDER_BY.strip()
+    expr = MONITOR_SORT_COLUMNS.get(sort_by)
+    if not expr:
+        return MONITOR_DEFAULT_ORDER_BY.strip()
+    direction = "ASC" if sort_dir == "asc" else "DESC"
+    return f"""
+        {expr} {direction} NULLS LAST,
+        r.data_date DESC,
+        r.custody_asset_code ASC NULLS LAST,
+        r.id ASC
+    """.strip()
+
+
 def build_record_filters(
     *,
     trust_product_id: str | int | None = None,
@@ -56,12 +112,18 @@ def build_record_filters(
     source_sheet_name: str | None = None,
     include_history: str | int | bool | None = None,
     transferred: str | None = None,
+    asset_transfer_discount_rate: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
 ) -> dict[str, Any]:
     """将查询参数中的空字符串规范为 None，避免 Optional[int] 解析失败."""
     pid = coerce_optional_int(trust_product_id)
     transferred_filter = _parse_transferred_filter(transferred)
     if transferred_filter and pid is None:
         raise HTTPException(status_code=400, detail="已转让筛选须先选择信托产品")
+    parsed_sort_by = query_utils.clean_optional_str(sort_by)
+    if parsed_sort_by and parsed_sort_by not in MONITOR_SORT_COLUMNS:
+        parsed_sort_by = None
     return {
         "trust_product_id": pid,
         "data_date": data_date or None,
@@ -72,6 +134,11 @@ def build_record_filters(
         "source_sheet_name": source_sheet_name or None,
         "include_history": coerce_bool(include_history),
         "transferred": transferred_filter,
+        "asset_transfer_discount_rate": _parse_monitor_discount_rate_filter(
+            asset_transfer_discount_rate
+        ),
+        "sort_by": parsed_sort_by,
+        "sort_dir": _parse_monitor_sort_dir(sort_dir),
     }
 
 
@@ -2055,6 +2122,45 @@ def _monitor_transferred_in_exists_sql() -> str:
     """
 
 
+def _monitor_issuance_lateral_join_sql() -> str:
+    return """
+        LEFT JOIN LATERAL (
+            SELECT i.asset_transfer_discount_rate
+            FROM trust_product_issuance_asset_records i
+            WHERE i.trust_product_id = r.trust_product_id
+              AND (
+                  i.custody_asset_code = r.custody_asset_code
+                  OR split_part(i.custody_asset_code, '-', 1) = r.asset_code
+              )
+            ORDER BY i.issue_date DESC NULLS LAST, i.id DESC
+            LIMIT 1
+        ) iss ON TRUE
+    """
+
+
+def fetch_monitor_discount_rate_options(
+    conn: Connection,
+    trust_product_id: int | None = None,
+) -> list[dict[str, str]]:
+    from app.issuance_labels import format_rate
+
+    sql = """
+        SELECT DISTINCT asset_transfer_discount_rate AS rate
+        FROM trust_product_issuance_asset_records
+        WHERE asset_transfer_discount_rate IS NOT NULL
+    """
+    params: dict[str, Any] = {}
+    if trust_product_id is not None:
+        sql += " AND trust_product_id = :trust_product_id"
+        params["trust_product_id"] = trust_product_id
+    sql += " ORDER BY rate"
+    rows = conn.execute(text(sql), params)
+    return [
+        {"value": str(float(row.rate)), "label": format_rate(row.rate)}
+        for row in rows
+    ]
+
+
 def _monitor_transferred_out_exists_sql() -> str:
     """已转让=否：排除已从 trust_product_id 转出的托管房源。"""
     custody_match = _monitor_custody_norm_match_sql(
@@ -2148,6 +2254,19 @@ def fetch_paginated_records(
     if table == "monitor" and _monitor_snapshot_view_mode(filters) == "latest_effective":
         snapshot_join = _monitor_latest_snapshot_join_sql()
 
+    issuance_join = ""
+    if table == "monitor":
+        issuance_join = _monitor_issuance_lateral_join_sql()
+        rate_filter = filters.get("asset_transfer_discount_rate")
+        if rate_filter == MONITOR_DISCOUNT_RATE_NONE:
+            where_parts.append("iss.asset_transfer_discount_rate IS NULL")
+        elif rate_filter is not None:
+            where_parts.append(
+                "ABS(iss.asset_transfer_discount_rate - :asset_transfer_discount_rate) < 1e-6"
+            )
+            params["asset_transfer_discount_rate"] = float(rate_filter)
+        where_sql = " AND ".join(where_parts)
+
     if table == "monitor" and transferred in ("yes", "no"):
         if transferred == "yes":
             where_parts.append(_monitor_transferred_in_exists_sql())
@@ -2155,12 +2274,22 @@ def fetch_paginated_records(
             where_parts.append(f"NOT ({_monitor_transferred_out_exists_sql()})")
         where_sql = " AND ".join(where_parts)
 
+    order_by_sql = MONITOR_DEFAULT_ORDER_BY.strip()
+    select_extra = ""
+    if table == "monitor":
+        order_by_sql = build_monitor_order_by(
+            filters.get("sort_by"),
+            filters.get("sort_dir"),
+        )
+        select_extra = ", iss.asset_transfer_discount_rate"
+
     count_row = conn.execute(
         text(f"""
             SELECT COUNT(*) AS cnt
             FROM {table_name} r
             JOIN trust_products tp ON tp.id = r.trust_product_id
             {snapshot_join}
+            {issuance_join}
             WHERE {where_sql}
         """),
         params,
@@ -2169,19 +2298,26 @@ def fetch_paginated_records(
 
     rows = conn.execute(
         text(f"""
-            SELECT r.*, tp.name AS trust_product_name
+            SELECT r.*, tp.name AS trust_product_name{select_extra}
             FROM {table_name} r
             JOIN trust_products tp ON tp.id = r.trust_product_id
             {snapshot_join}
+            {issuance_join}
             WHERE {where_sql}
-            ORDER BY r.data_date DESC,
-                     r.custody_asset_code ASC NULLS LAST,
-                     r.source_asset_code ASC NULLS LAST,
-                     r.asset_code ASC
+            ORDER BY {order_by_sql}
             LIMIT :limit OFFSET :offset
         """),
         params,
     )
+
+    monitor_float_keys = frozenset({
+        "initial_transfer_amount",
+        "repaid_amount",
+        "remaining_amount",
+        "asset_transfer_discount_rate",
+        "overdue_days",
+        "risk_score",
+    })
 
     items = []
     for row in rows:
@@ -2189,7 +2325,9 @@ def fetch_paginated_records(
         for k, v in item.items():
             if hasattr(v, "isoformat"):
                 item[k] = str(v)
-            elif isinstance(v, (int, float)) and v is not None and k.endswith("amount"):
+            elif isinstance(v, (int, float)) and v is not None and (
+                k.endswith("amount") or k in monitor_float_keys
+            ):
                 item[k] = float(v)
         items.append(item)
 
@@ -2204,4 +2342,7 @@ def fetch_paginated_records(
         result["include_history"] = bool(filters.get("include_history"))
         if filters.get("transferred"):
             result["transferred"] = filters["transferred"]
+        if filters.get("sort_by"):
+            result["sort_by"] = filters["sort_by"]
+            result["sort_dir"] = filters.get("sort_dir") or "desc"
     return result

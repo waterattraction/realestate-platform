@@ -4629,6 +4629,9 @@ def assetinfo_monitor_records_data(
     source_sheet_name: str | None = Query(default=None),
     include_history: str | None = Query(default=None),
     transferred: str | None = Query(default=None),
+    asset_transfer_discount_rate: str | None = Query(default=None),
+    sort_by: str | None = Query(default=None),
+    sort_dir: str | None = Query(default=None),
 ):
     page_no, page_sz = query_utils.parse_pagination(page, page_size)
     filters = assetinfo_upload.build_record_filters(
@@ -4641,6 +4644,9 @@ def assetinfo_monitor_records_data(
         source_sheet_name=source_sheet_name,
         include_history=include_history,
         transferred=transferred,
+        asset_transfer_discount_rate=asset_transfer_discount_rate,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
     with engine.connect() as conn:
         return assetinfo_upload.fetch_paginated_records(
@@ -4662,6 +4668,9 @@ def assetinfo_monitor_records_page(
     source_sheet_name: str | None = Query(default=None),
     include_history: str | None = Query(default=None),
     transferred: str | None = Query(default=None),
+    asset_transfer_discount_rate: str | None = Query(default=None),
+    sort_by: str | None = Query(default=None),
+    sort_dir: str | None = Query(default=None),
 ):
     page_no, page_sz = query_utils.parse_pagination(page, page_size)
     filters = assetinfo_upload.build_record_filters(
@@ -4674,6 +4683,9 @@ def assetinfo_monitor_records_page(
         source_sheet_name=source_sheet_name,
         include_history=include_history,
         transferred=transferred,
+        asset_transfer_discount_rate=asset_transfer_discount_rate,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
     )
     with engine.connect() as conn:
         data = assetinfo_upload.fetch_paginated_records(
@@ -4683,9 +4695,13 @@ def assetinfo_monitor_records_page(
             {"id": r.id, "name": r.name}
             for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         ]
+        discount_rate_options = assetinfo_upload.fetch_monitor_discount_rate_options(
+            conn, filters.get("trust_product_id"),
+        )
     html = assetinfo_html.render_records_page(
         "资产监控数据", "/assetinfo/monitor-records/data", filters, data, products,
         record_type="monitor",
+        discount_rate_options=discount_rate_options,
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 

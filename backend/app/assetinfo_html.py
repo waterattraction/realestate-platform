@@ -13,6 +13,8 @@ from app.import_ui_labels import (
     PREVIEW_BTN_SELECT_IMPORT,
     preview_script_helpers,
 )
+from app.issuance_labels import format_rate
+from app.assetinfo_upload import MONITOR_DISCOUNT_RATE_NONE, MONITOR_SORT_COLUMNS
 
 DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -43,6 +45,13 @@ def _page_shell(title: str, body: str) -> str:
         .records-table td.col-num {{
             text-align: right;
         }}
+        .records-table th.sortable {{
+            cursor: pointer;
+            user-select: none;
+        }}
+        .records-table th.sortable:hover {{ color: #e2e8f0; }}
+        .records-table th.sortable.sort-asc::after {{ content: ' ▲'; font-size: 0.65rem; }}
+        .records-table th.sortable.sort-desc::after {{ content: ' ▼'; font-size: 0.65rem; }}
         details.compat-filters summary {{ cursor: pointer; color: #cbd5e1; }}
         .ok {{ color: #34d399; }} .warn {{ color: #fbbf24; }} .err {{ color: #f87171; }}
         .snapshot-hint {{
@@ -321,12 +330,20 @@ def _filter_query_string(filters: dict, page: int | None = None) -> str:
             if val:
                 params["include_history"] = "1"
             continue
+        if key in ("sort_by", "sort_dir") and val:
+            params[key] = str(val)
+            continue
+        if key == "asset_transfer_discount_rate" and val is not None and val != "":
+            params[key] = str(val)
+            continue
         if val is not None and val != "":
             params[key] = str(val)
     if page is not None:
         params["page"] = str(page)
     return urlencode(params)
 
+
+MONITOR_SORTABLE_COLUMNS = frozenset(MONITOR_SORT_COLUMNS.keys())
 
 RECORD_COLUMN_LABELS: dict[str, str] = {
     "custody_asset_code": "托管房源号",
@@ -342,6 +359,7 @@ RECORD_COLUMN_LABELS: dict[str, str] = {
     "repaid_amount": "已还款金额",
     "remaining_amount": "剩余还款金额",
     "overdue_days": "逾期天数",
+    "asset_transfer_discount_rate": "资产转让折扣率(%)",
     "last_renovation_payment_date": "最后一期装修款付款时间",
     "source_file_name": "文件名",
     "source_sheet_name": "Sheet名",
@@ -388,6 +406,7 @@ MONITOR_COLUMN_ORDER: tuple[str, ...] = (
     "initial_transfer_amount",
     "repaid_amount",
     "remaining_amount",
+    "asset_transfer_discount_rate",
     "last_renovation_payment_date",
     "source_file_name",
     "source_sheet_name",
@@ -417,6 +436,7 @@ RECORD_NUMERIC_COLUMNS: frozenset[str] = frozenset({
     "remaining_amount",
     "overdue_days",
     "risk_score",
+    "asset_transfer_discount_rate",
 })
 
 RECORD_DATE_ONLY_COLUMNS: frozenset[str] = frozenset({
@@ -472,6 +492,8 @@ def _format_date_for_display(value) -> str:
 def _format_cell_display(key: str, value) -> str:
     if value is None:
         return "—"
+    if key == "asset_transfer_discount_rate":
+        return format_rate(value)
     if key in RECORD_TIMESTAMP_COLUMNS:
         return _format_timestamptz_for_display(value)
     if key in RECORD_DATE_ONLY_COLUMNS:
@@ -517,9 +539,27 @@ def _record_column_label(key: str, record_type: str = "repayment") -> str:
     return RECORD_COLUMN_LABELS.get(key, key)
 
 
-def _render_record_header(key: str, record_type: str = "repayment") -> str:
+def _render_record_header(
+    key: str,
+    record_type: str = "repayment",
+    *,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+) -> str:
     label = _record_column_label(key, record_type)
     cls = _record_col_class(key)
+    if record_type == "monitor" and key in MONITOR_SORTABLE_COLUMNS:
+        sort_cls = "sortable"
+        if sort_by == key and sort_dir in ("asc", "desc"):
+            sort_cls += f" sort-{sort_dir}"
+        parts = [sort_cls]
+        if cls:
+            parts.append(cls)
+        class_attr = f' class="{" ".join(parts)}"'
+        return (
+            f'<th{class_attr} data-col="{escape(key)}" data-sort-key="{escape(key)}" '
+            f'title="点击排序">{escape(label)}</th>'
+        )
     class_attr = f' class="{cls}"' if cls else ""
     return f'<th{class_attr} data-col="{escape(key)}">{escape(label)}</th>'
 
@@ -559,6 +599,7 @@ def render_records_page(
     data: dict,
     trust_products: list[dict] | None = None,
     record_type: str = "repayment",
+    discount_rate_options: list[dict[str, str]] | None = None,
 ) -> str:
     selected_product_id = str(filters.get("trust_product_id") or "")
     product_options = '<option value="">全部</option>'
@@ -645,12 +686,33 @@ def render_records_page(
             syncTransferredFilter();
         }})();
         </script>"""
+        discount_val = str(filters.get("asset_transfer_discount_rate") or "")
+        discount_options = '<option value="">全部</option>'
+        none_sel = " selected" if discount_val == MONITOR_DISCOUNT_RATE_NONE else ""
+        discount_options += f'<option value="{MONITOR_DISCOUNT_RATE_NONE}"{none_sel}>未录入</option>'
+        for opt in discount_rate_options or []:
+            val = escape(opt["value"])
+            sel = " selected" if discount_val == opt["value"] else ""
+            discount_options += f'<option value="{val}"{sel}>{escape(opt["label"])}</option>'
+        filter_inputs += f"""
+        <div><label>资产转让折扣率(%)</label>
+        <select name="asset_transfer_discount_rate" form="f" style="width:100%">{discount_options}</select></div>"""
 
+    sort_by = filters.get("sort_by")
+    sort_dir = filters.get("sort_dir")
     rows = ""
     headers = ""
     if data.get("items"):
         keys = _ordered_record_keys(list(data["items"][0].keys()), record_type)
-        headers = "".join(_render_record_header(k, record_type) for k in keys)
+        headers = "".join(
+            _render_record_header(
+                k,
+                record_type,
+                sort_by=sort_by if record_type == "monitor" else None,
+                sort_dir=sort_dir if record_type == "monitor" else None,
+            )
+            for k in keys
+        )
         for item in data.get("items", []):
             cells = "".join(_render_record_cell(k, item.get(k)) for k in keys)
             rows += f"<tr>{cells}</tr>"
@@ -688,6 +750,34 @@ def render_records_page(
     </div>"""
 
     json_qs = f"{filter_qs}&page={page}" if filter_qs else f"page={page}"
+
+    sort_script = ""
+    if record_type == "monitor":
+        sort_script = f"""
+    <script>
+    (function() {{
+        var listPath = {list_path!r};
+        var table = document.querySelector('.records-table');
+        if (!table) return;
+        table.querySelectorAll('th.sortable').forEach(function(th) {{
+            th.addEventListener('click', function() {{
+                var key = th.getAttribute('data-sort-key');
+                var params = new URLSearchParams(window.location.search);
+                var currentSort = params.get('sort_by');
+                var currentDir = params.get('sort_dir') || 'desc';
+                if (currentSort === key) {{
+                    params.set('sort_dir', currentDir === 'asc' ? 'desc' : 'asc');
+                }} else {{
+                    params.set('sort_by', key);
+                    params.set('sort_dir', 'asc');
+                }}
+                params.set('page', '1');
+                window.location.href = listPath + '?' + params.toString();
+            }});
+        }});
+    }})();
+    </script>"""
+
     body = f"""
     <nav class="breadcrumb"><a href="/">首页</a> / <a href="/assetinfo/upload">资产情况</a> / {escape(title)}</nav>
     <h1>{escape(title)}</h1>
@@ -704,5 +794,6 @@ def render_records_page(
         <table class="records-table"><thead><tr>{headers}</tr></thead><tbody>{rows or '<tr><td>无数据</td></tr>'}</tbody></table>
     </div>
     {pager_block}
+    {sort_script}
     """
     return _page_shell(title, body)
