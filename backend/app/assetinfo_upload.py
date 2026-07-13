@@ -7,6 +7,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,8 @@ from app import assetinfo_cleanse as cleanse
 from app import assetinfo_date_rules
 from app import query_utils
 from app.auth import record_assetinfo_run, record_sheet_run
+from app.issuance_labels import format_rate
+from app.issuance_upload import ISSUANCE_CITY_UNKNOWN
 
 RECONCILIATION_TOLERANCE = cleanse.RECONCILIATION_TOLERANCE
 
@@ -46,6 +49,59 @@ def _parse_transferred_filter(value: str | None) -> str | None:
 
 
 MONITOR_DISCOUNT_RATE_NONE = "__none__"
+MONITOR_EXPORT_MAX = 20_000
+
+MONITOR_EXPORT_COLUMNS: tuple[str, ...] = (
+    "trust_product_name",
+    "asset_code",
+    "custody_asset_code",
+    "source_asset_code",
+    "data_date",
+    "overdue_days",
+    "initial_transfer_amount",
+    "repaid_amount",
+    "remaining_amount",
+    "asset_transfer_discount_rate",
+    "last_renovation_payment_date",
+    "city",
+    "source_file_name",
+    "source_sheet_name",
+    "synced_at",
+    "created_at",
+    "last_payment_date",
+    "max_payment_date",
+    "risk_score",
+    "risk_level",
+    "id",
+    "trust_product_id",
+    "trust_asset_id",
+)
+
+MONITOR_EXPORT_LABELS: dict[str, str] = {
+    "trust_product_name": "信托产品",
+    "asset_code": "资产主编号",
+    "custody_asset_code": "托管房源号",
+    "source_asset_code": "资产信托号",
+    "data_date": "数据日期",
+    "overdue_days": "逾期天数",
+    "initial_transfer_amount": "初始受让金额",
+    "repaid_amount": "已还款金额",
+    "remaining_amount": "剩余还款金额",
+    "asset_transfer_discount_rate": "资产转让折扣率(%)",
+    "last_renovation_payment_date": "最后一期装修款付款时间",
+    "city": "城市",
+    "source_file_name": "文件名",
+    "source_sheet_name": "Sheet名",
+    "synced_at": "同步时间",
+    "created_at": "创建时间",
+    "last_payment_date": "最后回款日",
+    "max_payment_date": "最大回款日",
+    "risk_score": "风险评分",
+    "risk_level": "风险等级",
+    "id": "ID",
+    "trust_product_id": "产品ID",
+    "trust_asset_id": "资产ID",
+}
 
 MONITOR_SORT_COLUMNS: dict[str, str] = {
     "trust_product_name": "tp.name",
@@ -113,6 +169,7 @@ def build_record_filters(
     include_history: str | int | bool | None = None,
     transferred: str | None = None,
     asset_transfer_discount_rate: str | None = None,
+    city: str | None = None,
     sort_by: str | None = None,
     sort_dir: str | None = None,
 ) -> dict[str, Any]:
@@ -137,6 +194,7 @@ def build_record_filters(
         "asset_transfer_discount_rate": _parse_monitor_discount_rate_filter(
             asset_transfer_discount_rate
         ),
+        "city": query_utils.clean_optional_str(city),
         "sort_by": parsed_sort_by,
         "sort_dir": _parse_monitor_sort_dir(sort_dir),
     }
@@ -2125,7 +2183,7 @@ def _monitor_transferred_in_exists_sql() -> str:
 def _monitor_issuance_lateral_join_sql() -> str:
     return """
         LEFT JOIN LATERAL (
-            SELECT i.asset_transfer_discount_rate
+            SELECT i.asset_transfer_discount_rate, i.city
             FROM trust_product_issuance_asset_records i
             WHERE i.trust_product_id = r.trust_product_id
               AND (
@@ -2138,12 +2196,119 @@ def _monitor_issuance_lateral_join_sql() -> str:
     """
 
 
+def _append_monitor_issuance_filters(
+    where_parts: list[str],
+    params: dict[str, Any],
+    filters: dict[str, Any],
+) -> None:
+    rate_filter = filters.get("asset_transfer_discount_rate")
+    if rate_filter == MONITOR_DISCOUNT_RATE_NONE:
+        where_parts.append("iss.asset_transfer_discount_rate IS NULL")
+    elif rate_filter is not None:
+        where_parts.append(
+            "ABS(iss.asset_transfer_discount_rate - :asset_transfer_discount_rate) < 1e-6"
+        )
+        params["asset_transfer_discount_rate"] = float(rate_filter)
+
+    city_filter = filters.get("city")
+    if city_filter == ISSUANCE_CITY_UNKNOWN:
+        where_parts.append("(iss.city IS NULL OR TRIM(iss.city) = '')")
+    elif city_filter:
+        where_parts.append("iss.city = :city")
+        params["city"] = city_filter
+
+
+def _build_monitor_record_query(
+    filters: dict[str, Any],
+) -> tuple[str, dict[str, Any], str, str, str, str]:
+    """返回 where_sql, params, snapshot_join, issuance_join, order_by_sql, select_extra."""
+    where_parts = ["1=1"]
+    params: dict[str, Any] = {}
+    transferred = filters.get("transferred")
+
+    for key in (
+        "trust_product_id", "data_date", "asset_code",
+        "custody_asset_code", "source_asset_code",
+        "source_file_name", "source_sheet_name",
+    ):
+        _append_assetinfo_record_filter(
+            where_parts,
+            params,
+            key,
+            filters.get(key),
+            skip_trust_product_where=(
+                key == "trust_product_id" and transferred == "yes"
+            ),
+        )
+
+    snapshot_join = ""
+    if _monitor_snapshot_view_mode(filters) == "latest_effective":
+        snapshot_join = _monitor_latest_snapshot_join_sql()
+
+    issuance_join = _monitor_issuance_lateral_join_sql()
+    _append_monitor_issuance_filters(where_parts, params, filters)
+
+    if transferred in ("yes", "no"):
+        if transferred == "yes":
+            where_parts.append(_monitor_transferred_in_exists_sql())
+        else:
+            where_parts.append(f"NOT ({_monitor_transferred_out_exists_sql()})")
+
+    where_sql = " AND ".join(where_parts)
+    order_by_sql = build_monitor_order_by(
+        filters.get("sort_by"),
+        filters.get("sort_dir"),
+    )
+    select_extra = ", iss.asset_transfer_discount_rate, iss.city"
+    return where_sql, params, snapshot_join, issuance_join, order_by_sql, select_extra
+
+
+MONITOR_ROW_FLOAT_KEYS = frozenset({
+    "initial_transfer_amount",
+    "repaid_amount",
+    "remaining_amount",
+    "asset_transfer_discount_rate",
+    "overdue_days",
+    "risk_score",
+})
+
+
+def _normalize_monitor_row(row) -> dict[str, Any]:
+    item = dict(row._mapping)
+    for k, v in item.items():
+        if hasattr(v, "isoformat"):
+            item[k] = str(v)
+        elif isinstance(v, (int, float)) and v is not None and (
+            k.endswith("amount") or k in MONITOR_ROW_FLOAT_KEYS
+        ):
+            item[k] = float(v)
+    return item
+
+
+def _format_monitor_export_cell(key: str, value) -> Any:
+    if value is None or value == "":
+        return "—"
+    if key == "asset_transfer_discount_rate":
+        return format_rate(value)
+    if key in ("synced_at", "created_at") and isinstance(value, str):
+        return value[:16].replace("T", " ") if len(value) >= 16 else value
+    if key in (
+        "data_date",
+        "last_renovation_payment_date",
+        "last_payment_date",
+        "max_payment_date",
+    ) and isinstance(value, str):
+        return value[:10]
+    if key == "city":
+        text = str(value).strip()
+        return text if text else "—"
+    return value
+
+
 def fetch_monitor_discount_rate_options(
     conn: Connection,
     trust_product_id: int | None = None,
 ) -> list[dict[str, str]]:
-    from app.issuance_labels import format_rate
-
     sql = """
         SELECT DISTINCT asset_transfer_discount_rate AS rate
         FROM trust_product_issuance_asset_records
@@ -2159,6 +2324,85 @@ def fetch_monitor_discount_rate_options(
         {"value": str(float(row.rate)), "label": format_rate(row.rate)}
         for row in rows
     ]
+
+
+def fetch_monitor_city_options(
+    conn: Connection,
+    trust_product_id: int | None = None,
+) -> list[str]:
+    sql = """
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
+        FROM trust_product_issuance_asset_records
+        WHERE 1 = 1
+    """
+    params: dict[str, Any] = {"unknown": ISSUANCE_CITY_UNKNOWN}
+    if trust_product_id is not None:
+        sql += " AND trust_product_id = :trust_product_id"
+        params["trust_product_id"] = trust_product_id
+    sql += " ORDER BY city"
+    rows = conn.execute(text(sql), params)
+    cities = [str(row.city) for row in rows]
+    if ISSUANCE_CITY_UNKNOWN not in cities:
+        cities.append(ISSUANCE_CITY_UNKNOWN)
+    return cities
+
+
+def fetch_monitor_records_for_export(
+    conn: Connection,
+    filters: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int]:
+    where_sql, params, snapshot_join, issuance_join, order_by_sql, select_extra = (
+        _build_monitor_record_query(filters)
+    )
+    count_row = conn.execute(
+        text(f"""
+            SELECT COUNT(*) AS cnt
+            FROM trust_asset_monitor_records r
+            JOIN trust_products tp ON tp.id = r.trust_product_id
+            {snapshot_join}
+            {issuance_join}
+            WHERE {where_sql}
+        """),
+        params,
+    ).fetchone()
+    total = int(count_row.cnt)
+    if total > MONITOR_EXPORT_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"结果超过 {MONITOR_EXPORT_MAX} 条，请缩小筛选范围",
+        )
+    rows = conn.execute(
+        text(f"""
+            SELECT r.*, tp.name AS trust_product_name{select_extra}
+            FROM trust_asset_monitor_records r
+            JOIN trust_products tp ON tp.id = r.trust_product_id
+            {snapshot_join}
+            {issuance_join}
+            WHERE {where_sql}
+            ORDER BY {order_by_sql}
+        """),
+        params,
+    )
+    return [_normalize_monitor_row(row) for row in rows], total
+
+
+def build_monitor_export_xlsx(items: list[dict[str, Any]]) -> bytes:
+    columns = [
+        key for key in MONITOR_EXPORT_COLUMNS
+        if not items or key in items[0]
+    ]
+    headers = [MONITOR_EXPORT_LABELS.get(key, key) for key in columns]
+    data_rows = []
+    for item in items:
+        data_rows.append([
+            _format_monitor_export_cell(key, item.get(key))
+            for key in columns
+        ])
+    df = pd.DataFrame(data_rows, columns=headers)
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="资产监控数据")
+    return buffer.getvalue()
 
 
 def _monitor_transferred_out_exists_sql() -> str:
@@ -2230,9 +2474,55 @@ def fetch_paginated_records(
     page_size = min(max(1, page_size), 200)
     offset = (page - 1) * page_size
 
+    if table == "monitor":
+        where_sql, base_params, snapshot_join, issuance_join, order_by_sql, select_extra = (
+            _build_monitor_record_query(filters)
+        )
+        params = {**base_params, "limit": page_size, "offset": offset}
+        count_row = conn.execute(
+            text(f"""
+                SELECT COUNT(*) AS cnt
+                FROM {table_name} r
+                JOIN trust_products tp ON tp.id = r.trust_product_id
+                {snapshot_join}
+                {issuance_join}
+                WHERE {where_sql}
+            """),
+            base_params,
+        ).fetchone()
+        total = int(count_row.cnt)
+        rows = conn.execute(
+            text(f"""
+                SELECT r.*, tp.name AS trust_product_name{select_extra}
+                FROM {table_name} r
+                JOIN trust_products tp ON tp.id = r.trust_product_id
+                {snapshot_join}
+                {issuance_join}
+                WHERE {where_sql}
+                ORDER BY {order_by_sql}
+                LIMIT :limit OFFSET :offset
+            """),
+            params,
+        )
+        items = [_normalize_monitor_row(row) for row in rows]
+        result: dict[str, Any] = {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "items": items,
+            "view_mode": _monitor_snapshot_view_mode(filters),
+            "include_history": bool(filters.get("include_history")),
+        }
+        if filters.get("transferred"):
+            result["transferred"] = filters["transferred"]
+        if filters.get("sort_by"):
+            result["sort_by"] = filters["sort_by"]
+            result["sort_dir"] = filters.get("sort_dir") or "desc"
+        return result
+
     where_parts = ["1=1"]
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
-    transferred = filters.get("transferred") if table == "monitor" else None
+    transferred = None
 
     for key in (
         "trust_product_id", "data_date", "asset_code",
@@ -2244,44 +2534,14 @@ def fetch_paginated_records(
             params,
             key,
             filters.get(key),
-            skip_trust_product_where=(
-                key == "trust_product_id" and transferred == "yes"
-            ),
+            skip_trust_product_where=False,
         )
 
     where_sql = " AND ".join(where_parts)
     snapshot_join = ""
-    if table == "monitor" and _monitor_snapshot_view_mode(filters) == "latest_effective":
-        snapshot_join = _monitor_latest_snapshot_join_sql()
-
     issuance_join = ""
-    if table == "monitor":
-        issuance_join = _monitor_issuance_lateral_join_sql()
-        rate_filter = filters.get("asset_transfer_discount_rate")
-        if rate_filter == MONITOR_DISCOUNT_RATE_NONE:
-            where_parts.append("iss.asset_transfer_discount_rate IS NULL")
-        elif rate_filter is not None:
-            where_parts.append(
-                "ABS(iss.asset_transfer_discount_rate - :asset_transfer_discount_rate) < 1e-6"
-            )
-            params["asset_transfer_discount_rate"] = float(rate_filter)
-        where_sql = " AND ".join(where_parts)
-
-    if table == "monitor" and transferred in ("yes", "no"):
-        if transferred == "yes":
-            where_parts.append(_monitor_transferred_in_exists_sql())
-        else:
-            where_parts.append(f"NOT ({_monitor_transferred_out_exists_sql()})")
-        where_sql = " AND ".join(where_parts)
-
     order_by_sql = MONITOR_DEFAULT_ORDER_BY.strip()
     select_extra = ""
-    if table == "monitor":
-        order_by_sql = build_monitor_order_by(
-            filters.get("sort_by"),
-            filters.get("sort_dir"),
-        )
-        select_extra = ", iss.asset_transfer_discount_rate"
 
     count_row = conn.execute(
         text(f"""
@@ -2310,15 +2570,6 @@ def fetch_paginated_records(
         params,
     )
 
-    monitor_float_keys = frozenset({
-        "initial_transfer_amount",
-        "repaid_amount",
-        "remaining_amount",
-        "asset_transfer_discount_rate",
-        "overdue_days",
-        "risk_score",
-    })
-
     items = []
     for row in rows:
         item = dict(row._mapping)
@@ -2326,23 +2577,14 @@ def fetch_paginated_records(
             if hasattr(v, "isoformat"):
                 item[k] = str(v)
             elif isinstance(v, (int, float)) and v is not None and (
-                k.endswith("amount") or k in monitor_float_keys
+                k.endswith("amount") or k in MONITOR_ROW_FLOAT_KEYS
             ):
                 item[k] = float(v)
         items.append(item)
 
-    result: dict[str, Any] = {
+    return {
         "page": page,
         "page_size": page_size,
         "total": total,
         "items": items,
     }
-    if table == "monitor":
-        result["view_mode"] = _monitor_snapshot_view_mode(filters)
-        result["include_history"] = bool(filters.get("include_history"))
-        if filters.get("transferred"):
-            result["transferred"] = filters["transferred"]
-        if filters.get("sort_by"):
-            result["sort_by"] = filters["sort_by"]
-            result["sort_dir"] = filters.get("sort_dir") or "desc"
-    return result

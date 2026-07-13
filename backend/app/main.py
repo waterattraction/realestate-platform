@@ -4615,6 +4615,39 @@ def assetinfo_repayment_records_page(
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
+def _build_monitor_record_filters(
+    *,
+    trust_product_id: str | None = None,
+    data_date: str | None = None,
+    asset_code: str | None = None,
+    custody_asset_code: str | None = None,
+    source_asset_code: str | None = None,
+    source_file_name: str | None = None,
+    source_sheet_name: str | None = None,
+    include_history: str | None = None,
+    transferred: str | None = None,
+    asset_transfer_discount_rate: str | None = None,
+    city: str | None = None,
+    sort_by: str | None = None,
+    sort_dir: str | None = None,
+) -> dict:
+    return assetinfo_upload.build_record_filters(
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        asset_code=asset_code,
+        custody_asset_code=custody_asset_code,
+        source_asset_code=source_asset_code,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+        include_history=include_history,
+        transferred=transferred,
+        asset_transfer_discount_rate=asset_transfer_discount_rate,
+        city=city,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+
+
 @app.get("/assetinfo/monitor-records/data")
 def assetinfo_monitor_records_data(
     current_user: Annotated[dict, Depends(get_current_user)],
@@ -4630,11 +4663,12 @@ def assetinfo_monitor_records_data(
     include_history: str | None = Query(default=None),
     transferred: str | None = Query(default=None),
     asset_transfer_discount_rate: str | None = Query(default=None),
+    city: str | None = Query(default=None),
     sort_by: str | None = Query(default=None),
     sort_dir: str | None = Query(default=None),
 ):
     page_no, page_sz = query_utils.parse_pagination(page, page_size)
-    filters = assetinfo_upload.build_record_filters(
+    filters = _build_monitor_record_filters(
         trust_product_id=trust_product_id,
         data_date=data_date,
         asset_code=asset_code,
@@ -4645,6 +4679,7 @@ def assetinfo_monitor_records_data(
         include_history=include_history,
         transferred=transferred,
         asset_transfer_discount_rate=asset_transfer_discount_rate,
+        city=city,
         sort_by=sort_by,
         sort_dir=sort_dir,
     )
@@ -4669,11 +4704,12 @@ def assetinfo_monitor_records_page(
     include_history: str | None = Query(default=None),
     transferred: str | None = Query(default=None),
     asset_transfer_discount_rate: str | None = Query(default=None),
+    city: str | None = Query(default=None),
     sort_by: str | None = Query(default=None),
     sort_dir: str | None = Query(default=None),
 ):
     page_no, page_sz = query_utils.parse_pagination(page, page_size)
-    filters = assetinfo_upload.build_record_filters(
+    filters = _build_monitor_record_filters(
         trust_product_id=trust_product_id,
         data_date=data_date,
         asset_code=asset_code,
@@ -4684,6 +4720,7 @@ def assetinfo_monitor_records_page(
         include_history=include_history,
         transferred=transferred,
         asset_transfer_discount_rate=asset_transfer_discount_rate,
+        city=city,
         sort_by=sort_by,
         sort_dir=sort_dir,
     )
@@ -4698,12 +4735,62 @@ def assetinfo_monitor_records_page(
         discount_rate_options = assetinfo_upload.fetch_monitor_discount_rate_options(
             conn, filters.get("trust_product_id"),
         )
+        city_options = assetinfo_upload.fetch_monitor_city_options(
+            conn, filters.get("trust_product_id"),
+        )
     html = assetinfo_html.render_records_page(
         "资产监控数据", "/assetinfo/monitor-records/data", filters, data, products,
         record_type="monitor",
         discount_rate_options=discount_rate_options,
+        city_options=city_options,
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+@app.get("/assetinfo/monitor-records/export")
+def assetinfo_monitor_records_export(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str | None = Query(default=None),
+    data_date: str | None = Query(default=None),
+    asset_code: str | None = Query(default=None),
+    custody_asset_code: str | None = Query(default=None),
+    source_asset_code: str | None = Query(default=None),
+    source_file_name: str | None = Query(default=None),
+    source_sheet_name: str | None = Query(default=None),
+    include_history: str | None = Query(default=None),
+    transferred: str | None = Query(default=None),
+    asset_transfer_discount_rate: str | None = Query(default=None),
+    city: str | None = Query(default=None),
+    sort_by: str | None = Query(default=None),
+    sort_dir: str | None = Query(default=None),
+):
+    filters = _build_monitor_record_filters(
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        asset_code=asset_code,
+        custody_asset_code=custody_asset_code,
+        source_asset_code=source_asset_code,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+        include_history=include_history,
+        transferred=transferred,
+        asset_transfer_discount_rate=asset_transfer_discount_rate,
+        city=city,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    with engine.connect() as conn:
+        items, _total = assetinfo_upload.fetch_monitor_records_for_export(conn, filters)
+    xlsx_bytes = assetinfo_upload.build_monitor_export_xlsx(items)
+    ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
+    filename = f"资产监控数据_{ts}.xlsx"
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        },
+    )
 
 
 def _parse_asset_stats_dates(

@@ -14,6 +14,7 @@ from app.import_ui_labels import (
     preview_script_helpers,
 )
 from app.issuance_labels import format_rate
+from app.issuance_upload import ISSUANCE_CITY_UNKNOWN
 from app.assetinfo_upload import MONITOR_DISCOUNT_RATE_NONE, MONITOR_SORT_COLUMNS
 
 DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
@@ -361,6 +362,7 @@ RECORD_COLUMN_LABELS: dict[str, str] = {
     "overdue_days": "逾期天数",
     "asset_transfer_discount_rate": "资产转让折扣率(%)",
     "last_renovation_payment_date": "最后一期装修款付款时间",
+    "city": "城市",
     "source_file_name": "文件名",
     "source_sheet_name": "Sheet名",
     "synced_at": "同步时间",
@@ -408,6 +410,7 @@ MONITOR_COLUMN_ORDER: tuple[str, ...] = (
     "remaining_amount",
     "asset_transfer_discount_rate",
     "last_renovation_payment_date",
+    "city",
     "source_file_name",
     "source_sheet_name",
     "synced_at",
@@ -494,6 +497,9 @@ def _format_cell_display(key: str, value) -> str:
         return "—"
     if key == "asset_transfer_discount_rate":
         return format_rate(value)
+    if key == "city":
+        text = str(value).strip() if value is not None else ""
+        return text if text else "—"
     if key in RECORD_TIMESTAMP_COLUMNS:
         return _format_timestamptz_for_display(value)
     if key in RECORD_DATE_ONLY_COLUMNS:
@@ -600,6 +606,7 @@ def render_records_page(
     trust_products: list[dict] | None = None,
     record_type: str = "repayment",
     discount_rate_options: list[dict[str, str]] | None = None,
+    city_options: list[str] | None = None,
 ) -> str:
     selected_product_id = str(filters.get("trust_product_id") or "")
     product_options = '<option value="">全部</option>'
@@ -697,6 +704,14 @@ def render_records_page(
         filter_inputs += f"""
         <div><label>资产转让折扣率(%)</label>
         <select name="asset_transfer_discount_rate" form="f" style="width:100%">{discount_options}</select></div>"""
+        selected_city = str(filters.get("city") or "")
+        city_select = '<option value="">全部</option>'
+        for city_name in city_options or [ISSUANCE_CITY_UNKNOWN]:
+            sel = " selected" if city_name == selected_city else ""
+            city_select += f'<option value="{escape(city_name)}"{sel}>{escape(city_name)}</option>'
+        filter_inputs += f"""
+        <div><label>城市</label>
+        <select name="city" form="f" style="width:100%">{city_select}</select></div>"""
 
     sort_by = filters.get("sort_by")
     sort_dir = filters.get("sort_dir")
@@ -750,6 +765,10 @@ def render_records_page(
     </div>"""
 
     json_qs = f"{filter_qs}&page={page}" if filter_qs else f"page={page}"
+    export_link = ""
+    if record_type == "monitor":
+        export_href = f"/assetinfo/monitor-records/export?{filter_qs}" if filter_qs else "/assetinfo/monitor-records/export"
+        export_link = f' · <a href="{escape(export_href)}">导出 Excel</a>'
 
     sort_script = ""
     if record_type == "monitor":
@@ -789,7 +808,7 @@ def render_records_page(
         {snapshot_banner}
     </div>
     {pager_block}
-    <p class="muted"><a href="{escape(data_path)}?{json_qs}">JSON</a></p>
+    <p class="muted"><a href="{escape(data_path)}?{json_qs}">JSON</a>{export_link}</p>
     <div class="card table-wrap">
         <table class="records-table"><thead><tr>{headers}</tr></thead><tbody>{rows or '<tr><td>无数据</td></tr>'}</tbody></table>
     </div>
