@@ -359,7 +359,7 @@ RECORD_COLUMN_LABELS: dict[str, str] = {
     "initial_transfer_amount": "初始受让金额",
     "repaid_amount": "已还款金额",
     "remaining_amount": "剩余还款金额",
-    "overdue_days": "逾期天数",
+    "overdue_days": "未付天数",
     "asset_transfer_discount_rate": "资产转让折扣率(%)",
     "last_renovation_payment_date": "最后一期装修款付款时间",
     "city": "城市",

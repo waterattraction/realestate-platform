@@ -184,7 +184,7 @@ def render_swap_page(
                     <th class="col-rate">折扣率</th>
                     <th class="col-date">装修款截止日</th>
                     <th class="col-bucket">M级</th>
-                    <th class="col-overdue">逾期天数</th>
+                    <th class="col-overdue">未付天数</th>
                 </tr></thead><tbody>${{rows}}</tbody></table>
             </div>`;
     }}

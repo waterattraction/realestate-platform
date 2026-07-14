@@ -284,7 +284,7 @@ def sync_risk_alerts(conn, trust_product_id: int | None = None) -> dict:
             triggers AS (
                 SELECT m.trust_product_id, m.trust_asset_id, m.data_date, m.risk_level,
                        'delinquency_m3_plus' AS risk_type,
-                       '逾期天数 ≥92（M3+）' AS trigger_rule
+                       '未付天数 ≥92（M3+）' AS trigger_rule
                 FROM monitor m
                 WHERE m.remaining_amount > :tolerance
                   AND COALESCE(m.overdue_days, 0) >= :m3_plus_min_days
@@ -736,7 +736,7 @@ def _risk_triggers_for_asset(conn, trust_asset_id: int, data_date: str) -> list:
     od = 0 if rows.overdue_days is None else int(rows.overdue_days)
     triggers = []
     if od > 0:
-        triggers.append(f"逾期 {od} 天")
+        triggers.append(f"未付 {od} 天")
     if float(rows.balance_diff) > RECONCILIATION_TOLERANCE:
         triggers.append("余额等式不一致")
     if float(rows.cross_diff) > RECONCILIATION_TOLERANCE:

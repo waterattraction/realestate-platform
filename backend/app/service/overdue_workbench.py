@@ -10,9 +10,26 @@ from app.repo.repayment_repo import RepaymentRepo
 from app.service import checks_service
 from app.service.location_service import build_location_service
 from app.service.ops_service import suggest_ops
-from app.overdue.buckets import matches_delinquency_bucket_filter
+from app.overdue.buckets import matches_any_delinquency_bucket_filter
+from app.issuance_upload import ISSUANCE_CITY_UNKNOWN
 
 DEFAULT_DELINQUENCY_BUCKET = "M2_PLUS"
+
+
+def _match_internal_status_filter(got: str, wants: list[str] | None) -> bool:
+    if not wants:
+        return True
+    got_s = str(got or "")
+    for want in wants:
+        if want == "正常" and got_s == "正常":
+            return True
+        if want == "待跟进" and got_s.startswith("待跟进"):
+            return True
+        if want == "本周结算" and got_s.startswith("本周结算"):
+            return True
+        if got_s == want:
+            return True
+    return False
 
 
 def _pick_issuance_identity_id(
@@ -171,7 +188,7 @@ class OverdueWorkbenchService:
                     "followup_owner": active.get("owner_name") if active else None,
                     "followup_reason": active.get("overdue_reason") if active else None,
                     "followup_plan": active.get("follow_up_plan") if active else None,
-                    "followup_feedback": active.get("trust_feedback") if active else None,
+                    "followup_feedback": None,
                     "followup_last_at": active.get("last_follow_up_at") if active else None,
                     "has_follow_up": active is not None,
                 }
@@ -215,12 +232,23 @@ class OverdueWorkbenchService:
             if recent_repay is not None:
                 recent_repay = str(recent_repay)
 
-        case_row = self._followup.fetch_case_by_asset_code(
-            trust_product_id, resolved_asset, active_only=False
+        followup_cases = self._followup.fetch_cases_by_asset_code(
+            trust_product_id, resolved_asset
         )
+        case_row = followup_cases[0] if followup_cases else None
+        # 时间线：汇总所有事项下的 entries
         entry_list: list[dict] = []
-        if case_row:
-            entry_list = self._followup.fetch_entries_by_case_id(int(case_row["id"]))
+        for c in followup_cases:
+            for entry in self._followup.fetch_entries_by_case_id(int(c["id"])):
+                entry_list.append(
+                    {
+                        **entry,
+                        "case_id": int(c["id"]),
+                        "case_category": c.get("category"),
+                        "case_status": c.get("status"),
+                    }
+                )
+        entry_list.sort(key=lambda e: str(e.get("created_at") or ""), reverse=True)
 
         entry_ids = [int(e["id"]) for e in entry_list]
         attachments = self._followup.fetch_attachments_by_entry_ids(entry_ids)
@@ -238,6 +266,21 @@ class OverdueWorkbenchService:
         trust_mark = self._marks.fetch_mark(
             trust_product_id, resolved_asset, resolved_date
         )
+        # 派生内部状态以 cases 为准（与 marks 对齐）
+        from app.repo.followup_repo import (
+            PROBLEM_CASE_STATUSES,
+            format_internal_status,
+        )
+
+        problem_n = sum(
+            1 for c in followup_cases if c.get("status") in PROBLEM_CASE_STATUSES
+        )
+        settled_n = sum(
+            1 for c in followup_cases if c.get("status") == "settled_week"
+        )
+        derived_status = format_internal_status(problem_n, settled_n)
+        if trust_mark is not None:
+            trust_mark = {**trust_mark, "internal_status": derived_status}
         ops = suggest_ops(self._engine, identity_id)
 
         primary = detail or (queue[0] if queue else {})
@@ -313,6 +356,7 @@ class OverdueWorkbenchService:
             "ops": ops,
             "spatial_hint": spatial_hint,
             "followup_case": followup_case,
+            "followup_cases": followup_cases,
             "followup_entries": followup_entries,
             "timeline": timeline,
             "product_queue": product_queue,
@@ -321,31 +365,94 @@ class OverdueWorkbenchService:
             "detail": detail,
         }
 
+    def _fetch_city_by_asset(
+        self, pairs: list[tuple[int, str]]
+    ) -> dict[tuple[int, str], str]:
+        """批量取资产主编号对应发行城市；无命中记为未知。"""
+        if not pairs:
+            return {}
+        from sqlalchemy import text
+
+        unique = list(dict.fromkeys(pairs))
+        city_map: dict[tuple[int, str], str] = {}
+        with self._engine.connect() as conn:
+            for pid, ac in unique:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT COALESCE(NULLIF(TRIM(i.city), ''), :unknown) AS city
+                        FROM trust_product_issuance_asset_records i
+                        WHERE i.trust_product_id = :pid
+                          AND (
+                              split_part(i.custody_asset_code, '-', 1) = :asset_code
+                              OR i.custody_asset_code = :asset_code
+                          )
+                        ORDER BY i.issue_date DESC NULLS LAST, i.id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "pid": pid,
+                        "asset_code": ac,
+                        "unknown": ISSUANCE_CITY_UNKNOWN,
+                    },
+                ).fetchone()
+                city_map[(pid, ac)] = (
+                    str(row.city) if row else ISSUANCE_CITY_UNKNOWN
+                )
+        return city_map
+
     def get_asset_list(
         self,
         *,
-        trust_product_id: int | None,
+        trust_product_id: int | None = None,
         data_date: str | None = None,
-        delinquency_bucket: str = DEFAULT_DELINQUENCY_BUCKET,
+        delinquency_bucket: str | None = None,
+        delinquency_buckets: list[str] | None = None,
         trust_marker: str | None = None,
+        trust_markers: list[str] | None = None,
         followup_status: str | None = None,
+        followup_statuses: list[str] | None = None,
+        cities: list[str] | None = None,
+        trust_product_ids: list[int] | None = None,
     ) -> dict:
-        """Return asset_list dict (asset_code-based) for render.py."""
-        resolved_date = self._monitor.resolve_latest_data_date(trust_product_id, data_date)
+        """Return asset_list dict (asset_code-based) for render.py.
+
+        trust_product_ids: None = 全部产品；非空 = 多选限定。
+        delinquency_buckets / trust_markers / followup_statuses / cities:
+        None = 不限；非空 = 组合筛选。
+        """
+        ids = trust_product_ids
+        if ids is None and trust_product_id is not None:
+            ids = [trust_product_id]
+        scope_pid = ids[0] if ids and len(ids) == 1 else None
+        resolved_date = self._monitor.resolve_latest_data_date(scope_pid, data_date)
         if resolved_date is None:
             return {"data_date": None, "items": []}
 
+        buckets = delinquency_buckets
+        if buckets is None and delinquency_bucket:
+            buckets = [delinquency_bucket]
+        markers = trust_markers
+        if markers is None and trust_marker:
+            markers = [trust_marker]
+        statuses = followup_statuses
+        if statuses is None and followup_status:
+            statuses = [followup_status]
+
         rows = self._monitor.fetch_asset_queue(
-            trust_product_id,
-            resolved_date,
-            trust_marker=trust_marker,
-            followup_status=followup_status,
-            delinquency_bucket=delinquency_bucket or DEFAULT_DELINQUENCY_BUCKET,
+            data_date=resolved_date,
+            trust_markers=markers,
+            delinquency_buckets=buckets,
+            trust_product_ids=ids,
         )
+        pairs = [(int(r["trust_product_id"]), str(r["asset_code"])) for r in rows]
+        city_map = self._fetch_city_by_asset(pairs) if cities else {}
+
         items = []
         for row in rows:
             ac = row["asset_code"]
-            pid = row["trust_product_id"]
+            pid = int(row["trust_product_id"])
             custodies = list(row.get("custody_asset_codes") or [])
             remaining = float(row.get("remaining_amount") or 0)
             overdue_days = row.get("overdue_days")
@@ -355,12 +462,25 @@ class OverdueWorkbenchService:
             else:
                 bucket = checks_service.calc_risk_level(int(overdue_days or 0), remaining)
 
-            if not matches_delinquency_bucket_filter(bucket, delinquency_bucket):
+            if not matches_any_delinquency_bucket_filter(bucket, buckets):
                 continue
 
             followup_count = self._followup.count_entries_by_asset_code(pid, ac)
             mark = self._marks.fetch_mark(pid, ac, resolved_date)
             internal_status = mark.get("internal_status")
+            trust_mark_val = mark.get("trust_marker")
+
+            if markers and trust_mark_val not in markers:
+                continue
+            if not _match_internal_status_filter(internal_status or "", statuses):
+                continue
+
+            if cities:
+                city_filter = city_map.get((pid, str(ac)), ISSUANCE_CITY_UNKNOWN)
+                if city_filter not in cities:
+                    continue
+            else:
+                city_filter = None
 
             items.append(
                 {
@@ -373,6 +493,7 @@ class OverdueWorkbenchService:
                     "followup_count": followup_count,
                     "internal_status": internal_status,
                     "custody_asset_codes": custodies,
+                    "city": city_filter,
                 }
             )
         return {"data_date": resolved_date, "items": items}
@@ -383,13 +504,18 @@ class OverdueWorkbenchService:
         trust_product_id: int | None = None,
         asset_code: str | None = None,
         custody_asset_code: str | None = None,
-        delinquency_bucket: str = "M2_PLUS",
+        delinquency_bucket: str | None = None,
+        delinquency_buckets: list[str] | None = None,
         data_date: str | None = None,
         list_product_id: int | None = None,
+        list_product_ids: list[int] | None = None,
         list_product_scope_explicit: bool = False,
         trust_asset_id: int | None = None,
         trust_marker: str | None = None,
+        trust_markers: list[str] | None = None,
         followup_status: str | None = None,
+        followup_statuses: list[str] | None = None,
+        cities: list[str] | None = None,
     ) -> dict:
         """Build full DTO expected by render.py (asset_code-centric)."""
         resolved_asset = asset_code
@@ -398,13 +524,36 @@ class OverdueWorkbenchService:
                 trust_product_id, custody_asset_code, data_date
             )
 
+        if list_product_scope_explicit:
+            # None = 全部；兼容单参 list_product_id
+            effective_ids = list_product_ids
+            if effective_ids is None and list_product_id is not None:
+                effective_ids = [list_product_id]
+        else:
+            effective_ids = [trust_product_id] if trust_product_id is not None else None
+
+        buckets = delinquency_buckets
+        if buckets is None and delinquency_bucket:
+            buckets = [delinquency_bucket]
+        markers = trust_markers
+        if markers is None and trust_marker:
+            markers = [trust_marker]
+        statuses = followup_statuses
+        if statuses is None and followup_status:
+            statuses = [followup_status]
+
         filters = {
             "trust_product_id": trust_product_id,
-            "delinquency_bucket": delinquency_bucket,
+            "delinquency_bucket": buckets[0] if buckets and len(buckets) == 1 else None,
+            "delinquency_buckets": buckets,
             "list_product_id": list_product_id,
+            "list_product_ids": effective_ids,
             "list_product_scope_explicit": list_product_scope_explicit,
-            "trust_marker": trust_marker,
-            "followup_status": followup_status,
+            "trust_marker": markers[0] if markers and len(markers) == 1 else None,
+            "trust_markers": markers,
+            "followup_status": statuses[0] if statuses and len(statuses) == 1 else None,
+            "followup_statuses": statuses,
+            "cities": cities,
         }
 
         old = self.get_detail(
@@ -415,14 +564,13 @@ class OverdueWorkbenchService:
         )
         resolved_date = old.get("data_date")
 
-        list_pid = list_product_id if list_product_scope_explicit else trust_product_id
-
         asset_list = self.get_asset_list(
-            trust_product_id=list_pid,
+            trust_product_ids=effective_ids,
             data_date=resolved_date,
-            delinquency_bucket=delinquency_bucket,
-            trust_marker=trust_marker,
-            followup_status=followup_status,
+            delinquency_buckets=buckets,
+            trust_markers=markers,
+            followup_statuses=statuses,
+            cities=cities,
         )
 
         custody_codes = list(old.get("custody_asset_codes") or [])
@@ -443,6 +591,7 @@ class OverdueWorkbenchService:
                 "timeline": old.get("timeline") or [],
                 "ops": old.get("ops"),
                 "followup_case": old.get("followup_case"),
+                "followup_cases": old.get("followup_cases") or [],
                 "followup_entries": old.get("followup_entries") or [],
             }
 
@@ -522,15 +671,13 @@ def _build_timeline(
             {
                 "event_type": "followup",
                 "occurred_at": entry.get("created_at"),
-                "title": f"跟进 · {entry.get('status_snapshot') or '—'}",
-                "status_snapshot": entry.get("status_snapshot"),
+                "title": f"跟进 · {entry.get('case_category') or '事项'}",
                 "owner_name": entry.get("owner_name"),
                 "overdue_reason": entry.get("overdue_reason"),
                 "follow_up_plan": entry.get("follow_up_plan"),
-                "trust_feedback": entry.get("trust_feedback"),
-                "note": entry.get("note"),
                 "entry_type": entry.get("entry_type"),
                 "entry_id": eid,
+                "case_id": entry.get("case_id"),
                 "attachments": entry_attachments,
                 "legacy": False,
             }

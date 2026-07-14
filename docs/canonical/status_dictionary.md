@@ -50,25 +50,25 @@ V1 Lite 管理端 **仅写入** 以下两值：
 
 ## trust_asset_trust_marks.internal_status
 
-> 用户文档中「`trust_asset_monitor_records.internal_status`」为 **UI 联结字段**；物理列在 `trust_asset_trust_marks.internal_status`。
+> 物理列在 `trust_asset_trust_marks.internal_status`；由活跃跟进事项数派生，禁止人工写入。
 
 | 表/模块 | 字段 | 值 | 中文 | 含义 | 是否终态 |
 |---------|------|-----|------|------|----------|
-| `trust_asset_trust_marks` | `internal_status` | `待跟进` | 待跟进 | 默认，需关注 | 否 |
-| `trust_asset_trust_marks` | `internal_status` | `跟进中` | 跟进中 | 正在处理 | 否 |
-| `trust_asset_trust_marks` | `internal_status` | `已解决` | 已解决 | 问题已处理 | 是 |
-| `trust_asset_trust_marks` | `internal_status` | `已关闭` | 已关闭 | 不再跟进 | 是 |
+| `trust_asset_trust_marks` | `internal_status` | `正常` | 正常 | 无问题态 / 本周结算事项 | — |
+| `trust_asset_trust_marks` | `internal_status` | `待跟进(N)` | 待跟进(N) | N 条 open/in_progress 事项（优先） | 否 |
+| `trust_asset_trust_marks` | `internal_status` | `本周结算(M)` | 本周结算(M) | 无问题态且 M 条 settled_week | 否 |
 
 ---
 
-## trust_overdue_followups.status
+## trust_overdue_followup_cases.status
 
 | 表/模块 | 字段 | 值 | 中文 | 含义 | 是否终态 |
 |---------|------|-----|------|------|----------|
-| `trust_overdue_followups` | `status` | `open` | 待处理 | 新建跟进 | 否 |
-| `trust_overdue_followups` | `status` | `in_progress` | 跟进中 | 处理中 | 否 |
-| `trust_overdue_followups` | `status` | `resolved` | 已解决 | 已解决 | 是 |
-| `trust_overdue_followups` | `status` | `closed` | 已关闭 | 关闭 | 是 |
+| `trust_overdue_followup_cases` | `status` | `open` | 待跟进 | 新建事项默认 | 否 |
+| `trust_overdue_followup_cases` | `status` | `in_progress` | 跟进中 | 处理中 | 否 |
+| `trust_overdue_followup_cases` | `status` | `settled_week` | 本周结算 | 本周内结算/约定结清；仍可写跟进记录 | 否 |
+| `trust_overdue_followup_cases` | `status` | `resolved` | 已解决 | 已解决 | 是 |
+| `trust_overdue_followup_cases` | `status` | `closed` | 已关闭 | 关闭 | 是 |
 
 ---
 

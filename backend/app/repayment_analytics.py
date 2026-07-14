@@ -14,7 +14,7 @@ from app.overdue.buckets import M1_MAX_DAYS
 PeriodKind = Literal["week", "month", "year"]
 
 RECONCILIATION_TOLERANCE = cleanse.RECONCILIATION_TOLERANCE
-STATS_OVERDUE_THRESHOLD_DAYS = M1_MAX_DAYS  # 未逾期: overdue_days <= 35; 逾期: > 35 (M2+)
+STATS_OVERDUE_THRESHOLD_DAYS = M1_MAX_DAYS  # 正常: overdue_days <= 35; 未付款: > 35 (M2+)
 
 PRIMARY_FROM_CUSTODY_SQL = """
     CASE

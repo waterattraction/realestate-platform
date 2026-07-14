@@ -1,11 +1,12 @@
 import os
+import re
 import uuid
 import json
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from html import escape
 from typing import Annotated
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -31,7 +32,7 @@ from app import repayment_analytics_html
 from app import trust_products as trust_products_svc
 from app import trust_products_html
 from app import risk_hub
-from app.overdue import buckets as delinquency_buckets
+from app.overdue import buckets as overdue_buckets
 from app.overdue.buckets import (
     DELINQUENCY_BUCKET_COLORS,
     DELINQUENCY_BUCKET_LABELS,
@@ -93,8 +94,9 @@ STATUS_LABELS = {
 }
 
 FOLLOWUP_STATUS_LABELS = {
-    "open": "待处理",
+    "open": "待跟进",
     "in_progress": "跟进中",
+    "settled_week": "本周结算",
     "resolved": "已解决",
     "closed": "已关闭",
 }
@@ -105,16 +107,20 @@ TRIGGER_SOURCE_LABELS = {
 }
 
 TRUST_MARKER_OPTIONS = [
-    "未标记",
-    "信托已关注",
-    "信托要求跟进",
-    "信托确认无风险",
-    "信托要求说明",
-    "已反馈信托",
+    "无标记",
+    "已关注",
+    "重点关注",
 ]
-INTERNAL_STATUS_OPTIONS = ["待跟进", "跟进中", "已解决", "已关闭"]
-TRUST_MARKER_DEFAULT = "未标记"
-INTERNAL_STATUS_DEFAULT = "待跟进"
+INTERNAL_STATUS_OPTIONS = ["正常", "待跟进", "本周结算"]
+TRUST_MARKER_DEFAULT = "无标记"
+INTERNAL_STATUS_DEFAULT = "正常"
+FOLLOWUP_CASE_CATEGORIES = [
+    "轻度逾期",
+    "重度逾期",
+    "回购",
+    "置换",
+    "潜在风险",
+]
 
 ISSUANCE_CITY_UNKNOWN = "未知"
 
@@ -124,11 +130,10 @@ PORTFOLIO_LIST_COLUMNS: list[tuple[str | None, str, str | None]] = [
     ("trust_product_name", "信托产品", "text"),
     ("city", "城市", "text"),
     ("delinquency_bucket", "等级", "text"),
-    ("overdue_sort", "逾期天数 / 提前结清日期", "text"),
+    ("overdue_sort", "未付天数", "text"),
     ("last_payment_date", "最后回款日", "text"),
     ("trust_marker", "信托标记", "text"),
     ("internal_status", "内部状态", "text"),
-    (None, "跟进台账", None),
     ("data_date", "数据日期", "text"),
     ("initial_transfer_amount", "初始受让金额", "number"),
     ("repaid_amount", "已还款金额", "number"),
@@ -289,22 +294,20 @@ def fmt_delinquency_badge(bucket: str | None) -> str:
     )
 
 
-def _format_recalc_timestamp(value: str | None) -> str:
+def _format_display_timestamp(value: str | None) -> str:
+    """展示用时间：统一转为北京/上海时间 YYYY-MM-DD HH:MM。"""
     if not value:
         return "—"
     text_val = str(value).strip()
     if not text_val:
         return "—"
-    normalized = text_val.replace("Z", "+00:00")
     try:
-        from datetime import datetime
+        from datetime import timezone
 
-        dt = datetime.fromisoformat(normalized)
-        if dt.tzinfo is not None:
-            from datetime import timezone
-
-            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt.strftime("%Y-%m-%d %H:%M")
+        dt = datetime.fromisoformat(text_val.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return text_val[:16].replace("T", " ")
 
@@ -312,11 +315,11 @@ def _format_recalc_timestamp(value: str | None) -> str:
 def _render_overdue_header_meta(overview: dict) -> str:
     snapshot = escape(str(overview.get("data_date") or "—"))
     as_of = overview.get("overdue_days_as_of")
-    last_recalc = _format_recalc_timestamp(overview.get("last_recalculated_at"))
+    last_recalc = _format_display_timestamp(overview.get("last_recalculated_at"))
     as_of_html = (
-        f'<strong>逾期天数截至：{escape(as_of)}</strong>'
+        f'<strong>未付天数截至：{escape(as_of)}</strong>'
         if as_of
-        else '<span class="meta-warn">逾期天数截至：—（请先点击「重新计算逾期天数」）</span>'
+        else '<span class="meta-warn">未付天数截至：—（请先点击「重新计算未付天数」）</span>'
     )
     stale_note = ""
     if overview.get("overdue_recalc_stale") and as_of:
@@ -326,8 +329,8 @@ def _render_overdue_header_meta(overview: dict) -> str:
         )
     elif overview.get("overdue_recalc_stale") and not as_of:
         stale_note = (
-            '<br><span class="meta-hint">提示：当前逾期天数可能仍按监控快照日导入时计算，'
-            "与快照日不同，请以重算后「逾期天数截至」为准。</span>"
+            '<br><span class="meta-hint">提示：当前未付天数可能仍按监控快照日导入时计算，'
+            "与快照日不同，请以重算后「未付天数截至」为准。</span>"
         )
     multi_product_note = ""
     selected_ids = overview.get("trust_product_ids")
@@ -340,7 +343,7 @@ def _render_overdue_header_meta(overview: dict) -> str:
             监控快照日期：<strong>{snapshot}</strong>
             · {as_of_html}
             · 最近重算：{escape(last_recalc)}
-            <br><span class="meta-hint">监控快照日期为资产表数据截止日；逾期天数 = 重算基准日 − 最后回款日。</span>
+            <br><span class="meta-hint">监控快照日期为资产表数据截止日；未付天数 = 重算基准日 − 最后回款日。</span>
             {stale_note}
             {multi_product_note}
             · <a href="/overdue/workbench">逾期工作台 →</a>
@@ -421,11 +424,11 @@ def _custody_followup_count_sql() -> str:
 
 
 def _custody_marks_join_sql() -> str:
+    """标记/内部状态按资产主编号，与监控 data_date 无关。"""
     return """
         LEFT JOIN trust_asset_trust_marks tm
             ON tm.trust_product_id = mc.trust_product_id
            AND tm.asset_code = mc.asset_code
-           AND tm.data_date = mc.data_date
     """
 
 
@@ -442,6 +445,22 @@ def _sort_custody_items_in_bucket(items: list, bucket: str) -> list:
     )
 
 
+def _match_internal_status_filter(got: str, wants: list[str] | None) -> bool:
+    if not wants:
+        return True
+    got_s = str(got or "")
+    for want in wants:
+        if want == "正常" and got_s == "正常":
+            return True
+        if want == "待跟进" and got_s.startswith("待跟进"):
+            return True
+        if want == "本周结算" and got_s.startswith("本周结算"):
+            return True
+        if got_s == want:
+            return True
+    return False
+
+
 def _apply_custody_list_filters(item: dict, filters: dict | None) -> bool:
     if not filters:
         return True
@@ -449,19 +468,27 @@ def _apply_custody_list_filters(item: dict, filters: dict | None) -> bool:
     if trust_product_ids is not None:
         if item["trust_product_id"] not in trust_product_ids:
             return False
-    if filters.get("delinquency_bucket"):
+    buckets = filters.get("delinquency_buckets")
+    if buckets is None and filters.get("delinquency_bucket"):
+        buckets = [filters["delinquency_bucket"]]
+    if buckets:
         from app.overdue.buckets import matches_delinquency_bucket_filter
 
-        if not matches_delinquency_bucket_filter(
-            item["delinquency_bucket"], filters["delinquency_bucket"]
+        if not any(
+            matches_delinquency_bucket_filter(item["delinquency_bucket"], b)
+            for b in buckets
         ):
             return False
-    if filters.get("trust_marker"):
-        if item.get("trust_marker") != filters["trust_marker"]:
-            return False
-    if filters.get("internal_status"):
-        if item.get("internal_status") != filters["internal_status"]:
-            return False
+    markers = filters.get("trust_markers")
+    if markers is None and filters.get("trust_marker"):
+        markers = [filters["trust_marker"]]
+    if markers and item.get("trust_marker") not in markers:
+        return False
+    statuses = filters.get("internal_statuses")
+    if statuses is None and filters.get("internal_status"):
+        statuses = [filters["internal_status"]]
+    if not _match_internal_status_filter(item.get("internal_status") or "", statuses):
+        return False
     has_followup = filters.get("has_followup")
     if has_followup == "yes" and int(item.get("followup_count") or 0) <= 0:
         return False
@@ -473,8 +500,10 @@ def _apply_custody_list_filters(item: dict, filters: dict | None) -> bool:
     custody_q = (filters.get("custody_asset_code") or "").strip().lower()
     if custody_q and custody_q not in item["custody_asset_code"].lower():
         return False
-    city_filter = (filters.get("city") or "").strip()
-    if city_filter and item.get("city_filter") != city_filter:
+    cities = filters.get("cities")
+    if cities is None and filters.get("city"):
+        cities = [filters["city"]]
+    if cities and item.get("city_filter") not in cities:
         return False
     return True
 
@@ -913,22 +942,30 @@ def fetch_overdue_overview(
     data_date: str | None = None,
     *,
     delinquency_bucket: str | None = None,
+    delinquency_buckets: list[str] | None = None,
     trust_marker: str | None = None,
+    trust_markers: list[str] | None = None,
     internal_status: str | None = None,
+    internal_statuses: list[str] | None = None,
     has_followup: str | None = None,
     asset_code: str | None = None,
     custody_asset_code: str | None = None,
     city: str | None = None,
+    cities: list[str] | None = None,
 ):
     list_filters = {
         "trust_product_ids": trust_product_ids,
         "delinquency_bucket": delinquency_bucket,
+        "delinquency_buckets": delinquency_buckets,
         "trust_marker": trust_marker,
+        "trust_markers": trust_markers,
         "internal_status": internal_status,
+        "internal_statuses": internal_statuses,
         "has_followup": has_followup,
         "asset_code": asset_code,
         "custody_asset_code": custody_asset_code,
         "city": city,
+        "cities": cities,
     }
     monitor_filter, params = _latest_monitor_filter(trust_product_ids, data_date)
     custody_ctes = _monitor_custody_ctes(monitor_filter)
@@ -1096,7 +1133,7 @@ def fetch_overdue_overview(
             {_issuance_city_lateral_join_sql()}
             {_custody_marks_join_sql()}
             ORDER BY
-                {delinquency_buckets.sql_custody_list_sort_priority("mc.overdue_days", "mc.remaining_amount")},
+                {overdue_buckets.sql_custody_list_sort_priority("mc.overdue_days", "mc.remaining_amount")},
                 COALESCE(mc.overdue_days, 0) DESC,
                 mc.max_payment_date DESC NULLS LAST,
                 mc.custody_asset_code
@@ -1169,23 +1206,23 @@ def upsert_asset_trust_mark(
 ) -> dict:
     if trust_marker is not None and trust_marker not in TRUST_MARKER_OPTIONS:
         raise HTTPException(status_code=400, detail="Invalid trust_marker")
-    if internal_status is not None and internal_status not in INTERNAL_STATUS_OPTIONS:
-        raise HTTPException(status_code=400, detail="Invalid internal_status")
-    if trust_marker is None and internal_status is None:
+    # internal_status 由跟进事项派生，禁止人工写入
+    if internal_status is not None:
+        raise HTTPException(status_code=400, detail="内部状态只读，请通过跟进事项维护")
+    if trust_marker is None:
         raise HTTPException(status_code=400, detail="No fields to update")
 
     existing = conn.execute(
         text("""
-            SELECT id, trust_marker, internal_status
+            SELECT id, trust_marker, internal_status, data_date
             FROM trust_asset_trust_marks
             WHERE trust_product_id = :trust_product_id
               AND asset_code = :asset_code
-              AND data_date = :data_date
+            LIMIT 1
         """),
         {
             "trust_product_id": trust_product_id,
             "asset_code": asset_code,
-            "data_date": data_date,
         },
     ).fetchone()
 
@@ -1199,6 +1236,7 @@ def upsert_asset_trust_mark(
                 UPDATE trust_asset_trust_marks
                 SET trust_marker = :trust_marker,
                     internal_status = :internal_status,
+                    data_date = COALESCE(:data_date, data_date),
                     updated_by = :updated_by,
                     updated_at = NOW()
                 WHERE id = :id
@@ -1207,6 +1245,7 @@ def upsert_asset_trust_mark(
                 "id": existing.id,
                 "trust_marker": new_marker,
                 "internal_status": new_status,
+                "data_date": data_date,
                 "updated_by": updated_by,
             },
         )
@@ -1214,7 +1253,7 @@ def upsert_asset_trust_mark(
             "id": existing.id,
             "trust_product_id": trust_product_id,
             "asset_code": asset_code,
-            "data_date": data_date,
+            "data_date": data_date or str(existing.data_date),
             "trust_marker": new_marker,
             "internal_status": new_status,
         }
@@ -1601,7 +1640,7 @@ def recalculate_overdue_days(
     warnings: list[str] = []
     if missing_issuance_count > 0:
         warnings.append(
-            f"部分资产无还款明细且无发行日，逾期天数置空（{missing_issuance_count} 条）"
+            f"部分资产无还款明细且无发行日，未付天数置空（{missing_issuance_count} 条）"
         )
 
     return {
@@ -1624,17 +1663,70 @@ def recalculate_overdue_days(
             )
             + (f"，无发行日置空 {missing_issuance_count} 条" if missing_issuance_count else "")
         ),
-        "risk_hint": "逾期天数已更新，如需同步风险评分，请单独执行风险评分重算。",
+        "risk_hint": "未付天数已更新，如需同步风险评分，请单独执行风险评分重算。",
     }
 
 
 def fetch_overdue_followups(
     trust_product_ids: list[int] | None = None,
     status: str | None = None,
+    *,
+    include_latest_entry: bool = False,
+    limit: int = 500,
 ):
     from app.repo.followup_repo import FollowupRepo
 
-    return FollowupRepo(engine).fetch_cases_list(trust_product_ids, status)
+    return FollowupRepo(engine).fetch_cases_list(
+        trust_product_ids,
+        status,
+        limit=limit,
+        include_latest_entry=include_latest_entry,
+    )
+
+
+def _filtered_asset_keys_from_overview(overview: dict) -> set[tuple[int, str]]:
+    keys: set[tuple[int, str]] = set()
+    for items in (overview.get("top_overdue_by_bucket") or {}).values():
+        for item in items or []:
+            pid = item.get("trust_product_id")
+            asset_code = item.get("asset_code")
+            if pid is None or not asset_code:
+                continue
+            keys.add((int(pid), str(asset_code)))
+    return keys
+
+
+def _followup_entry_summary_display(item: dict, *, max_len: int = 48) -> str:
+    text = str(
+        item.get("latest_overdue_reason")
+        or item.get("latest_follow_up_plan")
+        or item.get("overdue_reason")
+        or item.get("follow_up_plan")
+        or ""
+    ).strip()
+    if not text:
+        return "—"
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "…"
+
+
+def fetch_portfolio_followup_cases(overview: dict) -> list[dict]:
+    """当前筛选资产下的全部跟进事项（含最新跟进摘要），与台账计数同源。"""
+    asset_keys = _filtered_asset_keys_from_overview(overview)
+    if not asset_keys:
+        return []
+    pids = sorted({pid for pid, _ in asset_keys})
+    cases = fetch_overdue_followups(
+        pids,
+        include_latest_entry=True,
+        limit=5000,
+    )
+    return [
+        item
+        for item in cases
+        if (int(item["trust_product_id"]), str(item.get("asset_code") or "")) in asset_keys
+    ]
 
 
 def fmt_asset_identity(item: dict) -> str:
@@ -1659,32 +1751,163 @@ def fmt_asset_identity_block(item: dict) -> str:
 
 
 
+_TRUST_MARKER_VISUAL = {
+    "无标记": ("none", "无"),
+    "已关注": ("watch", "已关注"),
+    "重点关注": ("focus", "重点关注"),
+}
+
+
 def _render_custody_mark_select(field: str, value: str, options: list[str], item: dict) -> str:
-    opts = ""
+    current = value if value in options else TRUST_MARKER_DEFAULT
+    tone, short = _TRUST_MARKER_VISUAL.get(current, ("none", current))
+    menu_items = ""
     for opt in options:
-        selected = " selected" if opt == value else ""
-        opts += f'<option value="{escape(opt)}"{selected}>{escape(opt)}</option>'
+        opt_tone, opt_short = _TRUST_MARKER_VISUAL.get(opt, ("none", opt))
+        active = " is-active" if opt == current else ""
+        menu_items += (
+            f'<button type="button" class="trust-marker-option{active}" '
+            f'data-value="{escape(opt)}" role="option" '
+            f'aria-selected="{"true" if opt == current else "false"}">'
+            f'<span class="trust-marker-dot tone-{opt_tone}" aria-hidden="true"></span>'
+            f'<span>{escape(opt)}</span>'
+            f"</button>"
+        )
     return f"""
-        <select class="custody-mark-select" data-field="{field}"
-            data-trust-product-id="{item['trust_product_id']}"
-            data-asset-code="{escape(item['asset_code'])}"
-            data-data-date="{escape(item['data_date'])}">{opts}</select>
+        <div class="trust-marker-cell" data-field="{escape(field)}"
+             data-trust-product-id="{item['trust_product_id']}"
+             data-asset-code="{escape(item['asset_code'])}"
+             data-data-date="{escape(item['data_date'])}"
+             data-value="{escape(current)}">
+            <button type="button" class="trust-marker-badge tone-{tone}"
+                    title="信托标记：{escape(current)}"
+                    aria-label="信托标记：{escape(current)}，点击修改"
+                    aria-haspopup="listbox" aria-expanded="false">
+                <span class="trust-marker-dot tone-{tone}" aria-hidden="true"></span>
+                <span class="trust-marker-label">{escape(short)}</span>
+            </button>
+            <div class="trust-marker-menu" role="listbox" hidden>
+                {menu_items}
+            </div>
+        </div>
     """
 
 
-def _render_followup_cell(item: dict) -> str:
-    cnt = int(item.get("followup_count") or 0)
-    ac = quote(str(item.get("asset_code") or item["custody_asset_code"]))
+def _workbench_entry_href(
+    item: dict,
+    *,
+    tab_bucket: str | None,
+    filters: dict | None,
+    new_case: bool = False,
+    new_entry: bool = False,
+) -> str:
+    """从资产组合进工作台：一次性带入组合筛选与资产（不记录 return_to）。"""
+    del tab_bucket  # Tab 仅用于组合页展示，不写入工作台筛选
+    ac_raw = str(item.get("asset_code") or item["custody_asset_code"])
     pid = item["trust_product_id"]
-    base = f"/overdue/workbench?asset_code={ac}&trust_product_id={pid}"
-    if cnt > 0:
-        return f'<a href="{base}">{cnt}条</a>'
-    return f'<a href="{base}&new_followup=1">新建</a>'
+    f = filters or {}
+    parts = [
+        f"asset_code={quote(ac_raw)}",
+        f"trust_product_id={pid}",
+        "followup_expanded=1",
+    ]
+    product_ids = f.get("trust_product_ids")
+    if product_ids is None:
+        parts.append("list_product_id=")
+    elif len(product_ids) == 1:
+        parts.append(f"list_product_id={int(product_ids[0])}")
+    else:
+        for p in product_ids:
+            parts.append(f"list_product_ids={int(p)}")
+
+    buckets = f.get("delinquency_buckets") or (
+        [f["delinquency_bucket"]] if f.get("delinquency_bucket") else None
+    )
+    if buckets:
+        for b in buckets:
+            parts.append(f"delinquency_buckets={quote(str(b))}")
+    else:
+        parts.append("delinquency_bucket=")
+
+    markers = f.get("trust_markers") or (
+        [f["trust_marker"]] if f.get("trust_marker") else None
+    )
+    for m in markers or []:
+        parts.append(f"trust_markers={quote(str(m))}")
+
+    statuses = f.get("internal_statuses") or (
+        [f["internal_status"]] if f.get("internal_status") else None
+    )
+    for s in statuses or []:
+        parts.append(f"followup_statuses={quote(str(s))}")
+
+    cities = f.get("cities") or ([f["city"]] if f.get("city") else None)
+    for c in cities or []:
+        parts.append(f"cities={quote(str(c))}")
+
+    dd = item.get("data_date")
+    if dd:
+        parts.append(f"data_date={quote(str(dd))}")
+    if new_case:
+        parts.append("new_followup_case=1")
+    if new_entry:
+        parts.append("new_followup=1")
+    return "/overdue/workbench?" + "&".join(parts)
 
 
-def _render_portfolio_table_head() -> str:
+def _render_internal_status_cell(
+    item: dict,
+    *,
+    tab_bucket: str | None = None,
+    filters: dict | None = None,
+) -> str:
+    """只读内部状态：绿灯 / 橙计数 / 黄绿渐变「本周结算」；悬停显眼的新增 +。"""
+    status = str(item.get("internal_status") or INTERNAL_STATUS_DEFAULT)
+    # 状态灯：查看该事项最近一条跟进记录
+    view_latest = _workbench_entry_href(
+        item, tab_bucket=tab_bucket, filters=filters, new_case=False, new_entry=False
+    )
+    # +：新建跟进记录（有事项则开新建记录页；无事项由工作台回落到新建事项）
+    new_entry = _workbench_entry_href(
+        item, tab_bucket=tab_bucket, filters=filters, new_case=False, new_entry=True
+    )
+
+    problem_match = re.fullmatch(r"待跟进\((\d+)\)", status)
+    settled_match = re.fullmatch(r"本周结算\((\d+)\)", status)
+    if problem_match:
+        n = problem_match.group(1)
+        status_html = (
+            f'<a class="internal-status-link" href="{view_latest}" '
+            f'title="待跟进({escape(n)})" aria-label="待跟进 {escape(n)} 件，查看最近跟进">'
+            f'<span class="status-count">{escape(n)}</span></a>'
+        )
+    elif settled_match:
+        m = settled_match.group(1)
+        status_html = (
+            f'<a class="internal-status-link" href="{view_latest}" '
+            f'title="本周结算({escape(m)})" aria-label="本周结算 {escape(m)} 件，查看最近跟进">'
+            f'<span class="status-count status-count--settled">{escape(m)}</span></a>'
+        )
+    else:
+        status_html = (
+            f'<a class="internal-status-link" href="{view_latest}" '
+            f'title="正常" aria-label="正常，查看最近跟进">'
+            f'<span class="status-dot" aria-hidden="true"></span></a>'
+        )
+    return (
+        f'<div class="internal-status-cell">'
+        f"{status_html}"
+        f'<a class="internal-status-add" href="{new_entry}" '
+        f'title="新建跟进记录" aria-label="新建跟进记录">+</a>'
+        f"</div>"
+    )
+
+
+def _render_portfolio_table_head(*, overdue_col_label: str | None = None) -> str:
     cells = []
     for sort_key, label, sort_type in PORTFOLIO_LIST_COLUMNS:
+        if sort_key == "overdue_sort" and overdue_col_label:
+            label = overdue_col_label
         if sort_key and sort_type:
             cells.append(
                 f'<th class="sortable" data-sort="{escape(sort_key)}" '
@@ -1725,15 +1948,25 @@ def _render_portfolio_tfoot(totals: dict) -> str:
     """
 
 
-def _render_portfolio_table(items: list, *, totals: dict, empty_label: str = "暂无记录") -> str:
-    head = _render_portfolio_table_head()
+def _render_portfolio_table(
+    items: list,
+    *,
+    totals: dict,
+    empty_label: str = "暂无记录",
+    overdue_col_label: str | None = None,
+    tab_bucket: str | None = None,
+    filters: dict | None = None,
+) -> str:
+    head = _render_portfolio_table_head(overdue_col_label=overdue_col_label)
     if not items:
         body = (
             f'<tr class="empty-row"><td colspan="{PORTFOLIO_COL_COUNT}" class="empty">'
             f"{escape(empty_label)}</td></tr>"
         )
     else:
-        body = _render_overdue_custody_rows(items)
+        body = _render_overdue_custody_rows(
+            items, tab_bucket=tab_bucket, filters=filters
+        )
     foot = _render_portfolio_tfoot(totals)
     return f"""
         <table class="portfolio-table">
@@ -1744,20 +1977,31 @@ def _render_portfolio_table(items: list, *, totals: dict, empty_label: str = "�
     """
 
 
-def _render_overdue_custody_rows(items: list) -> str:
+def _render_overdue_custody_rows(
+    items: list,
+    *,
+    tab_bucket: str | None = None,
+    filters: dict | None = None,
+) -> str:
     rows = ""
     for item in items:
         is_es = item.get("delinquency_bucket") == "ES"
         if is_es:
-            col5 = escape(item.get("last_payment_date") or "—")
-            col6 = escape(item.get("last_payment_date") or "—")
+            settlement = (
+                item.get("settlement_date")
+                or item.get("last_payment_date")
+                or "—"
+            )
+            col5 = escape(str(settlement))
+            col6 = escape(str(settlement))
         else:
             od = item.get("overdue_days")
             col5 = escape(str(od) if od is not None else "—")
             col6 = escape(item.get("last_payment_date") or "—")
         sort_attrs = _portfolio_row_sort_attrs(item)
+        ac_attr = escape(str(item.get("asset_code") or item.get("custody_asset_code") or ""))
         rows += f"""
-            <tr {sort_attrs}>
+            <tr {sort_attrs} data-asset-code="{ac_attr}" id="portfolio-row-{ac_attr}">
                 <td>{escape(item.get("asset_code") or "—")}</td>
                 <td>{escape(item["custody_asset_code"])}</td>
                 <td>{escape(item["trust_product_name"])}</td>
@@ -1766,8 +2010,7 @@ def _render_overdue_custody_rows(items: list) -> str:
                 <td class="num">{col5}</td>
                 <td>{col6}</td>
                 <td>{_render_custody_mark_select("trust_marker", item.get("trust_marker", TRUST_MARKER_DEFAULT), TRUST_MARKER_OPTIONS, item)}</td>
-                <td>{_render_custody_mark_select("internal_status", item.get("internal_status", INTERNAL_STATUS_DEFAULT), INTERNAL_STATUS_OPTIONS, item)}</td>
-                <td>{_render_followup_cell(item)}</td>
+                <td>{_render_internal_status_cell(item, tab_bucket=tab_bucket, filters=filters)}</td>
                 <td>{escape(item.get("data_date") or "—")}</td>
                 <td class="num">{fmt_money(item["initial_transfer_amount"])}</td>
                 <td class="num">{fmt_money(item["repaid_amount"])}</td>
@@ -1844,14 +2087,81 @@ def _render_code_mismatch_alert_banner(alerts: list) -> str:
     """
 
 
+_MULTISELECT_COUNT_UNITS = {
+    "trust-product": "产品",
+    "delinquency-bucket": "等级",
+    "trust-marker": "标记",
+    "internal-status": "状态",
+    "city": "城市",
+}
+
+
+def _multiselect_trigger_label(
+    selected: list[str] | None,
+    *,
+    all_label: str,
+    label_map: dict[str, str] | None = None,
+    unit: str = "项",
+) -> str:
+    if not selected:
+        return all_label
+    labels = [(label_map or {}).get(v, v) for v in selected]
+    if len(labels) == 1:
+        return labels[0]
+    return f"已选{len(labels)}{unit}"
+
+
+def _render_str_multiselect(
+    *,
+    key: str,
+    param_name: str,
+    label: str,
+    options: list[tuple[str, str]],
+    selected: list[str] | None,
+    all_label: str,
+) -> str:
+    """组合页字符串多选：selected=None 表示全部。"""
+    all_mode = selected is None
+    trigger = escape(
+        _multiselect_trigger_label(
+            selected,
+            all_label=all_label,
+            label_map=dict(options),
+            unit=_MULTISELECT_COUNT_UNITS.get(key, "项"),
+        )
+    )
+    opts_html = (
+        f'<label class="multiselect-option multiselect-all">'
+        f'<input type="checkbox" class="ms-all"{" checked" if all_mode else ""}> 全部</label>'
+    )
+    selected_set = set(selected or [])
+    for value, text in options:
+        checked = (not all_mode) and value in selected_set
+        opts_html += (
+            f'<label class="multiselect-option">'
+            f'<input type="checkbox" class="ms-option" name="{escape(param_name)}" '
+            f'value="{escape(value)}"{" checked" if checked else ""}> '
+            f"{escape(text)}</label>"
+        )
+    return f"""
+        <div class="filter-multiselect" data-multiselect="{escape(key)}">
+            <span class="filter-multiselect-label">{escape(label)}</span>
+            <button type="button" class="multiselect-trigger" aria-haspopup="listbox">{trigger}</button>
+            <div class="multiselect-panel" hidden>
+                {opts_html}
+            </div>
+        </div>
+    """
+
+
 def _trust_product_filter_label(products: list[dict], selected_ids: list[int] | None) -> str:
     if not selected_ids:
         return "全部信托产品"
     name_by_id = {int(p["id"]): str(p["name"]) for p in products}
     names = [name_by_id.get(pid, str(pid)) for pid in selected_ids]
-    if len(names) <= 2:
-        return " · ".join(names)
-    return f"已选 {len(names)} 个产品"
+    if len(names) == 1:
+        return names[0]
+    return f"已选{len(names)}产品"
 
 
 def _render_trust_product_multiselect(
@@ -1862,14 +2172,14 @@ def _render_trust_product_multiselect(
     trigger = escape(_trust_product_filter_label(products, selected_ids))
     options = (
         f'<label class="multiselect-option multiselect-all">'
-        f'<input type="checkbox" class="tp-all"{" checked" if all_mode else ""}> 全部</label>'
+        f'<input type="checkbox" class="ms-all tp-all"{" checked" if all_mode else ""}> 全部</label>'
     )
     for product in products:
         pid = int(product["id"])
         checked = (not all_mode) and (pid in selected_ids)
         options += (
             f'<label class="multiselect-option">'
-            f'<input type="checkbox" class="tp-product" name="trust_product_ids" '
+            f'<input type="checkbox" class="ms-option tp-product" name="trust_product_ids" '
             f'value="{pid}"{" checked" if checked else ""}> '
             f'{escape(str(product["name"]))}</label>'
         )
@@ -1892,6 +2202,8 @@ def render_overdue_html(
     filters: dict | None = None,
     products: list | None = None,
     code_mismatch_alerts: list | None = None,
+    focus_asset: str | None = None,
+    portfolio_tab: str | None = None,
 ):
     buckets = overview.get("top_overdue_by_bucket") or {}
     bucket_totals = overview.get("bucket_totals") or {}
@@ -1903,19 +2215,25 @@ def render_overdue_html(
         ("M1", "M1", buckets.get("M1", [])),
         ("ES", "ES（提前结清）", buckets.get("ES", [])),
     ]
-    active_bucket = (filters or {}).get("delinquency_bucket")
+    f = filters or {}
+    buckets_sel = f.get("delinquency_buckets") or (
+        [f["delinquency_bucket"]] if f.get("delinquency_bucket") else None
+    )
+    # 筛选仅单一等级时作为默认 Tab；否则用 portfolio_tab
+    ui_tab = buckets_sel[0] if buckets_sel and len(buckets_sel) == 1 else portfolio_tab
     default_tab_idx = 0
-    if active_bucket:
+    if ui_tab:
         for idx, (key, _, _) in enumerate(tab_defs):
-            if key == active_bucket:
+            if key == ui_tab:
                 default_tab_idx = idx
                 break
     elif (filters or {}).get("asset_code") or (filters or {}).get("custody_asset_code") or any(
         (filters or {}).get(k)
         for k in (
             "trust_product_ids",
-            "trust_marker",
-            "internal_status",
+            "trust_markers",
+            "internal_statuses",
+            "cities",
             "has_followup",
         )
     ):
@@ -1934,80 +2252,92 @@ def render_overdue_html(
         )
         panel_style = "" if idx == default_tab_idx else ' style="display:none"'
         totals = bucket_totals.get(key) or _bucket_amount_totals(items)
+        overdue_label = "提前结清日期" if key == "ES" else None
         tab_panels += f"""
             <div class="tab-panel {active}" id="tab-{key}"{panel_style}>
                 <div class="table-scroll-x">
-                    {_render_portfolio_table(items, totals=totals, empty_label="暂无资产")}
+                    {_render_portfolio_table(
+                        items,
+                        totals=totals,
+                        empty_label="暂无资产",
+                        overdue_col_label=overdue_label,
+                        tab_bucket=key,
+                        filters=filters or {},
+                    )}
                 </div>
             </div>
         """
 
-    f = filters or {}
     products = products or []
     selected_product_ids = f.get("trust_product_ids")
     trust_product_filter = _render_trust_product_multiselect(products, selected_product_ids)
+    markers_sel = f.get("trust_markers") or (
+        [f["trust_marker"]] if f.get("trust_marker") else None
+    )
+    statuses_sel = f.get("internal_statuses") or (
+        [f["internal_status"]] if f.get("internal_status") else None
+    )
+    cities_sel = f.get("cities") or ([f["city"]] if f.get("city") else None)
 
-    def bucket_option(val: str, label: str) -> str:
-        sel = " selected" if f.get("delinquency_bucket") == val else ""
-        return f'<option value="{val}"{sel}>{escape(label)}</option>'
+    bucket_filter = _render_str_multiselect(
+        key="delinquency-bucket",
+        param_name="delinquency_buckets",
+        label="等级",
+        options=[
+            ("ES", "ES（提前结清）"),
+            ("M1", "M1"),
+            ("M2", "M2"),
+            ("M3", "M3"),
+            ("M3_PLUS", "M3+"),
+        ],
+        selected=buckets_sel,
+        all_label="全部等级",
+    )
+    marker_filter = _render_str_multiselect(
+        key="trust-marker",
+        param_name="trust_markers",
+        label="信托标记",
+        options=[(m, m) for m in TRUST_MARKER_OPTIONS],
+        selected=markers_sel,
+        all_label="全部信托标记",
+    )
+    status_filter = _render_str_multiselect(
+        key="internal-status",
+        param_name="internal_statuses",
+        label="内部状态",
+        options=[(s, s) for s in INTERNAL_STATUS_OPTIONS],
+        selected=statuses_sel,
+        all_label="全部内部状态",
+    )
+    city_filter = _render_str_multiselect(
+        key="city",
+        param_name="cities",
+        label="城市",
+        options=[(c, c) for c in city_options_list],
+        selected=cities_sel,
+        all_label="全部城市",
+    )
 
-    bucket_options = '<option value="">全部等级</option>'
-    bucket_options += bucket_option("ES", "ES（提前结清）")
-    bucket_options += bucket_option("M1", "M1")
-    bucket_options += bucket_option("M2", "M2")
-    bucket_options += bucket_option("M3", "M3")
-    bucket_options += bucket_option("M3_PLUS", "M3+")
-
-    marker_options = '<option value="">全部信托标记</option>'
-    for m in TRUST_MARKER_OPTIONS:
-        sel = " selected" if f.get("trust_marker") == m else ""
-        marker_options += f'<option value="{escape(m)}"{sel}>{escape(m)}</option>'
-
-    status_options = '<option value="">全部内部状态</option>'
-    for s in INTERNAL_STATUS_OPTIONS:
-        sel = " selected" if f.get("internal_status") == s else ""
-        status_options += f'<option value="{escape(s)}"{sel}>{escape(s)}</option>'
-
-    followup_yes = " selected" if f.get("has_followup") == "yes" else ""
-    followup_no = " selected" if f.get("has_followup") == "no" else ""
     asset_q = escape(f.get("asset_code") or "")
     custody_q = escape(f.get("custody_asset_code") or "")
-
-    city_options = '<option value="">全部城市</option>'
-    for city_name in city_options_list:
-        sel = " selected" if f.get("city") == city_name else ""
-        city_options += f'<option value="{escape(city_name)}"{sel}>{escape(city_name)}</option>'
 
     filter_bar = f"""
         <form class="filter-form" method="get" action="/overdue">
             {trust_product_filter}
-            <label>等级
-                <select name="delinquency_bucket">{bucket_options}</select>
-            </label>
-            <label>信托标记
-                <select name="trust_marker">{marker_options}</select>
-            </label>
-            <label>内部状态
-                <select name="internal_status">{status_options}</select>
-            </label>
-            <label>跟进台账
-                <select name="has_followup">
-                    <option value="">全部</option>
-                    <option value="yes"{followup_yes}>有台账</option>
-                    <option value="no"{followup_no}>无台账</option>
-                </select>
-            </label>
-            <label>城市
-                <select name="city">{city_options}</select>
-            </label>
-            <label>资产主编号
+            {bucket_filter}
+            {marker_filter}
+            {status_filter}
+            {city_filter}
+            <label class="filter-field-code">资产主编号
                 <input type="text" name="asset_code" value="{asset_q}" placeholder="模糊匹配">
             </label>
-            <label>托管房源号
+            <label class="filter-field-code">托管房源号
                 <input type="text" name="custody_asset_code" value="{custody_q}" placeholder="模糊匹配">
             </label>
-            <button type="submit" class="tab-btn">筛选</button>
-            <a class="api-link" href="/overdue">清除</a>
+            <div class="filter-actions">
+                <button type="submit" class="tab-btn">筛选</button>
+                <a class="api-link" href="/overdue">清除</a>
+            </div>
         </form>
     """
 
@@ -2032,19 +2362,24 @@ def render_overdue_html(
         recon_recalc_payload["trust_product_id"] = recalc_single_pid
     recon_recalc_payload_json = json.dumps(recon_recalc_payload, ensure_ascii=False)
 
+    followup_count = len(followups)
     followup_rows = ""
-    for item in followups[:10]:
+    for item in followups:
+        desc = str(item.get("description") or "").strip() or "—"
+        if len(desc) > 48:
+            desc = desc[:48] + "…"
         followup_rows += f"""
             <tr>
                 <td>{escape(item.get("asset_code") or "—")}</td>
-                <td>{escape(item.get("custody_asset_code") or "—")}</td>
+                <td>{escape(item.get("category") or "—")}</td>
                 <td>{escape(FOLLOWUP_STATUS_LABELS.get(item["status"], item["status"]))}</td>
-                <td>{escape(item["owner_name"] or "—")}</td>
-                <td>{escape(item["last_follow_up_at"] or "—")}</td>
+                <td>{escape(_format_display_timestamp(item.get("created_at") or item.get("opened_at")))}</td>
+                <td>{escape(desc)}</td>
+                <td>{escape(_followup_entry_summary_display(item))}</td>
             </tr>
         """
     if not followup_rows:
-        followup_rows = '<tr><td colspan="5" class="empty">暂无跟进台账</td></tr>'
+        followup_rows = '<tr><td colspan="6" class="empty">暂无跟进事项</td></tr>'
 
     header_meta = _render_overdue_header_meta(overview)
     recalc_payload = {"data_date": data_date if data_date != "—" else None}
@@ -2066,7 +2401,7 @@ def render_overdue_html(
             bd.get("ES", 0),
             amounts["ES"],
             value_css="ok",
-            hint="应还款为 0，非逾期",
+            hint="应还款为 0，非未付款",
             use_repaid=True,
         )
         + _render_overdue_bucket_kpi_card(
@@ -2077,7 +2412,7 @@ def render_overdue_html(
             hint="M1=正常在贷（含0天）",
         )
         + _render_overdue_bucket_kpi_card(
-            "逾期资产（Overdue）",
+            "未付款资产（Overdue）",
             overview["overdue_total"],
             amounts["overdue"],
             value_css="warn",
@@ -2088,21 +2423,21 @@ def render_overdue_html(
             bd.get("M2", 0),
             amounts["M2"],
             value_css="m2",
-            hint="逾期 36–63 天",
+            hint="未付 36–63 天",
         )
         + _render_overdue_bucket_kpi_card(
             "M3",
             bd.get("M3", 0),
             amounts["M3"],
             value_css="m2",
-            hint="逾期 64–91 天",
+            hint="未付 64–91 天",
         )
         + _render_overdue_bucket_kpi_card(
             "M3+",
             bd.get("M3+", 0),
             amounts["M3_PLUS"],
             value_css="warn",
-            hint="逾期 ≥92 天",
+            hint="未付 ≥92 天",
         )
         + f"""
             <div class="card">
@@ -2112,7 +2447,8 @@ def render_overdue_html(
             </div>
             <div class="card">
                 <div class="card-label">跟进中台账</div>
-                <div class="card-value">{overview["active_followup_count"]}</div>
+                <div class="card-value">{followup_count}</div>
+                <div class="card-hint">当前筛选资产下事项数</div>
             </div>
         """
     )
@@ -2184,49 +2520,67 @@ def render_overdue_html(
         .filter-bar {{ display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; align-items: center; }}
         .filter-bar .muted-count {{ font-size: 0.78rem; color: #64748b; margin-left: auto; }}
         .filter-form {{
-            display: flex; flex-wrap: wrap; gap: 0.65rem; align-items: flex-end;
+            display: flex; flex-wrap: nowrap; gap: 0.4rem; align-items: flex-end;
             margin-bottom: 0.85rem; padding-bottom: 0.85rem;
             border-bottom: 1px solid rgba(255,255,255,0.08);
+            /* 勿用 overflow:auto，会裁切绝对定位的多选下拉 */
+            overflow: visible;
+            position: relative;
+            z-index: 40;
         }}
         .filter-form label {{
-            display: flex; flex-direction: column; gap: 0.25rem;
-            font-size: 0.75rem; color: #94a3b8; min-width: 120px;
+            display: flex; flex-direction: column; gap: 0.2rem;
+            font-size: 0.72rem; color: #94a3b8; min-width: 0; flex: 0 1 auto;
         }}
         .filter-form select, .filter-form input[type="text"] {{
-            padding: 0.35rem 0.5rem; border-radius: 6px;
+            padding: 0.3rem 0.45rem; border-radius: 6px;
             border: 1px solid rgba(255,255,255,0.15);
-            background: rgba(0,0,0,0.2); color: #e2e8f0; font-size: 0.82rem;
+            background: rgba(0,0,0,0.2); color: #e2e8f0; font-size: 0.8rem;
+            box-sizing: border-box;
+        }}
+        .filter-field-code {{ flex: 0 1 8.5rem; }}
+        .filter-field-code input[type="text"] {{ width: 8.5rem; }}
+        .filter-actions {{
+            display: flex; align-items: center; gap: 0.45rem;
+            flex: 0 0 auto; padding-bottom: 0.1rem; white-space: nowrap;
         }}
         .filter-multiselect {{
             position: relative;
             display: flex;
             flex-direction: column;
-            gap: 0.25rem;
-            min-width: 180px;
+            gap: 0.2rem;
+            min-width: 6.5rem;
+            flex: 0 1 8rem;
+            z-index: 1;
+        }}
+        .filter-multiselect.is-open {{
+            z-index: 200;
         }}
         .filter-multiselect-label {{
-            font-size: 0.75rem;
+            font-size: 0.72rem;
             color: #94a3b8;
         }}
         .multiselect-trigger {{
-            padding: 0.35rem 0.5rem;
+            padding: 0.3rem 0.45rem;
             border-radius: 6px;
             border: 1px solid rgba(255,255,255,0.15);
             background: rgba(0,0,0,0.2);
             color: #e2e8f0;
-            font-size: 0.82rem;
+            font-size: 0.8rem;
             text-align: left;
             cursor: pointer;
-            max-width: 220px;
+            width: 100%;
+            max-width: 9.5rem;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+            box-sizing: border-box;
         }}
         .multiselect-panel {{
             position: absolute;
             top: calc(100% + 0.25rem);
             left: 0;
-            z-index: 30;
+            z-index: 300;
             min-width: 220px;
             max-height: 240px;
             overflow: auto;
@@ -2234,7 +2588,7 @@ def render_overdue_html(
             border-radius: 8px;
             border: 1px solid rgba(255,255,255,0.12);
             background: #0f172a;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.45);
         }}
         .multiselect-option {{
             display: flex;
@@ -2271,14 +2625,96 @@ def render_overdue_html(
             opacity: 0.45;
             cursor: not-allowed;
         }}
-        .custody-mark-select {{
-            max-width: 140px; padding: 0.25rem 0.35rem; font-size: 0.78rem;
-            border-radius: 6px; border: 1px solid rgba(255,255,255,0.15);
-            background: rgba(0,0,0,0.25); color: #e2e8f0;
+        .internal-status-cell {{
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            min-height: 1.6rem;
         }}
-        .custody-mark-select.saving {{ opacity: 0.6; }}
-        .custody-mark-select.saved {{ border-color: #34d399; }}
-        .custody-mark-select.error {{ border-color: #f87171; }}
+        .internal-status-link {{
+            display: inline-flex; align-items: center; justify-content: center;
+            text-decoration: none; line-height: 1;
+        }}
+        .status-dot,
+        .status-count {{
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 1.35rem; height: 1.35rem; min-width: 1.35rem;
+            border-radius: 50%; box-sizing: border-box;
+        }}
+        .status-dot {{
+            background: #22c55e;
+            box-shadow: 0 0 0 2px rgba(34,197,94,0.22);
+        }}
+        .status-count {{
+            padding: 0;
+            font-size: 0.72rem; font-weight: 700; line-height: 1;
+            color: #0f172a; background: #f59e0b;
+            box-shadow: 0 0 0 1px rgba(245,158,11,0.35);
+        }}
+        .status-count--settled {{
+            border-radius: 999px;
+            background: linear-gradient(135deg, #fbbf24, #34d399);
+            box-shadow: 0 0 0 1px rgba(52,211,153,0.35);
+        }}
+        .internal-status-add {{
+            display: inline-flex; align-items: center; justify-content: center;
+            width: 1.2rem; height: 1.2rem; border-radius: 4px;
+            font-size: 0.95rem; font-weight: 700; line-height: 1;
+            color: #64748b; text-decoration: none;
+            opacity: 0.28; border: 1px solid transparent;
+            transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+        }}
+        tr:hover .internal-status-add,
+        .internal-status-cell:focus-within .internal-status-add,
+        .internal-status-add:focus-visible {{
+            opacity: 1; color: #e2e8f0;
+            border-color: rgba(56,189,248,0.45);
+            background: rgba(56,189,248,0.12);
+        }}
+        .trust-marker-cell {{
+            position: relative; display: inline-flex; align-items: center;
+        }}
+        .trust-marker-badge {{
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            padding: 0.15rem 0.45rem; border-radius: 999px;
+            border: 1px solid rgba(255,255,255,0.12);
+            background: rgba(255,255,255,0.04); color: #cbd5e1;
+            font-size: 0.78rem; cursor: pointer; line-height: 1.2;
+        }}
+        .trust-marker-badge:hover,
+        .trust-marker-cell.is-open .trust-marker-badge {{
+            border-color: rgba(56,189,248,0.4);
+            background: rgba(56,189,248,0.08);
+        }}
+        .trust-marker-dot {{
+            width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+            background: #64748b;
+        }}
+        .trust-marker-dot.tone-none {{
+            background: transparent; border: 1.5px solid #64748b;
+        }}
+        .trust-marker-dot.tone-watch {{ background: #f59e0b; }}
+        .trust-marker-dot.tone-focus {{ background: #f87171; }}
+        .trust-marker-badge.tone-none {{ color: #94a3b8; }}
+        .trust-marker-badge.tone-watch {{ color: #fbbf24; }}
+        .trust-marker-badge.tone-focus {{ color: #fecaca; }}
+        .trust-marker-menu {{
+            position: absolute; top: calc(100% + 0.25rem); left: 0; z-index: 40;
+            min-width: 8.5rem; padding: 0.25rem;
+            border-radius: 8px; border: 1px solid rgba(148,163,184,0.25);
+            background: #0f172a; box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+            display: flex; flex-direction: column; gap: 0.1rem;
+        }}
+        .trust-marker-menu[hidden] {{ display: none !important; }}
+        .trust-marker-option {{
+            display: flex; align-items: center; gap: 0.4rem;
+            width: 100%; padding: 0.35rem 0.45rem; border: none; border-radius: 6px;
+            background: transparent; color: #e2e8f0; font-size: 0.78rem;
+            cursor: pointer; text-align: left;
+        }}
+        .trust-marker-option:hover {{ background: rgba(56,189,248,0.12); }}
+        .trust-marker-option.is-active {{ background: rgba(56,189,248,0.18); }}
+        .trust-marker-cell.saving {{ opacity: 0.6; }}
+        .trust-marker-cell.saved .trust-marker-badge {{ border-color: #34d399; }}
+        .trust-marker-cell.error .trust-marker-badge {{ border-color: #f87171; }}
         .badge {{
             display: inline-block;
             padding: 0.2rem 0.6rem;
@@ -2290,8 +2726,13 @@ def render_overdue_html(
         }}
         .empty {{ color: #64748b; text-align: center; }}
         .card-hint {{ font-size: 0.72rem; color: #64748b; margin-top: 0.35rem; line-height: 1.3; }}
-        .tabs {{ display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; }}
-        .portfolio-panel {{ overflow: visible; }}
+        .tabs {{ display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; position: relative; z-index: 1; }}
+        .portfolio-panel {{ overflow: visible; position: relative; z-index: 2; }}
+        .portfolio-panel .tab-panel {{ position: relative; z-index: 1; }}
+        tr.portfolio-row-focus td {{
+            background: rgba(56, 189, 248, 0.14);
+            box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.35);
+        }}
         .portfolio-panel .table-scroll-x {{
             overflow-x: auto;
             -webkit-overflow-scrolling: touch;
@@ -2354,9 +2795,9 @@ def render_overdue_html(
                     <h1>信托资产逾期管理</h1>
                     {header_meta}
                 </div>
-                <button type="button" class="btn-recalc" id="btn-recalc-overdue"{recalc_disabled}{recalc_title}>重新计算逾期天数</button>
+                <button type="button" class="btn-recalc" id="btn-recalc-overdue"{recalc_disabled}{recalc_title}>重新计算未付天数</button>
             </div>
-            <p class="card-hint" id="recalc-hint"{recalc_hint_style}>多选信托产品时无法重算逾期天数或金额核对，请先单选一个产品。</p>
+            <p class="card-hint" id="recalc-hint"{recalc_hint_style}>多选信托产品时无法重算未付天数或金额核对，请先单选一个产品。</p>
             <div id="recalc-message" class="recalc-msg" style="display:none;"></div>
         </header>
 
@@ -2417,13 +2858,16 @@ def render_overdue_html(
 
         <section class="section">
             <h2 class="section-title">
-                跟进台账
+                跟进事项 · {followup_count}
                 <a class="api-link" href="/overdue/followups">JSON → /overdue/followups</a>
             </h2>
             <div class="card table-wrap">
                 <table>
                     <thead>
-                        <tr><th>资产编号</th><th>托管号</th><th>状态</th><th>负责人</th><th>最近跟进</th></tr>
+                        <tr>
+                            <th>资产主编号</th><th>分类</th><th>状态</th>
+                            <th>创建时间</th><th>描述</th><th>跟进摘要</th>
+                        </tr>
                     </thead>
                     <tbody>{followup_rows}</tbody>
                 </table>
@@ -2437,86 +2881,106 @@ def render_overdue_html(
         var filterForm = document.querySelector('form.filter-form');
         if (!filterForm) return;
 
-        function updateTrustProductTrigger() {{
-            var root = filterForm.querySelector('[data-multiselect="trust-product"]');
-            if (!root) return;
+        var ALL_LABELS = {{
+            'trust-product': '全部信托产品',
+            'delinquency-bucket': '全部等级',
+            'trust-marker': '全部信托标记',
+            'internal-status': '全部内部状态',
+            'city': '全部城市'
+        }};
+        var COUNT_UNITS = {{
+            'trust-product': '产品',
+            'delinquency-bucket': '等级',
+            'trust-marker': '标记',
+            'internal-status': '状态',
+            'city': '城市'
+        }};
+
+        function updateMsTrigger(root) {{
             var trigger = root.querySelector('.multiselect-trigger');
-            var allBox = root.querySelector('.tp-all');
-            var productBoxes = root.querySelectorAll('.tp-product');
+            var allBox = root.querySelector('.ms-all');
+            var key = root.getAttribute('data-multiselect') || '';
+            var allLabel = ALL_LABELS[key] || '全部';
+            var unit = COUNT_UNITS[key] || '项';
+            if (!trigger) return;
             if (allBox && allBox.checked) {{
-                trigger.textContent = '全部信托产品';
+                trigger.textContent = allLabel;
                 return;
             }}
             var names = [];
-            productBoxes.forEach(function(box) {{
+            root.querySelectorAll('.ms-option').forEach(function(box) {{
                 if (box.checked) names.push(box.parentElement.textContent.trim());
             }});
-            if (!names.length) {{
-                trigger.textContent = '全部信托产品';
-                return;
-            }}
-            trigger.textContent = names.length <= 2 ? names.join(' · ') : ('已选 ' + names.length + ' 个产品');
+            if (!names.length) trigger.textContent = allLabel;
+            else if (names.length === 1) trigger.textContent = names[0];
+            else trigger.textContent = '已选' + names.length + unit;
         }}
 
-        var productRoot = filterForm.querySelector('[data-multiselect="trust-product"]');
-        if (productRoot) {{
-            var panel = productRoot.querySelector('.multiselect-panel');
-            var trigger = productRoot.querySelector('.multiselect-trigger');
-            var allBox = productRoot.querySelector('.tp-all');
-            trigger.addEventListener('click', function(ev) {{
-                ev.stopPropagation();
-                panel.hidden = !panel.hidden;
+        function setMsOpen(root, open) {{
+            if (!root) return;
+            root.classList.toggle('is-open', !!open);
+            var panel = root.querySelector('.multiselect-panel');
+            if (panel) panel.hidden = !open;
+        }}
+        function closeAllMs(except) {{
+            filterForm.querySelectorAll('[data-multiselect]').forEach(function(root) {{
+                if (except && root === except) return;
+                setMsOpen(root, false);
             }});
+        }}
+        filterForm.querySelectorAll('[data-multiselect]').forEach(function(root) {{
+            var panel = root.querySelector('.multiselect-panel');
+            var trigger = root.querySelector('.multiselect-trigger');
+            var allBox = root.querySelector('.ms-all');
+            if (trigger && panel) {{
+                trigger.addEventListener('click', function(ev) {{
+                    ev.stopPropagation();
+                    var willOpen = panel.hidden;
+                    closeAllMs(root);
+                    setMsOpen(root, willOpen);
+                }});
+            }}
             document.addEventListener('click', function(ev) {{
-                if (!productRoot.contains(ev.target)) panel.hidden = true;
+                if (!root.contains(ev.target)) setMsOpen(root, false);
             }});
             if (allBox) {{
                 allBox.addEventListener('change', function() {{
-                    if (allBox.checked) {{
-                        productRoot.querySelectorAll('.tp-product').forEach(function(box) {{
-                            box.checked = false;
-                            box.disabled = true;
-                        }});
-                    }} else {{
-                        productRoot.querySelectorAll('.tp-product').forEach(function(box) {{
-                            box.disabled = false;
-                        }});
-                    }}
-                    updateTrustProductTrigger();
+                    root.querySelectorAll('.ms-option').forEach(function(box) {{
+                        if (allBox.checked) {{ box.checked = false; box.disabled = true; }}
+                        else {{ box.disabled = false; }}
+                    }});
+                    updateMsTrigger(root);
                 }});
                 if (allBox.checked) {{
-                    productRoot.querySelectorAll('.tp-product').forEach(function(box) {{
+                    root.querySelectorAll('.ms-option').forEach(function(box) {{
                         box.disabled = true;
                     }});
                 }}
             }}
-            productRoot.querySelectorAll('.tp-product').forEach(function(box) {{
+            root.querySelectorAll('.ms-option').forEach(function(box) {{
                 box.addEventListener('change', function() {{
                     if (box.checked && allBox) {{
                         allBox.checked = false;
-                        productRoot.querySelectorAll('.tp-product').forEach(function(other) {{
+                        root.querySelectorAll('.ms-option').forEach(function(other) {{
                             other.disabled = false;
                         }});
                     }}
-                    updateTrustProductTrigger();
+                    updateMsTrigger(root);
                 }});
             }});
-            updateTrustProductTrigger();
-        }}
+            updateMsTrigger(root);
+        }});
 
         filterForm.addEventListener('submit', function(ev) {{
             ev.preventDefault();
             var params = new URLSearchParams();
-            var productRoot = filterForm.querySelector('[data-multiselect="trust-product"]');
-            var allBox = productRoot ? productRoot.querySelector('.tp-all') : null;
-            var useAllProducts = !productRoot || (allBox && allBox.checked);
             filterForm.querySelectorAll('input, select, textarea').forEach(function(el) {{
                 if (!el.name || el.disabled) return;
-                if (el.classList.contains('tp-product')) {{
-                    if (!useAllProducts && el.checked) params.append(el.name, el.value);
+                if (el.classList.contains('ms-all')) return;
+                if (el.classList.contains('ms-option')) {{
+                    if (el.checked) params.append(el.name, el.value);
                     return;
                 }}
-                if (el.classList.contains('tp-all')) return;
                 var val = (el.value || '').trim();
                 if (val) params.set(el.name, val);
             }});
@@ -2621,7 +3085,7 @@ def render_overdue_html(
         var recalcPayload = {recalc_payload_json};
         if (!btn) return;
         btn.addEventListener('click', function() {{
-            if (!confirm('将按当前日期重新计算逾期天数，是否继续？')) return;
+            if (!confirm('将按当前日期重新计算未付天数，是否继续？')) return;
             btn.disabled = true;
             if (msgEl) {{ msgEl.style.display = 'none'; msgEl.classList.remove('err'); }}
             fetch('/overdue/recalculate', {{
@@ -2637,7 +3101,7 @@ def render_overdue_html(
                         text += '，缺少还款日期 ' + data.missing_repayment_count + ' 条';
                     }}
                     if (data.overdue_days_as_of) {{
-                        text += '（逾期天数截至 ' + data.overdue_days_as_of + '）';
+                        text += '（未付天数截至 ' + data.overdue_days_as_of + '）';
                     }}
                     if (data.risk_hint) text += '。' + data.risk_hint;
                     if (msgEl) {{
@@ -2657,17 +3121,54 @@ def render_overdue_html(
         }});
     }})();
 
-    document.querySelectorAll('.custody-mark-select').forEach(function(sel) {{
-        sel.addEventListener('change', function() {{
-            var field = sel.getAttribute('data-field');
+    (function() {{
+        var MARKER_VISUAL = {{
+            '无标记': {{ tone: 'none', short: '无' }},
+            '已关注': {{ tone: 'watch', short: '已关注' }},
+            '重点关注': {{ tone: 'focus', short: '重点关注' }}
+        }};
+
+        function closeAllMarkerMenus(except) {{
+            document.querySelectorAll('.trust-marker-cell.is-open').forEach(function(cell) {{
+                if (except && cell === except) return;
+                cell.classList.remove('is-open');
+                var menu = cell.querySelector('.trust-marker-menu');
+                var badge = cell.querySelector('.trust-marker-badge');
+                if (menu) menu.hidden = true;
+                if (badge) badge.setAttribute('aria-expanded', 'false');
+            }});
+        }}
+
+        function applyMarkerVisual(cell, value) {{
+            var vis = MARKER_VISUAL[value] || {{ tone: 'none', short: value }};
+            cell.dataset.value = value;
+            var badge = cell.querySelector('.trust-marker-badge');
+            var label = cell.querySelector('.trust-marker-label');
+            var dot = badge && badge.querySelector('.trust-marker-dot');
+            if (badge) {{
+                badge.className = 'trust-marker-badge tone-' + vis.tone;
+                badge.title = '信托标记：' + value;
+                badge.setAttribute('aria-label', '信托标记：' + value + '，点击修改');
+            }}
+            if (dot) dot.className = 'trust-marker-dot tone-' + vis.tone;
+            if (label) label.textContent = vis.short;
+            cell.querySelectorAll('.trust-marker-option').forEach(function(opt) {{
+                var active = opt.dataset.value === value;
+                opt.classList.toggle('is-active', active);
+                opt.setAttribute('aria-selected', active ? 'true' : 'false');
+            }});
+        }}
+
+        function saveMarker(cell, value) {{
+            var field = cell.dataset.field || 'trust_marker';
             var payload = {{
-                trust_product_id: parseInt(sel.getAttribute('data-trust-product-id'), 10),
-                asset_code: sel.getAttribute('data-asset-code'),
-                data_date: sel.getAttribute('data-data-date')
+                trust_product_id: parseInt(cell.dataset.trustProductId, 10),
+                asset_code: cell.dataset.assetCode,
+                data_date: cell.dataset.dataDate
             }};
-            payload[field] = sel.value;
-            sel.classList.remove('saved', 'error');
-            sel.classList.add('saving');
+            payload[field] = value;
+            cell.classList.remove('saved', 'error');
+            cell.classList.add('saving');
             fetch('/overdue/custody-marks', {{
                 method: 'PATCH',
                 credentials: 'same-origin',
@@ -2675,37 +3176,97 @@ def render_overdue_html(
                 body: JSON.stringify(payload)
             }}).then(function(res) {{
                 return res.json().then(function(data) {{
-                    sel.classList.remove('saving');
+                    cell.classList.remove('saving');
                     if (!res.ok) {{
-                        sel.classList.add('error');
+                        cell.classList.add('error');
                         throw new Error(data.detail || '保存失败');
                     }}
-                    sel.classList.add('saved');
-                    setTimeout(function() {{ sel.classList.remove('saved'); }}, 1200);
+                    applyMarkerVisual(cell, value);
+                    cell.classList.add('saved');
+                    setTimeout(function() {{ cell.classList.remove('saved'); }}, 1200);
                 }});
             }}).catch(function() {{
-                sel.classList.remove('saving');
-                sel.classList.add('error');
+                cell.classList.remove('saving');
+                cell.classList.add('error');
+            }});
+        }}
+
+        document.querySelectorAll('.trust-marker-cell').forEach(function(cell) {{
+            var badge = cell.querySelector('.trust-marker-badge');
+            var menu = cell.querySelector('.trust-marker-menu');
+            if (!badge || !menu) return;
+
+            badge.addEventListener('click', function(e) {{
+                e.stopPropagation();
+                var open = !cell.classList.contains('is-open');
+                closeAllMarkerMenus(open ? cell : null);
+                cell.classList.toggle('is-open', open);
+                menu.hidden = !open;
+                badge.setAttribute('aria-expanded', open ? 'true' : 'false');
+            }});
+
+            menu.querySelectorAll('.trust-marker-option').forEach(function(opt) {{
+                opt.addEventListener('click', function(e) {{
+                    e.stopPropagation();
+                    var value = opt.dataset.value;
+                    closeAllMarkerMenus();
+                    if (!value || value === cell.dataset.value) return;
+                    saveMarker(cell, value);
+                }});
             }});
         }});
-    }});
+
+        document.addEventListener('click', function() {{ closeAllMarkerMenus(); }});
+        document.addEventListener('keydown', function(e) {{
+            if (e.key === 'Escape') closeAllMarkerMenus();
+        }});
+    }})();
+
+    function activatePortfolioTab(key) {{
+        if (!key) return false;
+        var btn = document.querySelector('.tab-btn[data-tab="' + key + '"]');
+        var panel = document.getElementById('tab-' + key);
+        if (!btn || !panel) return false;
+        document.querySelectorAll('.tab-btn[data-tab]').forEach(function(b) {{ b.classList.remove('active'); }});
+        document.querySelectorAll('.tab-panel').forEach(function(p) {{
+            p.style.display = 'none';
+            p.classList.remove('active');
+        }});
+        btn.classList.add('active');
+        panel.style.display = 'block';
+        panel.classList.add('active');
+        return true;
+    }}
 
     document.querySelectorAll('.tab-btn[data-tab]').forEach(function(btn) {{
         btn.addEventListener('click', function() {{
-            var key = btn.getAttribute('data-tab');
-            document.querySelectorAll('.tab-btn[data-tab]').forEach(function(b) {{ b.classList.remove('active'); }});
-            document.querySelectorAll('.tab-panel').forEach(function(p) {{
-                p.style.display = 'none';
-                p.classList.remove('active');
-            }});
-            btn.classList.add('active');
-            var panel = document.getElementById('tab-' + key);
-            if (panel) {{
-                panel.style.display = 'block';
-                panel.classList.add('active');
-            }}
+            activatePortfolioTab(btn.getAttribute('data-tab'));
         }});
     }});
+
+    (function restorePortfolioFocus() {{
+        var focusAsset = {json.dumps(focus_asset or "")};
+        var tabKey = {json.dumps(
+            portfolio_tab
+            or (filters or {}).get("delinquency_bucket")
+            or ""
+        )};
+        if (tabKey) activatePortfolioTab(tabKey);
+        if (!focusAsset) return;
+        var row = document.querySelector('tr[data-asset-code="' + focusAsset + '"]');
+        if (!row) return;
+        var panel = row.closest('.tab-panel');
+        if (panel && panel.id && panel.id.indexOf('tab-') === 0) {{
+            activatePortfolioTab(panel.id.slice(4));
+        }}
+        row.classList.add('portfolio-row-focus');
+        try {{
+            row.scrollIntoView({{ block: 'center', behavior: 'smooth' }});
+        }} catch (e) {{
+            row.scrollIntoView(true);
+        }}
+        setTimeout(function() {{ row.classList.remove('portfolio-row-focus'); }}, 4000);
+    }})();
 
     (function() {{
         document.querySelectorAll('.portfolio-table').forEach(function(table) {{
@@ -2767,8 +3328,8 @@ def _fmt_risk_day_meta(item: dict) -> str:
         return f'<span>提前结清 {escape(str(settlement))}</span>'
     od = item.get("overdue_days")
     if od is None:
-        return "<span>逾期 —</span>"
-    return f"<span>逾期 {od}天</span>"
+        return "<span>未付 —</span>"
+    return f"<span>未付 {od}天</span>"
 
 
 def fmt_sla_badge(status: str | None) -> str:
@@ -2845,12 +3406,12 @@ def render_risk_workbench_html(data: dict):
             """
 
         if detail.get("is_es"):
-            breakdown_line = "已结清（ES），不参与逾期评分与告警"
+            breakdown_line = "已结清（ES），不参与未付款评分与告警"
             settlement = detail.get("settlement_date") or detail.get("last_payment_date") or "—"
             lifecycle_line = f'<p class="muted">提前结清日期：{escape(str(settlement))}</p>'
         else:
             breakdown_line = (
-                f"逾期权重 {bd['overdue_weight']} + "
+                f"未付款权重 {bd['overdue_weight']} + "
                 f"金额异常 {bd['reconciliation_weight']} + "
                 f"回款波动 {bd['volatility_weight']}"
             )
@@ -2971,7 +3532,7 @@ def render_risk_workbench_html(data: dict):
         <nav class="breadcrumb"><a href="/">首页</a> / 信托资产风险中台 / 工作台</nav>
         <header>
             <h1>信托资产风险中台 · Risk Control Hub</h1>
-            <p>数据日期 {escape(data_date)} · <a href="/risk/workbench/data">JSON</a> · <a href="/overdue">V1 逾期视图</a></p>
+            <p>数据日期 {escape(data_date)} · <a href="/risk/workbench/data">JSON</a> · <a href="/overdue">V1 未付款视图</a></p>
         </header>
         <div class="kpi-grid">
             <div class="kpi"><div class="lbl">A 高风险</div><div class="val warn">{summary['level_a_count']}</div></div>
@@ -2979,7 +3540,7 @@ def render_risk_workbench_html(data: dict):
             <div class="kpi"><div class="lbl">平均风险分</div><div class="val">{summary['avg_risk_score']}</div></div>
             <div class="kpi"><div class="lbl">开放预警</div><div class="val warn">{summary['open_alert_count']}</div></div>
             <div class="kpi"><div class="lbl">SLA 异常案件</div><div class="val warn">{summary['sla_breached_count']}</div></div>
-            <div class="kpi"><div class="lbl">逾期资产（M2+）</div><div class="val warn">{summary.get('overdue_total', summary.get('overdue_count', 0))}</div></div>
+            <div class="kpi"><div class="lbl">未付款资产（M2+）</div><div class="val warn">{summary.get('overdue_total', summary.get('overdue_count', 0))}</div></div>
             <div class="kpi"><div class="lbl">风险暴露（Exposure）</div><div class="val">{summary.get('exposure_total', 0)}</div></div>
             <div class="kpi"><div class="lbl">提前结清（ES）</div><div class="val">{summary.get('breakdown', {}).get('ES', summary.get('es_count', 0))}</div></div>
         </div>
@@ -3737,7 +4298,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                 <span class="kpi-value">{dash_count(trust_product_count)}</span>
             </div>
             <div class="kpi-item">
-                <span class="kpi-label">逾期 M2+</span>
+                <span class="kpi-label">未付款 M2+</span>
                 <span class="kpi-value overdue">{dash_count(overdue_total)}</span>
             </div>
             <div class="kpi-item">
@@ -3829,7 +4390,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                 </a>
                 <a href="/overdue" class="risk-card">
                     <div class="risk-card-head">
-                        <span class="risk-card-label">逾期资产（M2+）</span>
+                        <span class="risk-card-label">未付款资产（M2+）</span>
                         <span class="risk-card-icon risk-icon-overdue" aria-hidden="true">
                             <svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67V7z"/></svg>
                         </span>
@@ -4156,46 +4717,60 @@ def overdue_dashboard(
     trust_product_id: str | None = None,
     trust_product_ids: list[str] | None = Query(default=None),
     delinquency_bucket: str | None = None,
+    delinquency_buckets: list[str] | None = Query(default=None),
     trust_marker: str | None = None,
+    trust_markers: list[str] | None = Query(default=None),
     internal_status: str | None = None,
+    internal_statuses: list[str] | None = Query(default=None),
     has_followup: str | None = None,
     asset_code: str | None = None,
     custody_asset_code: str | None = None,
     city: str | None = None,
+    cities: list[str] | None = Query(default=None),
+    focus_asset: str | None = None,
+    portfolio_tab: str | None = None,
 ):
     pids = query_utils.parse_trust_product_ids(trust_product_id, trust_product_ids)
-    parsed_delinquency = query_utils.clean_optional_str(delinquency_bucket)
-    parsed_trust_marker = query_utils.clean_optional_str(trust_marker)
-    parsed_internal_status = query_utils.clean_optional_str(internal_status)
+    parsed_buckets = query_utils.parse_optional_str_list(
+        delinquency_bucket, delinquency_buckets
+    )
+    parsed_markers = query_utils.parse_optional_str_list(trust_marker, trust_markers)
+    parsed_statuses = query_utils.parse_optional_str_list(
+        internal_status, internal_statuses
+    )
+    parsed_cities = query_utils.parse_optional_str_list(city, cities)
     parsed_has_followup = query_utils.clean_optional_str(has_followup)
     parsed_asset = query_utils.clean_optional_str(asset_code)
     parsed_custody = query_utils.clean_optional_str(custody_asset_code)
-    parsed_city = query_utils.clean_optional_str(city)
+    parsed_focus = query_utils.clean_optional_str(focus_asset)
+    parsed_portfolio_tab = query_utils.clean_optional_str(portfolio_tab)
     filters = {
         "trust_product_ids": pids,
-        "delinquency_bucket": parsed_delinquency,
-        "trust_marker": parsed_trust_marker,
-        "internal_status": parsed_internal_status,
+        "delinquency_buckets": parsed_buckets,
+        "trust_markers": parsed_markers,
+        "internal_statuses": parsed_statuses,
         "has_followup": parsed_has_followup,
         "asset_code": parsed_asset,
         "custody_asset_code": parsed_custody,
-        "city": parsed_city,
+        "cities": parsed_cities,
     }
     with engine.connect() as conn:
         overview = fetch_overdue_overview(
             conn,
             pids,
-            delinquency_bucket=parsed_delinquency,
-            trust_marker=parsed_trust_marker,
-            internal_status=parsed_internal_status,
+            delinquency_buckets=parsed_buckets,
+            trust_markers=parsed_markers,
+            internal_statuses=parsed_statuses,
             has_followup=parsed_has_followup,
             asset_code=parsed_asset,
             custody_asset_code=parsed_custody,
-            city=parsed_city,
+            cities=parsed_cities,
         )
         recon_data = fetch_reconciliation(conn, pids)
-        followups = fetch_overdue_followups(pids)
         products = fetch_trust_products(conn)
+
+    followups = fetch_portfolio_followup_cases(overview)
+    overview["active_followup_count"] = len(followups)
 
     html = render_overdue_html(
         overview,
@@ -4204,6 +4779,8 @@ def overdue_dashboard(
         filters=filters,
         products=products,
         code_mismatch_alerts=recon_data.get("code_mismatch_alerts") or [],
+        focus_asset=parsed_focus,
+        portfolio_tab=parsed_portfolio_tab,
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
@@ -4235,62 +4812,85 @@ def overdue_workbench_page(
     asset_code: str | None = None,
     custody_asset_code: str | None = None,
     delinquency_bucket: str | None = None,
+    delinquency_buckets: list[str] | None = Query(default=None),
     data_date: str | None = None,
     list_product_id: str | None = None,
+    list_product_ids: list[str] | None = Query(default=None),
     trust_asset_id: str | None = None,
     new_followup: str | None = None,
+    new_followup_case: str | None = None,
     followup_expanded: str | None = None,
     followup_entry_id: str | None = None,
+    followup_case_id: str | None = None,
     trust_marker: str | None = None,
+    trust_markers: list[str] | None = Query(default=None),
     followup_status: str | None = None,
+    followup_statuses: list[str] | None = Query(default=None),
+    city: str | None = None,
+    cities: list[str] | None = Query(default=None),
 ):
     from app.html.render import render_overdue_workbench_html
-    from app.service.overdue_workbench import (
-        DEFAULT_DELINQUENCY_BUCKET,
-        build_overdue_workbench_service,
-    )
+    from app.service.overdue_workbench import build_overdue_workbench_service
 
     svc = build_overdue_workbench_service(engine)
     pid = query_utils.parse_optional_int(trust_product_id)
     aid = query_utils.parse_optional_int(trust_asset_id)
     list_pid = query_utils.parse_optional_int(list_product_id)
+    parsed_list_ids = query_utils.parse_trust_product_ids(list_product_id, list_product_ids)
     ac = query_utils.clean_optional_str(asset_code)
     custody = query_utils.clean_optional_str(custody_asset_code)
-    bucket = query_utils.clean_optional_str(delinquency_bucket) or DEFAULT_DELINQUENCY_BUCKET
-    list_scope_explicit = list_product_id is not None
+    # 与资产组合管理一致：未显式传等级时默认全部（不限 M2+）
+    parsed_buckets = query_utils.parse_optional_str_list(
+        delinquency_bucket, delinquency_buckets
+    )
+    parsed_markers = query_utils.parse_optional_str_list(trust_marker, trust_markers)
+    parsed_statuses = query_utils.parse_optional_str_list(
+        followup_status, followup_statuses
+    )
+    parsed_cities = query_utils.parse_optional_str_list(city, cities)
+    list_scope_explicit = list_product_id is not None or list_product_ids is not None
     parsed_date = query_utils.parse_optional_date(data_date)
 
     if custody and not ac and pid is not None:
         resolved_ac = svc.resolve_asset_code(pid, custody, parsed_date)
         if resolved_ac:
-            from urllib.parse import urlencode
-
-            redirect_params: dict[str, str] = {
-                "trust_product_id": str(pid),
-                "asset_code": resolved_ac,
-                "delinquency_bucket": bucket,
-            }
+            redirect_pairs: list[tuple[str, str]] = [
+                ("trust_product_id", str(pid)),
+                ("asset_code", resolved_ac),
+            ]
+            if parsed_buckets:
+                for b in parsed_buckets:
+                    redirect_pairs.append(("delinquency_buckets", b))
+            elif delinquency_bucket is not None or delinquency_buckets is not None:
+                redirect_pairs.append(("delinquency_bucket", ""))
             if parsed_date:
-                redirect_params["data_date"] = parsed_date
+                redirect_pairs.append(("data_date", parsed_date))
             if aid is not None:
-                redirect_params["trust_asset_id"] = str(aid)
+                redirect_pairs.append(("trust_asset_id", str(aid)))
             if list_scope_explicit:
-                redirect_params["list_product_id"] = "" if list_pid is None else str(list_pid)
-            if query_utils.clean_optional_str(trust_marker):
-                redirect_params["trust_marker"] = query_utils.clean_optional_str(trust_marker) or ""
-            if query_utils.clean_optional_str(followup_status):
-                redirect_params["followup_status"] = (
-                    query_utils.clean_optional_str(followup_status) or ""
+                redirect_pairs.append(
+                    ("list_product_id", "" if list_pid is None else str(list_pid))
                 )
+            for m in parsed_markers or []:
+                redirect_pairs.append(("trust_markers", m))
+            for s in parsed_statuses or []:
+                redirect_pairs.append(("followup_statuses", s))
+            for c in parsed_cities or []:
+                redirect_pairs.append(("cities", c))
             if query_utils.parse_optional_int(new_followup):
-                redirect_params["new_followup"] = "1"
+                redirect_pairs.append(("new_followup", "1"))
+            if query_utils.parse_optional_int(new_followup_case):
+                redirect_pairs.append(("new_followup_case", "1"))
             if query_utils.parse_optional_int(followup_expanded):
-                redirect_params["followup_expanded"] = "1"
+                redirect_pairs.append(("followup_expanded", "1"))
             parsed_entry_id = query_utils.parse_optional_int(followup_entry_id)
             if parsed_entry_id:
-                redirect_params["followup_entry_id"] = str(parsed_entry_id)
+                redirect_pairs.append(("followup_entry_id", str(parsed_entry_id)))
+            parsed_case_id = query_utils.parse_optional_int(followup_case_id)
+            if parsed_case_id:
+                redirect_pairs.append(("followup_case_id", str(parsed_case_id)))
             return RedirectResponse(
-                url=f"/overdue/workbench?{urlencode(redirect_params)}",
+                url=f"/overdue/workbench?{urlencode(redirect_pairs)}",
                 status_code=302,
             )
 
@@ -4298,22 +4898,34 @@ def overdue_workbench_page(
         trust_product_id=pid,
         asset_code=ac,
         custody_asset_code=custody if ac else None,
-        delinquency_bucket=bucket,
+        delinquency_bucket=None,
+        delinquency_buckets=parsed_buckets,
         data_date=parsed_date,
         list_product_id=list_pid,
+        list_product_ids=parsed_list_ids,
         list_product_scope_explicit=list_scope_explicit,
         trust_asset_id=aid,
-        trust_marker=query_utils.clean_optional_str(trust_marker),
-        followup_status=query_utils.clean_optional_str(followup_status),
+        trust_markers=parsed_markers,
+        followup_statuses=parsed_statuses,
+        cities=parsed_cities,
     )
     with engine.connect() as conn:
         dto["products"] = fetch_trust_products(conn)
+        city_scope = parsed_list_ids
+        if city_scope is None and not list_scope_explicit and pid is not None:
+            city_scope = [pid]
+        dto["issuance_city_options"] = fetch_overdue_issuance_cities(conn, city_scope)
 
     html = render_overdue_workbench_html(
         dto,
         new_followup=bool(query_utils.parse_optional_int(new_followup)),
-        followup_expanded=bool(query_utils.parse_optional_int(followup_expanded)),
+        new_followup_case=bool(query_utils.parse_optional_int(new_followup_case)),
+        followup_expanded=bool(
+            query_utils.parse_optional_int(followup_expanded)
+            or query_utils.parse_optional_int(new_followup_case)
+        ),
         followup_entry_id=query_utils.parse_optional_int(followup_entry_id),
+        followup_case_id=query_utils.parse_optional_int(followup_case_id),
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 

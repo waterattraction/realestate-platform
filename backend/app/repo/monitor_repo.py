@@ -4,8 +4,7 @@ from sqlalchemy.engine import Engine
 from app.overdue.buckets import (
     OVERDUE_ASSET_MIN_DAYS,
     RECONCILIATION_TOLERANCE_DEFAULT,
-    matches_delinquency_bucket_filter,
-    sql_agg_delinquency_filter,
+    sql_agg_delinquency_filter_any,
 )
 from app.repo._serialize import row_to_dict, rows_to_dicts
 
@@ -259,43 +258,50 @@ class MonitorRepo:
 
     def fetch_asset_queue(
         self,
-        trust_product_id: int | None,
-        data_date: str,
+        trust_product_id: int | None = None,
+        data_date: str = "",
         limit: int = 100,
         trust_marker: str | None = None,
+        trust_markers: list[str] | None = None,
         followup_status: str | None = None,
-        delinquency_bucket: str = "M2_PLUS",
+        followup_statuses: list[str] | None = None,
+        delinquency_bucket: str | None = None,
+        delinquency_buckets: list[str] | None = None,
+        trust_product_ids: list[int] | None = None,
     ) -> list[dict]:
         """Return one row per asset_code for the workbench left-column list."""
-        pid_clause = (
-            "AND m.trust_product_id = :trust_product_id"
-            if trust_product_id is not None
-            else ""
+        from app import query_utils
+
+        # trust_product_ids 优先；兼容旧单参 trust_product_id
+        ids = trust_product_ids
+        if ids is None and trust_product_id is not None:
+            ids = [trust_product_id]
+        pid_sql, pid_params = query_utils.sql_in_int_column(
+            "m.trust_product_id", ids, param_prefix="qpid"
+        )
+        markers = trust_markers
+        if markers is None and trust_marker:
+            markers = [trust_marker]
+        marker_sql, marker_params = query_utils.sql_in_str_column(
+            "tm.trust_marker", markers, param_prefix="qmarker"
         )
         marker_clause = (
-            """AND EXISTS (
+            f"""AND EXISTS (
                 SELECT 1 FROM trust_asset_trust_marks tm
                 WHERE tm.trust_product_id = m.trust_product_id
                   AND tm.asset_code = m.asset_code
-                  AND tm.data_date = :data_date
-                  AND tm.trust_marker = :trust_marker
+                  {marker_sql}
             )"""
-            if trust_marker
+            if markers
             else ""
         )
-        status_clause = (
-            """AND EXISTS (
-                SELECT 1 FROM trust_asset_trust_marks tm2
-                WHERE tm2.trust_product_id = m.trust_product_id
-                  AND tm2.asset_code = m.asset_code
-                  AND tm2.data_date = :data_date
-                  AND tm2.internal_status = :followup_status
-            )"""
-            if followup_status
-            else ""
-        )
-        having_clause = sql_agg_delinquency_filter(
-            delinquency_bucket or "M2_PLUS",
+        # followup_status(es) 含「待跟进(N)」派生值，SQL 精确匹配不够，由 get_asset_list 后置过滤
+        _ = (followup_status, followup_statuses)
+        buckets = delinquency_buckets
+        if buckets is None and delinquency_bucket:
+            buckets = [delinquency_bucket]
+        having_clause = sql_agg_delinquency_filter_any(
+            buckets,
             "MAX(m.overdue_days)",
             "SUM(m.remaining_amount)",
             tolerance_param=":tolerance",
@@ -304,13 +310,9 @@ class MonitorRepo:
             "data_date": data_date,
             "tolerance": RECONCILIATION_TOLERANCE_DEFAULT,
             "limit": limit,
+            **pid_params,
+            **marker_params,
         }
-        if trust_product_id is not None:
-            params["trust_product_id"] = trust_product_id
-        if trust_marker:
-            params["trust_marker"] = trust_marker
-        if followup_status:
-            params["followup_status"] = followup_status
         with self._engine.connect() as conn:
             rows = conn.execute(
                 text(
@@ -330,9 +332,8 @@ class MonitorRepo:
                     INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
                     INNER JOIN trust_products tp ON tp.id = m.trust_product_id
                     WHERE m.data_date = :data_date
-                      {pid_clause}
+                      {pid_sql}
                       {marker_clause}
-                      {status_clause}
                     GROUP BY m.asset_code, m.trust_product_id, tp.name
                     HAVING {having_clause}
                     ORDER BY MAX(m.overdue_days) DESC

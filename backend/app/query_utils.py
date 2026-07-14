@@ -63,6 +63,25 @@ def parse_trust_product_ids(
     return ordered
 
 
+def parse_optional_str_list(
+    single=None,
+    multi: list | None = None,
+) -> list[str] | None:
+    """解析多值字符串筛选：None 表示全部；非空 list 表示限定。兼容单值参数。"""
+    values: list[str] = []
+    seen: set[str] = set()
+    if multi:
+        for value in multi:
+            text = clean_optional_str(value)
+            if text and text not in seen:
+                seen.add(text)
+                values.append(text)
+    text = clean_optional_str(single)
+    if text and text not in seen:
+        values.append(text)
+    return values or None
+
+
 def sql_in_int_column(
     column: str,
     ids: list[int] | None,
@@ -80,6 +99,27 @@ def sql_in_int_column(
     for index, pid in enumerate(ids):
         key = f"{param_prefix}_{index}"
         params[key] = pid
+        placeholders.append(f":{key}")
+    return (f" AND {column} IN ({', '.join(placeholders)})", params)
+
+
+def sql_in_str_column(
+    column: str,
+    values: list[str] | None,
+    *,
+    param_prefix: str = "sval",
+) -> tuple[str, dict]:
+    """返回 SQL 片段（含前导 AND）与 bind 参数；values 为 None 时不加条件。"""
+    if values is None:
+        return ("", {})
+    if len(values) == 1:
+        key = f"{param_prefix}_0"
+        return (f" AND {column} = :{key}", {key: values[0]})
+    params: dict = {}
+    placeholders: list[str] = []
+    for index, value in enumerate(values):
+        key = f"{param_prefix}_{index}"
+        params[key] = value
         placeholders.append(f":{key}")
     return (f" AND {column} IN ({', '.join(placeholders)})", params)
 

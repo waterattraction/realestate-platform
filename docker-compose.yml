@@ -4,9 +4,11 @@ services:
     container_name: realestate-postgres
     restart: unless-stopped
     environment:
+      TZ: Asia/Shanghai
       POSTGRES_DB: realestate
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: ChangeThisPassword123!
+      PGTZ: Asia/Shanghai
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -19,6 +21,7 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     environment:
+      TZ: Asia/Shanghai
       DATABASE_URL: postgresql://admin:ChangeThisPassword123!@postgres:5432/realestate 
       ASSETINFO_REPO_ROOT: /data/repo
       ASSET_UPLOAD_DIR: /data/uploads

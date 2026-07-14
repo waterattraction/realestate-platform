@@ -83,7 +83,7 @@ MONITOR_EXPORT_LABELS: dict[str, str] = {
     "custody_asset_code": "托管房源号",
     "source_asset_code": "资产信托号",
     "data_date": "数据日期",
-    "overdue_days": "逾期天数",
+    "overdue_days": "未付天数",
     "initial_transfer_amount": "初始受让金额",
     "repaid_amount": "已还款金额",
     "remaining_amount": "剩余还款金额",
@@ -1670,7 +1670,7 @@ def recompute_monitor_payment_fields(
         params,
     )
     for r in missing_rows:
-        warnings.append(f"{r.asset_code}: 无还款明细且无发行日，无法计算逾期天数")
+        warnings.append(f"{r.asset_code}: 无还款明细且无发行日，无法计算未付天数")
 
     conn.execute(
         text("""

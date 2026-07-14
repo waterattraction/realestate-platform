@@ -1,7 +1,12 @@
 """Overdue workbench HTML — dumb render from get_detail() DTO only."""
 
+import re
+from datetime import date, datetime, timezone
 from html import escape
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
+from zoneinfo import ZoneInfo
+
+_DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 
 from app.field_labels import (
     ASSET_CODE_LABEL,
@@ -16,12 +21,15 @@ from app.html.formatters import (
 )
 from app.issuance_labels import format_rate, migration_type_label
 from app.overdue.ui_constants import (
+    FOLLOWUP_CASE_CATEGORIES,
     FOLLOWUP_STATUS_LABELS,
+    INTERNAL_STATUS_DEFAULT,
     INTERNAL_STATUS_OPTIONS,
+    TRUST_MARKER_DEFAULT,
     TRUST_MARKER_OPTIONS,
+    TRUST_MARKER_VISUAL,
 )
 from app.service.checks_service import RECONCILIATION_BASIS_LABEL
-from app.service.overdue_workbench import DEFAULT_DELINQUENCY_BUCKET
 from app.ui_css import (
     BTN_CSS,
     PAGE_CHROME_CSS,
@@ -35,29 +43,84 @@ _REPAYMENT_PREVIEW = 3
 _PANEL_PREVIEW_ROWS = 3
 
 _BUCKET_FILTER_OPTIONS = [
-    ("M2_PLUS", "M2+"),
+    ("ES", "ES"),
+    ("M1", "M1"),
     ("M2", "M2"),
     ("M3", "M3"),
     ("M3_PLUS", "M3+"),
-    ("M1", "M1"),
-    ("ES", "ES"),
 ]
 
 
-def _filter_bar_product_id(dto: dict) -> int | None:
+def _filter_bar_product_ids(dto: dict) -> list[int] | None:
+    """左侧清单产品范围：None=全部；list=已选。"""
     filters = dto.get("filters") or {}
+    if "list_product_ids" in filters:
+        return filters.get("list_product_ids")
     if filters.get("list_product_scope_explicit"):
-        return filters.get("list_product_id")
-    return dto.get("trust_product_id")
+        single = filters.get("list_product_id")
+        return [int(single)] if single is not None else None
+    pid = dto.get("trust_product_id")
+    return [int(pid)] if pid is not None else None
 
 
-def _append_list_product_qs(parts: list[str], filters: dict, *, list_filter: int | None) -> None:
-    if filters.get("list_product_scope_explicit"):
-        parts.append(
-            f"list_product_id={list_filter}" if list_filter is not None else "list_product_id="
-        )
-    elif list_filter is None and filters.get("trust_product_id"):
+def _product_filter_label(products: list[dict], selected_ids: list[int] | None) -> str:
+    if not selected_ids:
+        return "全部产品"
+    name_by_id = {int(p["id"]): str(p["name"]) for p in products}
+    names = [name_by_id.get(pid, str(pid)) for pid in selected_ids]
+    if len(names) == 1:
+        return names[0]
+    return f"已选{len(names)}产品"
+
+
+def _append_list_product_qs(parts: list[str], filters: dict) -> None:
+    """写入清单产品筛选；显式「全部」用 list_product_id=。"""
+    if not filters.get("list_product_scope_explicit"):
+        return
+    ids = filters.get("list_product_ids")
+    if ids is None:
         parts.append("list_product_id=")
+        return
+    if len(ids) == 1:
+        parts.append(f"list_product_id={ids[0]}")
+        return
+    for pid in ids:
+        parts.append(f"list_product_ids={int(pid)}")
+
+
+def _filter_buckets(filters: dict) -> list[str] | None:
+    buckets = filters.get("delinquency_buckets")
+    if buckets is None and filters.get("delinquency_bucket"):
+        return [str(filters["delinquency_bucket"])]
+    return list(buckets) if buckets else None
+
+
+def _append_str_list_qs(parts: list[str], param: str, values: list[str] | None) -> None:
+    if not values:
+        return
+    for value in values:
+        parts.append(f"{param}={quote(str(value))}")
+
+
+def _append_sidebar_filter_qs(parts: list[str], filters: dict) -> None:
+    buckets = _filter_buckets(filters)
+    if buckets:
+        _append_str_list_qs(parts, "delinquency_buckets", buckets)
+    else:
+        # 显式「全部等级」
+        parts.append("delinquency_bucket=")
+    markers = filters.get("trust_markers") or (
+        [filters["trust_marker"]] if filters.get("trust_marker") else None
+    )
+    statuses = filters.get("followup_statuses") or (
+        [filters["followup_status"]] if filters.get("followup_status") else None
+    )
+    cities = filters.get("cities") or (
+        [filters["city"]] if filters.get("city") else None
+    )
+    _append_str_list_qs(parts, "trust_markers", markers)
+    _append_str_list_qs(parts, "followup_statuses", statuses)
+    _append_str_list_qs(parts, "cities", cities)
 
 
 def _asset_list_item_href(
@@ -66,22 +129,59 @@ def _asset_list_item_href(
     filters: dict,
     bucket: str,
     data_date: str | None,
-    list_filter: int | None,
 ) -> str:
+    del bucket  # 等级以 filters 多选为准
     ac = item.get("asset_code") or ""
     pid = item.get("trust_product_id")
     parts = [f"trust_product_id={pid}", f"asset_code={quote(str(ac))}"]
-    if bucket:
-        parts.append(f"delinquency_bucket={quote(str(bucket))}")
+    _append_sidebar_filter_qs(parts, filters)
     if data_date:
         parts.append(f"data_date={quote(str(data_date))}")
-    if list_filter is None and pid is not None:
-        parts.append("list_product_id=")
-    elif filters.get("list_product_scope_explicit"):
-        parts.append(
-            f"list_product_id={list_filter}" if list_filter is not None else "list_product_id="
-        )
+    _append_list_product_qs(parts, filters)
     return f"/overdue/workbench?{'&'.join(parts)}"
+
+
+def _portfolio_href_from_workbench(dto: dict) -> str:
+    """返回组合管理：按当前工作台筛选 + 当前资产现算（不使用 return_to）。"""
+    filters = dto.get("filters") or {}
+    asset = dto.get("asset") or {}
+    summary = asset.get("summary") or {}
+    pairs: list[tuple[str, str]] = []
+
+    product_ids = filters.get("list_product_ids")
+    if product_ids:
+        for pid in product_ids:
+            pairs.append(("trust_product_ids", str(int(pid))))
+
+    for b in filters.get("delinquency_buckets") or (
+        [filters["delinquency_bucket"]] if filters.get("delinquency_bucket") else []
+    ):
+        pairs.append(("delinquency_buckets", str(b)))
+
+    for m in filters.get("trust_markers") or (
+        [filters["trust_marker"]] if filters.get("trust_marker") else []
+    ):
+        pairs.append(("trust_markers", str(m)))
+
+    for s in filters.get("followup_statuses") or (
+        [filters["followup_status"]] if filters.get("followup_status") else []
+    ):
+        pairs.append(("internal_statuses", str(s)))
+
+    for c in filters.get("cities") or (
+        [filters["city"]] if filters.get("city") else []
+    ):
+        pairs.append(("cities", str(c)))
+
+    asset_code = dto.get("asset_code")
+    asset_bucket = summary.get("delinquency_bucket")
+    if asset_bucket:
+        pairs.append(("portfolio_tab", str(asset_bucket)))
+    if asset_code:
+        pairs.append(("focus_asset", str(asset_code)))
+
+    qs = urlencode(pairs)
+    return f"/overdue?{qs}" if qs else "/overdue"
 
 
 def _is_selected_asset_item(
@@ -103,8 +203,10 @@ def render_overdue_workbench_html(
     dto: dict,
     *,
     new_followup: bool = False,
+    new_followup_case: bool = False,
     followup_expanded: bool = False,
     followup_entry_id: int | None = None,
+    followup_case_id: int | None = None,
 ) -> str:
     if dto.get("legacy_error"):
         return _render_legacy_error_page(dto)
@@ -112,7 +214,8 @@ def render_overdue_workbench_html(
     trust_product_id = dto.get("trust_product_id")
     current_asset_code = dto.get("asset_code")
     filters = dto.get("filters") or {}
-    delinquency_bucket = filters.get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
+    buckets = _filter_buckets(filters)
+    delinquency_bucket = buckets[0] if buckets else ""
     asset = dto.get("asset") or {}
     selected_trust_asset_id = asset.get("selected_trust_asset_id")
 
@@ -123,14 +226,13 @@ def render_overdue_workbench_html(
         ac = asset_code if asset_code is not None else current_asset_code
         if ac:
             parts.append(f"asset_code={quote(str(ac))}")
-        if delinquency_bucket:
-            parts.append(f"delinquency_bucket={quote(str(delinquency_bucket))}")
+        _append_sidebar_filter_qs(parts, filters)
         if dto.get("data_date"):
             parts.append(f"data_date={quote(str(dto['data_date']))}")
         tid = trust_asset_id if trust_asset_id is not None else selected_trust_asset_id
         if tid is not None:
             parts.append(f"trust_asset_id={tid}")
-        _append_list_product_qs(parts, filters, list_filter=_filter_bar_product_id(dto))
+        _append_list_product_qs(parts, filters)
         return "?" + "&".join(parts) if parts else ""
 
     product_hidden = (
@@ -145,13 +247,17 @@ def render_overdue_workbench_html(
     )
     bucket_hidden = (
         f'<input type="hidden" name="delinquency_bucket" value="{escape(delinquency_bucket)}">'
+        if delinquency_bucket
+        else ""
     )
 
     sidebar_html = _render_sidebar(dto, trust_product_id, current_asset_code, workbench_qs)
     detail_html = _render_panels(dto, asset, workbench_qs)
     json_qs = workbench_qs()
     identity_id = dto.get("identity_id")
-    header_actions = _render_header_actions(trust_product_id, json_qs, identity_id)
+    header_actions = _render_header_actions(
+        trust_product_id, json_qs, identity_id, dto=dto
+    )
     selection_notice = _render_selection_notice(dto.get("selection_notice"))
     data_date_display = escape(str(dto.get("data_date") or ""))
     data_date_span = (
@@ -159,12 +265,45 @@ def render_overdue_workbench_html(
         if data_date_display else ""
     )
     write_bar = ""
-    initial_followup_pane = "followup-pane-new"
     followup_entries_for_pane = asset.get("followup_entries") or []
+    followup_cases_for_pane = asset.get("followup_cases") or []
+    initial_followup_pane = ""
     if followup_entry_id and any(
         int(e["id"]) == followup_entry_id for e in followup_entries_for_pane
     ):
         initial_followup_pane = f"followup-pane-entry-{followup_entry_id}"
+    elif new_followup_case:
+        initial_followup_pane = "followup-pane-new"
+    elif new_followup and followup_cases_for_pane:
+        # 组合页「+」：打开当前事项的新建跟进记录
+        initial_followup_pane = (
+            f"followup-pane-new-{int(followup_cases_for_pane[0]['id'])}"
+        )
+    elif followup_case_id and not new_followup:
+        # 指定事项：优先最近一条记录，否则新建记录页
+        case_entries = [
+            e
+            for e in followup_entries_for_pane
+            if int(e.get("case_id") or 0) == int(followup_case_id)
+        ]
+        if case_entries:
+            initial_followup_pane = f"followup-pane-entry-{int(case_entries[0]['id'])}"
+        else:
+            initial_followup_pane = f"followup-pane-new-{int(followup_case_id)}"
+    elif followup_entries_for_pane and not new_followup:
+        # 组合页状态灯：查看最近一条跟进记录
+        latest = max(
+            followup_entries_for_pane,
+            key=lambda e: (str(e.get("created_at") or ""), int(e.get("id") or 0)),
+        )
+        initial_followup_pane = f"followup-pane-entry-{int(latest['id'])}"
+    elif followup_cases_for_pane and not new_followup:
+        initial_followup_pane = (
+            f"followup-pane-new-{int(followup_cases_for_pane[0]['id'])}"
+        )
+    force_new_case = bool(new_followup_case) or (
+        bool(new_followup) and not followup_cases_for_pane
+    )
     if asset.get("selected_split") or asset.get("monitor", {}).get("splits"):
         write_bar = _panel_followup_write(
             product_hidden,
@@ -172,11 +311,13 @@ def render_overdue_workbench_html(
             bucket_hidden,
             workbench_qs,
             dto,
-            followup_expanded=new_followup or followup_expanded,
-            initial_pane=initial_followup_pane,
+            followup_expanded=new_followup or new_followup_case or followup_expanded,
+            initial_pane=initial_followup_pane or "followup-pane-new",
+            selected_case_id=followup_case_id,
+            force_new_case=force_new_case,
         )
 
-    scroll_flag = "1" if (new_followup or followup_expanded) else "0"
+    scroll_flag = "1" if (new_followup or new_followup_case or followup_expanded) else "0"
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -253,95 +394,193 @@ def _render_legacy_error_page(dto: dict) -> str:
 </html>"""
 
 
+_SIDEBAR_COUNT_UNITS = {
+    "trust-product": "产品",
+    "delinquency-bucket": "等级",
+    "trust-marker": "标记",
+    "internal-status": "状态",
+    "city": "城市",
+}
+
+
+def _sidebar_ms_trigger_label(
+    selected: list[str] | None,
+    *,
+    all_label: str,
+    label_map: dict[str, str] | None = None,
+    unit: str = "项",
+) -> str:
+    if not selected:
+        return all_label
+    labels = [(label_map or {}).get(v, v) for v in selected]
+    if len(labels) == 1:
+        return labels[0]
+    return f"已选{len(labels)}{unit}"
+
+
+def _render_sidebar_str_multiselect(
+    *,
+    key: str,
+    param_name: str,
+    title: str,
+    options: list[tuple[str, str]],
+    selected: list[str] | None,
+    all_label: str,
+) -> str:
+    all_mode = selected is None
+    trigger = escape(
+        _sidebar_ms_trigger_label(
+            selected,
+            all_label=all_label,
+            label_map=dict(options),
+            unit=_SIDEBAR_COUNT_UNITS.get(key, "项"),
+        )
+    )
+    opts_html = (
+        f'<label class="multiselect-option multiselect-all">'
+        f'<input type="checkbox" class="ms-all"{" checked" if all_mode else ""}> 全部</label>'
+    )
+    selected_set = set(selected or [])
+    for value, text in options:
+        checked = (not all_mode) and value in selected_set
+        opts_html += (
+            f'<label class="multiselect-option">'
+            f'<input type="checkbox" class="ms-option" name="{escape(param_name)}" '
+            f'value="{escape(value)}"{" checked" if checked else ""}> '
+            f"{escape(text)}</label>"
+        )
+    return (
+        f'<span class="sf-item sf-multiselect" data-multiselect="{escape(key)}" title="{escape(title)}">'
+        f'<button type="button" class="sf-display sf-multiselect-trigger" '
+        f'aria-haspopup="listbox">{trigger}</button>'
+        f'<div class="sf-multiselect-panel" role="listbox" hidden>{opts_html}</div>'
+        f"</span>"
+    )
+
+
+def _render_sidebar_product_multiselect(
+    products: list[dict], selected_ids: list[int] | None
+) -> str:
+    """工作台侧栏产品多选（与资产组合同交互）。"""
+    all_mode = selected_ids is None
+    trigger = escape(_product_filter_label(products, selected_ids))
+    options = (
+        f'<label class="multiselect-option multiselect-all">'
+        f'<input type="checkbox" class="ms-all tp-all"{" checked" if all_mode else ""}> 全部</label>'
+    )
+    for product in products:
+        pid = int(product["id"])
+        checked = (not all_mode) and selected_ids is not None and pid in selected_ids
+        options += (
+            f'<label class="multiselect-option">'
+            f'<input type="checkbox" class="ms-option tp-product" name="list_product_ids" '
+            f'value="{pid}"{" checked" if checked else ""}> '
+            f'{escape(str(product["name"]))}</label>'
+        )
+    return (
+        f'<span class="sf-item sf-multiselect" data-multiselect="trust-product" title="选择信托产品">'
+        f'<button type="button" class="sf-display sf-multiselect-trigger" '
+        f'aria-haspopup="listbox">{trigger}</button>'
+        f'<div class="sf-multiselect-panel" role="listbox" hidden>{options}</div>'
+        f"</span>"
+    )
+
+
 def _render_sidebar_filter(dto: dict) -> str:
     """Compact inline-edit filter row rendered inside the sidebar below the panel-hd."""
     filters = dto.get("filters") or {}
-    active_bucket = filters.get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
-    active_marker = filters.get("trust_marker") or ""
-    active_status = filters.get("followup_status") or ""
-    filter_pid = _filter_bar_product_id(dto)
+    selected_ids = _filter_bar_product_ids(dto)
     data_date = dto.get("data_date") or ""
     products = dto.get("products") or []
     current_asset = dto.get("asset_code")
     detail_pid = dto.get("trust_product_id")
+    city_options = dto.get("issuance_city_options") or []
 
-    # Display labels
-    product_name = next((p["name"] for p in products if filter_pid == p["id"]), "全部产品")
-    bucket_label = dict(_BUCKET_FILTER_OPTIONS).get(active_bucket, active_bucket)
-    marker_label = active_marker or "全部标记"
-    status_label = active_status or "全部状态"
+    buckets_sel = _filter_buckets(filters)
+    markers_sel = filters.get("trust_markers") or (
+        [filters["trust_marker"]] if filters.get("trust_marker") else None
+    )
+    statuses_sel = filters.get("followup_statuses") or (
+        [filters["followup_status"]] if filters.get("followup_status") else None
+    )
+    cities_sel = filters.get("cities") or (
+        [filters["city"]] if filters.get("city") else None
+    )
 
-    # Options
-    product_opts = '<option value="">全部产品</option>'
-    for p in products:
-        sel = " selected" if filter_pid == p["id"] else ""
-        product_opts += f'<option value="{p["id"]}"{sel}>{escape(p["name"])}</option>'
+    bucket_filter = _render_sidebar_str_multiselect(
+        key="delinquency-bucket",
+        param_name="delinquency_buckets",
+        title="选择等级",
+        options=list(_BUCKET_FILTER_OPTIONS),
+        selected=buckets_sel,
+        all_label="全部等级",
+    )
+    marker_filter = _render_sidebar_str_multiselect(
+        key="trust-marker",
+        param_name="trust_markers",
+        title="选择信托标记",
+        options=[(m, m) for m in TRUST_MARKER_OPTIONS],
+        selected=markers_sel,
+        all_label="全部标记",
+    )
+    status_filter = _render_sidebar_str_multiselect(
+        key="internal-status",
+        param_name="followup_statuses",
+        title="选择内部状态",
+        options=[(s, s) for s in INTERNAL_STATUS_OPTIONS],
+        selected=statuses_sel,
+        all_label="全部状态",
+    )
+    city_filter = _render_sidebar_str_multiselect(
+        key="city",
+        param_name="cities",
+        title="选择城市",
+        options=[(c, c) for c in city_options],
+        selected=cities_sel,
+        all_label="全部城市",
+    )
 
-    bucket_opts = ""
-    for val, label in _BUCKET_FILTER_OPTIONS:
-        sel = " selected" if active_bucket == val else ""
-        bucket_opts += f'<option value="{val}"{sel}>{escape(label)}</option>'
-
-    marker_opts = '<option value="">全部标记</option>'
-    for m in TRUST_MARKER_OPTIONS:
-        sel = " selected" if active_marker == m else ""
-        marker_opts += f'<option value="{escape(m)}"{sel}>{escape(m)}</option>'
-
-    status_opts = '<option value="">全部状态</option>'
-    for s in INTERNAL_STATUS_OPTIONS:
-        sel = " selected" if active_status == s else ""
-        status_opts += f'<option value="{escape(s)}"{sel}>{escape(s)}</option>'
-
-    # Hidden fields
     detail_fields = ""
     if current_asset and detail_pid is not None:
         detail_fields = (
             f'<input type="hidden" name="trust_product_id" value="{detail_pid}">'
             f'<input type="hidden" name="asset_code" value="{escape(str(current_asset))}">'
         )
-    date_hidden = f'<input type="hidden" name="data_date" value="{escape(str(data_date))}">' if data_date else ""
-
-    def item(title: str, label: str, name: str, opts: str) -> str:
-        return (
-            f'<span class="sf-item" title="{title}">'
-            f'<span class="sf-display">{escape(label)}</span>'
-            f'<select class="sf-select" name="{name}">{opts}</select>'
-            f'</span>'
-        )
-
+    date_hidden = (
+        f'<input type="hidden" name="data_date" value="{escape(str(data_date))}">'
+        if data_date
+        else ""
+    )
     return (
         f'<form class="sidebar-filter" method="get" action="/overdue/workbench" id="sf-form">'
-        + item("双击修改产品", product_name, "list_product_id", product_opts)
+        + _render_sidebar_product_multiselect(products, selected_ids)
         + '<span class="sf-sep">·</span>'
-        + item("双击修改M级", bucket_label, "delinquency_bucket", bucket_opts)
+        + bucket_filter
         + '<span class="sf-sep">·</span>'
-        + item("双击修改信托标记", marker_label, "trust_marker", marker_opts)
+        + marker_filter
         + '<span class="sf-sep">·</span>'
-        + item("双击修改跟进状态", status_label, "followup_status", status_opts)
-        + date_hidden + detail_fields
-        + '</form>'
+        + status_filter
+        + '<span class="sf-sep">·</span>'
+        + city_filter
+        + date_hidden
+        + detail_fields
+        + "</form>"
     )
 
 
 def _render_filter_bar(dto: dict, workbench_qs) -> str:
+    del workbench_qs
     filters = dto.get("filters") or {}
-    active_bucket = filters.get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
-    filter_pid = _filter_bar_product_id(dto)
+    active_buckets = set(_filter_buckets(filters) or [])
+    selected_ids = _filter_bar_product_ids(dto)
     data_date = dto.get("data_date") or ""
     products = dto.get("products") or []
     current_asset = dto.get("asset_code")
     detail_pid = dto.get("trust_product_id")
 
-    product_opts = '<option value="">全部信托产品</option>'
-    for p in products:
-        sel = " selected" if filter_pid == p["id"] else ""
-        product_opts += (
-            f'<option value="{p["id"]}"{sel}>{escape(p["name"])}</option>'
-        )
-
-    bucket_opts = ""
+    bucket_opts = '<option value="">全部等级</option>'
     for val, label in _BUCKET_FILTER_OPTIONS:
-        sel = " selected" if active_bucket == val else ""
+        sel = " selected" if val in active_buckets and len(active_buckets) == 1 else ""
         bucket_opts += f'<option value="{val}"{sel}>{escape(label)}</option>'
 
     detail_fields = ""
@@ -355,10 +594,8 @@ def _render_filter_bar(dto: dict, workbench_qs) -> str:
     if data_date:
         date_hidden = f'<input type="hidden" name="data_date" value="{escape(str(data_date))}">'
 
-    return f"""<form class="filter-form workbench-filter" method="get" action="/overdue/workbench">
-        <label>信托产品
-            <select name="list_product_id">{product_opts}</select>
-        </label>
+    return f"""<form class="filter-form workbench-filter" method="get" action="/overdue/workbench" id="wb-filter-form">
+        {_render_sidebar_product_multiselect(products, selected_ids)}
         <label>M 级
             <select name="delinquency_bucket">{bucket_opts}</select>
         </label>
@@ -384,10 +621,11 @@ def _render_header_actions(
     trust_product_id: int | None,
     json_qs: str,
     identity_id: int | None = None,
+    *,
+    dto: dict | None = None,
 ) -> str:
-    back_href = "/overdue"
-    if trust_product_id is not None:
-        back_href = f"/overdue?trust_product_id={trust_product_id}"
+    _ = trust_product_id
+    back_href = _portfolio_href_from_workbench(dto or {})
     extra_links = f'<a class="header-tool-link" href="/overdue/workbench/detail{json_qs}">JSON</a>'
     if identity_id:
         extra_links += (
@@ -397,7 +635,7 @@ def _render_header_actions(
     return f"""<div class="header-actions">
         <div class="header-tool-links">{extra_links}</div>
         <div class="header-action-btns">
-            <a class="btn btn-ghost" href="{back_href}">返回列表</a>
+            <a class="btn btn-ghost" href="{escape(back_href)}">返回列表</a>
             <button type="button" class="btn btn-ghost" onclick="location.reload()">刷新数据</button>
         </div>
     </div>"""
@@ -409,7 +647,7 @@ def _overdue_label(summary: dict) -> str:
     if bucket == "ES":
         return "提前结清"
     if od is not None:
-        return f"逾期 {od} 天"
+        return f"未付 {od} 天"
     return "—"
 
 
@@ -419,13 +657,47 @@ def _fmt_source_asset_code(value) -> str:
     return str(value)
 
 
-def _fmt_date_only(value) -> str:
+def _parse_dt_to_beijing(value) -> datetime | None:
+    """将 DB/序列化时间统一转到北京时间（Asia/Shanghai）。"""
     if value is None:
-        return "—"
-    text = str(value).strip()
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text or text == "—":
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        # timestamptz 经驱动通常带时区；无时区按 UTC（与当前 PG/容器一致）解释
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_DISPLAY_TZ)
+
+
+def _fmt_date_only(value) -> str:
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value.isoformat()
+    dt = _parse_dt_to_beijing(value)
+    if dt is not None:
+        return dt.strftime("%Y-%m-%d")
+    text = str(value or "").strip()
     if not text or text == "—":
         return "—"
     return text[:10]
+
+
+def _fmt_beijing_datetime(value) -> str:
+    """展示用时间：北京时间 YYYY-MM-DD HH:MM。"""
+    dt = _parse_dt_to_beijing(value)
+    if dt is not None:
+        return dt.strftime("%Y-%m-%d %H:%M")
+    text = str(value or "").strip()
+    if not text or text == "—":
+        return "—"
+    return text[:16].replace("T", " ")
 
 
 def _summary_tip_body(*lines: str) -> str:
@@ -448,39 +720,6 @@ def _summary_sep() -> str:
     return '<span class="summary-sep" aria-hidden="true">·</span>'
 
 
-def _sum_withholding_total(issuance_records: list) -> float | None:
-    total = 0.0
-    found = False
-    for rec in issuance_records:
-        amt = rec.get("total_rent_withholding_amount")
-        if amt is not None:
-            total += float(amt)
-            found = True
-    return total if found else None
-
-
-def _sum_contract_total(issuance_records: list) -> float | None:
-    total = 0.0
-    found = False
-    for rec in issuance_records:
-        amt = rec.get("receivable_contract_amount")
-        if amt is not None:
-            total += float(amt)
-            found = True
-    return total if found else None
-
-
-def _resolve_withholding_amount(issuance_records: list) -> tuple[float | None, str]:
-    """Return (amount, source) where source is withholding | contract | none."""
-    withholding = _sum_withholding_total(issuance_records)
-    if withholding is not None:
-        return withholding, "withholding"
-    contract = _sum_contract_total(issuance_records)
-    if contract is not None:
-        return contract, "contract"
-    return None, "none"
-
-
 def _render_editable_mark_chip(
     display_text: str,
     field: str,
@@ -500,6 +739,88 @@ def _render_editable_mark_chip(
     return _summary_chip(inner, tip_lines, extra_class="summary-chip-editable")
 
 
+def _render_summary_trust_marker(pid, ac_raw, data_date, marker: str) -> str:
+    """资产组合同款：色点徽章 + 点击改选。"""
+    current = marker if marker in TRUST_MARKER_OPTIONS else TRUST_MARKER_DEFAULT
+    if marker == "未标记":
+        current = TRUST_MARKER_DEFAULT
+    tone, short = TRUST_MARKER_VISUAL.get(current, ("none", current))
+    menu_items = ""
+    for opt in TRUST_MARKER_OPTIONS:
+        opt_tone, _opt_short = TRUST_MARKER_VISUAL.get(opt, ("none", opt))
+        active = " is-active" if opt == current else ""
+        menu_items += (
+            f'<button type="button" class="trust-marker-option{active}" '
+            f'data-value="{escape(opt)}" role="option" '
+            f'aria-selected="{"true" if opt == current else "false"}">'
+            f'<span class="trust-marker-dot tone-{opt_tone}" aria-hidden="true"></span>'
+            f"<span>{escape(opt)}</span>"
+            f"</button>"
+        )
+    return f"""<span class="summary-chip summary-chip-mark">
+        <div class="trust-marker-cell" data-field="trust_marker"
+             data-trust-product-id="{pid or ''}"
+             data-asset-code="{escape(str(ac_raw or ''))}"
+             data-data-date="{escape(str(data_date or ''))}"
+             data-value="{escape(current)}">
+            <button type="button" class="trust-marker-badge tone-{tone}"
+                    title="信托标记：{escape(current)}"
+                    aria-label="信托标记：{escape(current)}，点击修改"
+                    aria-haspopup="listbox" aria-expanded="false">
+                <span class="trust-marker-dot tone-{tone}" aria-hidden="true"></span>
+                <span class="trust-marker-label">{escape(short)}</span>
+            </button>
+            <div class="trust-marker-menu" role="listbox" hidden>{menu_items}</div>
+        </div>
+    </span>"""
+
+
+def _render_summary_internal_status(status: str) -> str:
+    """资产组合同款：绿灯 / 橙计数 / 黄绿渐变「本周结算」+ 悬停 +。"""
+    status = str(status or INTERNAL_STATUS_DEFAULT)
+    problem_match = re.fullmatch(r"待跟进\((\d+)\)", status)
+    settled_match = re.fullmatch(r"本周结算\((\d+)\)", status)
+    if problem_match:
+        n = problem_match.group(1)
+        status_html = (
+            f'<button type="button" class="internal-status-link summary-status-open" '
+            f'title="待跟进({escape(n)})" aria-label="待跟进 {escape(n)} 件，打开跟进">'
+            f'<span class="status-count">{escape(n)}</span></button>'
+        )
+    elif settled_match:
+        m = settled_match.group(1)
+        status_html = (
+            f'<button type="button" class="internal-status-link summary-status-open" '
+            f'title="本周结算({escape(m)})" aria-label="本周结算 {escape(m)} 件，打开跟进">'
+            f'<span class="status-count status-count--settled">{escape(m)}</span></button>'
+        )
+    elif status.startswith("待跟进"):
+        status_html = (
+            '<button type="button" class="internal-status-link summary-status-open" '
+            'title="待跟进" aria-label="待跟进，打开跟进">'
+            '<span class="status-count">·</span></button>'
+        )
+    elif status.startswith("本周结算"):
+        status_html = (
+            '<button type="button" class="internal-status-link summary-status-open" '
+            'title="本周结算" aria-label="本周结算，打开跟进">'
+            '<span class="status-count status-count--settled">·</span></button>'
+        )
+    else:
+        status_html = (
+            '<button type="button" class="internal-status-link summary-status-open" '
+            'title="正常" aria-label="正常，打开跟进">'
+            '<span class="status-dot" aria-hidden="true"></span></button>'
+        )
+    return f"""<span class="summary-chip summary-chip-status">
+        <div class="internal-status-cell">
+            {status_html}
+            <button type="button" class="internal-status-add summary-new-case-btn"
+                    title="新增跟进事项" aria-label="新增跟进事项">+</button>
+        </div>
+    </span>"""
+
+
 def _render_summary_card(dto: dict, asset: dict) -> str:
     """Summary Card — 4 scan lines with hover detail chips."""
     summary = asset.get("summary") or {}
@@ -507,7 +828,6 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
     trust_mark = asset.get("trust_mark") or {}
     followup_case = asset.get("followup_case") or {}
     timeline = asset.get("timeline") or []
-    issuance_records = asset.get("issuance_records") or []
     repayment = asset.get("repayment") or {}
     ops = asset.get("ops") or {}
     monitor = asset.get("monitor") or {}
@@ -538,28 +858,22 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
     ac_raw = asset_code_raw if asset_code_raw != "—" else ""
     data_date = dto.get("data_date") or ""
     data_date_str = escape(str(data_date or "—"))
-    current_marker = trust_mark.get("trust_marker") or "未标记"
-    current_internal = trust_mark.get("internal_status") or "待跟进"
-    marker_note = trust_mark.get("marker_note")
+    current_marker = trust_mark.get("trust_marker") or TRUST_MARKER_DEFAULT
+    current_internal = (
+        trust_mark.get("internal_status")
+        or summary.get("internal_status")
+        or INTERNAL_STATUS_DEFAULT
+    )
     followup_count = len([e for e in timeline if e.get("event_type") == "followup"])
     product_name = summary.get("trust_product_name") or "—"
     risk_score = summary.get("risk_score")
-
-    marker_opts = "".join(
-        f'<option value="{escape(m)}"{" selected" if m == current_marker else ""}>{escape(m)}</option>'
-        for m in TRUST_MARKER_OPTIONS
-    )
-    status_opts = "".join(
-        f'<option value="{escape(s)}"{" selected" if s == current_internal else ""}>{escape(s)}</option>'
-        for s in INTERNAL_STATUS_OPTIONS
-    )
 
     asset_tip = [
         f"{CUSTODY_ASSET_CODE_LABEL}：{custody_str}",
         f"信托产品：{product_name}",
     ]
 
-    m_tip = [f"逾期阶段：{bucket or '—'}"]
+    m_tip = [f"未付款阶段：{bucket or '—'}"]
     if risk_score is not None:
         m_tip.append(f"风险分：{risk_score}")
 
@@ -567,7 +881,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
     if bucket == "ES":
         od_tip.append("资产已提前结清")
     elif overdue_days is not None:
-        od_tip.append(f"汇总逾期：{overdue_days} 天")
+        od_tip.append(f"汇总未付：{overdue_days} 天")
         for s in splits:
             sod = s.get("overdue_days")
             if sod is not None:
@@ -575,33 +889,16 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
                     f"{s.get('custody_asset_code') or '—'}：{sod} 天"
                 )
 
-    marker_tip = ["双击可修改信托标记"]
-    if marker_note:
-        marker_tip.append(f"备注：{marker_note}")
-
-    withholding, wh_source = _resolve_withholding_amount(issuance_records)
-
-    wh_tip: list[str] = []
-    if wh_source == "withholding":
-        wh_tip.append(f"发行 {len(issuance_records)} 条 · 总代扣 {fmt_money(withholding)}")
-        for rec in issuance_records[:3]:
-            per = rec.get("calculated_rent_withholding_per_period")
-            periods = rec.get("withholding_periods_at_pooling")
-            parts: list[str] = []
-            if periods is not None:
-                parts.append(f"代扣 {periods} 期")
-            if per is not None:
-                parts.append(f"每期 {fmt_money(per)}")
-            if parts:
-                wh_tip.append(f"{rec.get('custody_asset_code') or '—'}：{' · '.join(parts)}")
-    elif wh_source == "contract":
-        wh_tip.append(f"发行总代扣缺失，暂用合同金额 {fmt_money(withholding)}")
-        for rec in issuance_records[:3]:
-            contract_amt = rec.get("receivable_contract_amount")
-            if contract_amt is not None:
-                wh_tip.append(
-                    f"{rec.get('custody_asset_code') or '—'}：合同 {fmt_money(contract_amt)}"
-                )
+    initial_tip: list[str] = [
+        f"监控初始受让 {fmt_money(initial)}",
+        f"{fmt_money(initial)} − {fmt_money(repaid)} = {fmt_money(remaining)}",
+    ]
+    for s in splits[:3]:
+        split_initial = s.get("initial_transfer_amount")
+        if split_initial is not None:
+            initial_tip.append(
+                f"{s.get('custody_asset_code') or '—'}：{fmt_money(split_initial)}"
+            )
 
     repayment_items = repayment.get("items") or []
     recent_repay = repayment.get("recent_repayment_date")
@@ -641,16 +938,6 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         bal_cls = cross_cls = ""
         bal_tip = cross_tip = []
 
-    last_at = summary.get("last_follow_up_at") or followup_case.get("last_follow_up_at")
-    last_owner = summary.get("last_follow_up_owner") or followup_case.get("owner_name")
-    status_tip = ["双击可修改跟进状态"]
-    if last_at or last_owner:
-        status_tip.append(
-            f"最近跟进：{_fmt_date_only(last_at)} · {last_owner or '—'}"
-        )
-    if followup_case.get("overdue_reason"):
-        status_tip.append(f"原因：{followup_case.get('overdue_reason')}")
-
     count_tip = [f"跟进记录 {followup_count} 条"]
     for ev in timeline:
         if ev.get("event_type") != "followup":
@@ -670,7 +957,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         sod = s.get("overdue_days")
         line4_tip.append(
             f"{s.get('custody_asset_code') or '—'} · "
-            f"逾期 {sod if sod is not None else '—'}天 · "
+            f"未付 {sod if sod is not None else '—'}天 · "
             f"{s.get('delinquency_bucket') or '—'}"
         )
     if not splits:
@@ -689,7 +976,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
     ops_detail_count = 0
     if ops.get("bucket") or ops.get("risk_level"):
         line4_tip.append(
-            f"逾期阶段 {ops.get('bucket') or '—'} · 风险 {ops.get('risk_level') or '—'}"
+            f"未付款阶段 {ops.get('bucket') or '—'} · 风险 {ops.get('risk_level') or '—'}"
         )
         ops_detail_count += 1
     if sla.get("due_date"):
@@ -719,13 +1006,13 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         f"{_summary_sep()}"
         f"{_summary_chip(od_inner, od_tip or ['—'])}"
         f"{_summary_sep()}"
-        f"{_render_editable_mark_chip(current_marker, 'trust_marker', pid, ac_raw, data_date, marker_opts, marker_tip)}"
+        f"{_render_summary_trust_marker(pid, ac_raw, data_date, current_marker)}"
     )
 
-    wh_display = fmt_money(withholding) if withholding is not None else "—"
+    initial_display = fmt_money(initial) if initial is not None else "—"
     remain_inner = f'剩余 <span class="summary-em">{fmt_money(remaining)}</span>'
     line2 = (
-        f"{_summary_chip(f'总代扣 {wh_display}', wh_tip or ['—'])}"
+        f"{_summary_chip(f'初始受让 {initial_display}', initial_tip or ['—'])}"
         f"{_summary_sep()}"
         f"{_summary_chip(f'已还 {fmt_money(repaid)}', repaid_tip)}"
         f"{_summary_sep()}"
@@ -736,7 +1023,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         bal_inner = f'<span class="{bal_cls}">{escape(bal_label)}</span>'
         cross_inner = f'<span class="{cross_cls}">{escape(cross_label)}</span>'
         line3 = (
-            f"{_render_editable_mark_chip(current_internal, 'internal_status', pid, ac_raw, data_date, status_opts, status_tip)}"
+            f"{_render_summary_internal_status(str(current_internal))}"
             f"{_summary_sep()}"
             f"{_summary_chip(f'{followup_count}条', count_tip)}"
             f"{_summary_sep()}"
@@ -746,7 +1033,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         )
     else:
         line3 = (
-            f"{_render_editable_mark_chip(current_internal, 'internal_status', pid, ac_raw, data_date, status_opts, status_tip)}"
+            f"{_render_summary_internal_status(str(current_internal))}"
             f"{_summary_sep()}"
             f"{_summary_chip(f'{followup_count}条', count_tip)}"
             f"{_summary_sep()}余额 —{_summary_sep()}还款 —"
@@ -829,18 +1116,20 @@ def _render_sidebar(
     current_asset_code: str | None,
     workbench_qs,
 ) -> str:
+    asset_list = dto.get("asset_list") or {}
     asset_list_html = _render_asset_list(
-        dto.get("asset_list") or {},
+        asset_list,
         trust_product_id,
         current_asset_code,
         dto.get("filters") or {},
     )
-    bucket = (dto.get("filters") or {}).get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
-    bucket_label = dict(_BUCKET_FILTER_OPTIONS).get(bucket, bucket)
+    list_count = len(asset_list.get("items") or [])
+    # 清单查询有上限 100：满额时显示 100+
+    list_count_label = "100+" if list_count >= 100 else str(list_count)
     sidebar_filter = _render_sidebar_filter(dto)
     return f"""
         <div class="sidebar-section">
-            <div class="panel-hd">资产清单 <span class="muted tiny">· {escape(str(bucket_label))}</span></div>
+            <div class="panel-hd">资产清单 <span class="muted tiny">· {list_count_label}</span></div>
             {sidebar_filter}
             <div class="queue-body compact-queue" id="asset-queue">{asset_list_html}</div>
             <script>
@@ -856,6 +1145,39 @@ def _render_sidebar(
     """
 
 
+def _render_queue_internal_status(status: str | None) -> str:
+    """清单行内状态：与组合管理同款视觉（绿灯 / 橙计数 / 黄绿「本周结算」）。"""
+    status = str(status or INTERNAL_STATUS_DEFAULT)
+    problem_match = re.fullmatch(r"待跟进\((\d+)\)", status)
+    settled_match = re.fullmatch(r"本周结算\((\d+)\)", status)
+    if problem_match:
+        n = problem_match.group(1)
+        return (
+            f'<span class="internal-status-cell queue-status" title="待跟进({escape(n)})">'
+            f'<span class="status-count">{escape(n)}</span></span>'
+        )
+    if settled_match:
+        m = settled_match.group(1)
+        return (
+            f'<span class="internal-status-cell queue-status" title="本周结算({escape(m)})">'
+            f'<span class="status-count status-count--settled">{escape(m)}</span></span>'
+        )
+    if status.startswith("待跟进"):
+        return (
+            '<span class="internal-status-cell queue-status" title="待跟进">'
+            '<span class="status-count">·</span></span>'
+        )
+    if status.startswith("本周结算"):
+        return (
+            '<span class="internal-status-cell queue-status" title="本周结算">'
+            '<span class="status-count status-count--settled">·</span></span>'
+        )
+    return (
+        '<span class="internal-status-cell queue-status" title="正常">'
+        '<span class="status-dot" aria-hidden="true"></span></span>'
+    )
+
+
 def _render_asset_list(
     asset_list: dict,
     trust_product_id: int | None,
@@ -865,13 +1187,8 @@ def _render_asset_list(
     items = asset_list.get("items") or []
     if not items:
         return '<div class="empty">暂无符合条件的资产</div>'
-    bucket = filters.get("delinquency_bucket") or DEFAULT_DELINQUENCY_BUCKET
+    bucket = (_filter_buckets(filters) or [""])[0]
     data_date = asset_list.get("data_date")
-    list_filter = (
-        filters.get("list_product_id")
-        if filters.get("list_product_scope_explicit")
-        else trust_product_id
-    )
     html = ""
     for it in items:
         ac = it.get("asset_code") or ""
@@ -891,32 +1208,46 @@ def _render_asset_list(
             filters=filters,
             bucket=bucket,
             data_date=data_date,
-            list_filter=list_filter,
         )
-        bucket_html = fmt_delinquency_badge(it.get("delinquency_bucket"))
-        custodies = it.get("custody_asset_codes") or []
-        if len(custodies) <= 1:
-            custody_hint = escape(str(custodies[0] if custodies else "—"))
-        else:
-            custody_hint = f"托管 {len(custodies)} 个"
+        bucket_html = _fmt_queue_bucket_days(
+            it.get("delinquency_bucket"), it.get("overdue_days")
+        )
         product_name = escape(str(it.get("trust_product_name") or ""))
-        product_line = (
-            f'<span>{product_name}</span>' if list_filter is None and product_name else ""
-        )
+        list_ids = filters.get("list_product_ids")
+        show_product = product_name and (list_ids is None or len(list_ids) != 1)
+        product_line = f"<span>{product_name}</span>" if show_product else ""
+        status_html = _render_queue_internal_status(it.get("internal_status"))
         html += f"""
         <a class="queue-item compact {active}" id="asset-{escape(str(pid))}-{escape(str(ac))}" href="{href}">
             <div class="queue-line1">{escape(str(ac))}</div>
             <div class="queue-line2">
                 {product_line}
-                <span>逾期 {it.get('overdue_days', '—')} 天</span>
-                <span>{bucket_html}</span>
-                <span>跟进 {it.get('followup_count', 0)} 次</span>
-                <span>{escape(str(it.get('internal_status') or '—'))}</span>
+                {bucket_html}
+                {status_html}
             </div>
-            <div class="queue-line3 muted tiny">{CUSTODY_ASSET_CODE_LABEL} {custody_hint}</div>
         </a>
         """
     return html
+
+
+def _fmt_queue_bucket_days(bucket: str | None, overdue_days) -> str:
+    """清单行：`M2 45天`（短标签 + 天数）。"""
+    from app.overdue.buckets import DELINQUENCY_BUCKET_COLORS
+
+    short = {
+        "ES": "ES",
+        "M1": "M1",
+        "M2": "M2",
+        "M3": "M3",
+        "M3_PLUS": "M3+",
+    }.get(bucket or "", bucket or "—")
+    color = DELINQUENCY_BUCKET_COLORS.get(bucket or "", "#94a3b8")
+    badge = (
+        f'<span class="badge" style="background: {color}22; color: {color}; '
+        f'border-color: {color}55;">{escape(str(short))}</span>'
+    )
+    days_html = f"{escape(str(overdue_days))}天" if overdue_days is not None else "—"
+    return f'<span class="queue-bucket-days">{badge} {days_html}</span>'
 
 
 def _last_followup_html(summary: dict) -> str:
@@ -924,7 +1255,7 @@ def _last_followup_html(summary: dict) -> str:
     owner = summary.get("last_follow_up_owner")
     if not at and not owner:
         return '<div class="asset-card-followup muted tiny">最近跟进：—</div>'
-    at_esc = escape(str(at or "—"))
+    at_esc = escape(_fmt_beijing_datetime(at) if at else "—")
     owner_esc = escape(str(owner or "—"))
     return f'<div class="asset-card-followup muted tiny">最近跟进：{at_esc} · {owner_esc}</div>'
 
@@ -978,7 +1309,7 @@ def _render_split_list(queue: list, selected_id: int | None, workbench_qs) -> st
         od_label = (
             f"提前结清 {item.get('last_payment_date') or '—'}"
             if item.get("delinquency_bucket") == "ES"
-            else f"逾期 {item['overdue_days']}天"
+            else f"未付 {item['overdue_days']}天"
         )
         badge = (
             fmt_risk_badge(item.get("risk_level"))
@@ -1021,6 +1352,7 @@ def _render_panels(dto: dict, asset: dict, workbench_qs) -> str:
             asset.get("summary") or {},
             asset.get("trust_mark") or {},
             asset.get("followup_entries") or [],
+            asset.get("followup_cases") or [],
         )}</div>
         <div class="grid-ops">{_panel_ops(asset.get("ops"), asset.get("summary") or {}, asset.get("spatial_hint"))}</div>
     </div>"""
@@ -1128,9 +1460,15 @@ def _panel_issuance(records: list) -> str:
 
 
 def _repayment_table_row(it: dict) -> str:
+    asset_code = (
+        it.get("asset_code")
+        or it.get("source_asset_code")
+        or "—"
+    )
     return f"""<tr>
-        <td>{escape(str(it.get('custody_asset_code') or '—'))}</td>
-        <td>{escape(_fmt_date_only(it.get('repayment_date')))}</td>
+        <td class="cell-text">{escape(str(asset_code))}</td>
+        <td class="cell-text">{escape(str(it.get('custody_asset_code') or '—'))}</td>
+        <td class="cell-text">{escape(_fmt_date_only(it.get('repayment_date')))}</td>
         <td class="num">{fmt_money(it.get('actual_repayment_amount'))}</td>
     </tr>"""
 
@@ -1190,20 +1528,15 @@ def _followup_panel_summary(
     summary: dict,
     trust_mark: dict,
     followup_entries: list | None = None,
+    followup_cases: list | None = None,
 ) -> str:
-    entries = followup_entries or []
-    if entries:
-        status_label = _followup_status_label(entries[0].get("status_snapshot"))
-    else:
-        case_status = (followup_case or {}).get("status")
-        if case_status:
-            status_label = _followup_status_label(case_status)
-        else:
-            status_label = (trust_mark or {}).get("internal_status") or "—"
-    last_at = _fmt_date_only(summary.get("last_follow_up_at"))
+    status_label = (trust_mark or {}).get("internal_status") or summary.get("internal_status") or "正常"
+    last_at = _fmt_beijing_datetime(summary.get("last_follow_up_at"))
     followup_count = len([e for e in events if e.get("event_type") == "followup"])
+    case_count = len(followup_cases or [])
     return (
-        f"跟进记录状态 {escape(str(status_label))} · "
+        f"内部状态 {escape(str(status_label))} · "
+        f"跟进事项 {case_count} · "
         f"最近跟进 {escape(last_at)} · "
         f"跟进记录 {followup_count} 条"
     )
@@ -1212,21 +1545,25 @@ def _followup_panel_summary(
 def _panel_repayment(rep: dict) -> str:
     items = rep.get("items") or []
     colgroup = """<colgroup>
+        <col class="col-repay-asset">
         <col class="col-repay-custody">
         <col class="col-repay-date">
         <col class="col-repay-amt">
     </colgroup>"""
     thead = f"""<thead><tr>
-        <th>{CUSTODY_ASSET_CODE_LABEL}</th><th>还款日</th><th>实还</th>
+        <th class="cell-text">{ASSET_CODE_LABEL}</th>
+        <th class="cell-text">{CUSTODY_ASSET_CODE_LABEL}</th>
+        <th class="cell-text">还款日</th>
+        <th class="num">还款金额</th>
     </tr></thead>"""
     table_html = _build_panel_preview_table(
         colgroup_html=colgroup,
         thead_html=thead,
         items=items,
         row_fn=_repayment_table_row,
-        colspan=3,
+        colspan=4,
         expand_summary=f"查看全部还款明细（{len(items)} 条）",
-        empty_message="缺少还款明细，逾期天数可能无法重算",
+        empty_message="缺少还款明细，未付天数可能无法重算",
     )
     recent = _fmt_date_only(rep.get("recent_repayment_date"))
     return f"""<div class="info-card panel-dual">
@@ -1255,7 +1592,7 @@ def _panel_monitor(mon: dict, summary: dict, data_date: str | None) -> str:
             <td>{fmt_delinquency_badge(s.get('delinquency_bucket'))}</td>
         </tr>"""
     table = f"""<div class="table-wrap"><table>
-        <thead><tr><th>{CUSTODY_ASSET_CODE_LABEL}</th><th>初始</th><th>已还</th><th>剩余</th><th>逾期天</th><th>M级</th></tr></thead>
+        <thead><tr><th>{CUSTODY_ASSET_CODE_LABEL}</th><th>初始</th><th>已还</th><th>剩余</th><th>未付天数</th><th>M级</th></tr></thead>
         <tbody>{rows or '<tr><td colspan="6" class="empty">无</td></tr>'}</tbody></table></div>"""
     return f"""<div class="info-card info-card-primary">
         <h3 class="info-card-title">当前监控</h3>
@@ -1334,7 +1671,7 @@ def _panel_ops(ops: dict | None, summary: dict, spatial_hint: dict | None = None
     return f"""<div class="info-card ops-panel{alert_cls}">
         <h3 class="info-card-title">Ops 建议（只读）</h3>
         <div class="info-card-body">
-            <p><span class="lbl">逾期阶段</span>{fmt_delinquency_badge(ops.get('bucket'))}</p>
+            <p><span class="lbl">未付款阶段</span>{fmt_delinquency_badge(ops.get('bucket'))}</p>
             <p><span class="lbl">风险</span>{fmt_risk_badge(ops.get('risk_level'))}</p>
             <p>SLA 截止 {sla_txt} {sla_badge}</p>
             <p class="lbl">建议动作</p><ul class="ops-list">{action_rows}</ul>
@@ -1342,14 +1679,6 @@ def _panel_ops(ops: dict | None, summary: dict, spatial_hint: dict | None = None
             {spatial_line}
         </div>
     </div>"""
-
-
-def _timeline_type_label(ev: dict) -> str:
-    if ev.get("event_type") == "repayment":
-        return "还款"
-    if ev.get("event_type") == "followup":
-        return "跟进"
-    return "—"
 
 
 def _truncate_summary(text: str | None, max_len: int = 24) -> str:
@@ -1362,58 +1691,87 @@ def _truncate_summary(text: str | None, max_len: int = 24) -> str:
 
 
 def _timeline_summary(ev: dict) -> str:
-    legacy = ""
-    if ev.get("legacy"):
-        legacy = f' <span class="badge">{escape(ev.get("legacy_label") or "历史")}</span>'
-
+    """保留给摘要卡等非表格用途。"""
     if ev.get("event_type") == "repayment":
         period = ev.get("period_no")
-        custody = str(ev.get("custody_asset_code") or "")
-        tail = custody[-4:] if len(custody) >= 4 else custody
         if period is not None and str(period) != "—":
-            summary = f"期次 {period}"
-            if tail:
-                summary += f" · {tail}"
-            return escape(summary)
+            return escape(f"期次 {period}")
         return escape(f"还款 · {_fmt_date_only(ev.get('occurred_at'))}")
-
-    status = _followup_status_label(ev.get("status_snapshot"))
-    snippet = _truncate_summary(ev.get("overdue_reason"))
-    if not snippet:
-        snippet = _truncate_summary(ev.get("follow_up_plan"))
-    if not snippet and ev.get("owner_name"):
-        snippet = _truncate_summary(f"负责人 {ev.get('owner_name')}")
+    title = ev.get("title") or "跟进"
+    snippet = _truncate_summary(ev.get("overdue_reason")) or _truncate_summary(
+        ev.get("follow_up_plan")
+    )
     if snippet:
-        return f"{escape(status)} · {escape(snippet)}{legacy}"
-    return f"{escape(status)}{legacy}"
+        return f"{escape(str(title))} · {escape(snippet)}"
+    return escape(str(title))
 
 
-def _timeline_detail_cell(ev: dict) -> str:
-    if ev.get("event_type") == "repayment":
-        return f'<span class="num">{fmt_money(ev.get("amount"))}</span>'
+def _followup_entry_summary_text(entry: dict) -> str:
+    snippet = _truncate_summary(entry.get("overdue_reason"), 48)
+    if not snippet:
+        snippet = _truncate_summary(entry.get("follow_up_plan"), 48)
+    return snippet or "—"
 
-    entry_id = ev.get("entry_id")
-    label = escape(str(ev.get("owner_name") or "查看"))
-    if entry_id:
-        pane_id = f"followup-pane-entry-{entry_id}"
-        return (
-            f'<button type="button" class="timeline-goto-entry timeline-detail-link" '
-            f'data-entry-pane="{pane_id}">{label} ▾</button>'
+
+def _render_followup_history_case_block(
+    case: dict, entries: list[dict]
+) -> str:
+    cid = int(case["id"])
+    created = escape(
+        _fmt_yyyymmddhhmm(case.get("created_at") or case.get("opened_at"))
+    )
+    category = escape(str(case.get("category") or "—"))
+    status = escape(_followup_status_label(case.get("status")))
+    desc = escape(_truncate_summary(case.get("description"), 36) or "—")
+    entry_count = len(entries)
+
+    entry_rows = ""
+    for entry in entries:
+        eid = int(entry["id"])
+        pane_id = f"followup-pane-entry-{eid}"
+        entry_rows += f"""<tr>
+            <td class="cell-text">{escape(_fmt_date_only(entry.get('created_at')))}</td>
+            <td class="cell-text">{escape(str(entry.get('owner_name') or '—'))}</td>
+            <td class="cell-text">
+                <button type="button" class="timeline-goto-entry timeline-detail-link"
+                        data-entry-pane="{pane_id}" data-case-id="{cid}">
+                    {escape(_followup_entry_summary_text(entry))}
+                </button>
+            </td>
+        </tr>"""
+    if not entry_rows:
+        entry_rows = (
+            '<tr><td colspan="3" class="empty muted tiny">暂无跟进记录</td></tr>'
         )
-    return label
 
-
-def _timeline_rows(ev: dict) -> str:
-    return f"""<tr class="timeline-main-row">
-        <td>{escape(_fmt_date_only(ev.get('occurred_at')))}</td>
-        <td>{escape(_timeline_type_label(ev))}</td>
-        <td>{_timeline_summary(ev)}</td>
-        <td>{_timeline_detail_cell(ev)}</td>
-    </tr>"""
-
-
-def _timeline_row(ev: dict) -> str:
-    return _timeline_rows(ev)
+    return f"""<tbody class="tl-case-block" data-case-id="{cid}">
+        <tr class="tl-case-row">
+            <td class="cell-text">
+                <button type="button" class="tl-case-toggle" aria-expanded="false"
+                        title="展开跟进记录（{entry_count}）">
+                    <span class="tl-case-caret" aria-hidden="true">▶</span>
+                    <span>{created}</span>
+                </button>
+            </td>
+            <td class="cell-text">{category}</td>
+            <td class="cell-text">{status}</td>
+            <td class="cell-text" title="{escape(str(case.get('description') or ''))}">{desc}</td>
+        </tr>
+        <tr class="tl-case-detail" hidden>
+            <td colspan="4">
+                <div class="tl-entry-wrap">
+                    <table class="tl-entry-table">
+                        <thead><tr>
+                            <th class="cell-text">时间</th>
+                            <th class="cell-text">跟进人</th>
+                            <th class="cell-text">跟进摘要</th>
+                        </tr></thead>
+                        <tbody>{entry_rows}</tbody>
+                    </table>
+                </div>
+            </td>
+        </tr>
+    </tbody>"""
 
 
 def _panel_timeline(
@@ -1422,27 +1780,62 @@ def _panel_timeline(
     summary: dict | None = None,
     trust_mark: dict | None = None,
     followup_entries: list | None = None,
+    followup_cases: list | None = None,
 ) -> str:
     summary = summary or {}
     trust_mark = trust_mark or {}
-    colgroup = """<colgroup>
-        <col class="col-tl-time">
-        <col class="col-tl-type">
-        <col class="col-tl-title">
-        <col class="col-tl-detail">
-    </colgroup>"""
-    thead = """<thead><tr><th>时间</th><th>类型</th><th>摘要</th><th>详情</th></tr></thead>"""
-    table_html = _build_panel_preview_table(
-        colgroup_html=colgroup,
-        thead_html=thead,
-        items=events,
-        row_fn=_timeline_row,
-        colspan=4,
-        expand_summary=f"查看全部 {len(events)} 条",
-        empty_message="暂无事件",
-    )
+    cases = list(followup_cases or [])
+    entries = list(followup_entries or [])
+    entries_by_case: dict[int, list[dict]] = {}
+    for entry in entries:
+        if entry.get("case_id") is None:
+            continue
+        entries_by_case.setdefault(int(entry["case_id"]), []).append(entry)
+
+    if cases:
+        body = "".join(
+            _render_followup_history_case_block(
+                case, entries_by_case.get(int(case["id"]), [])
+            )
+            for case in cases
+        )
+        table_html = f"""<div class="table-wrap">
+            <table class="panel-fixed-rows tl-history-table">
+                <colgroup>
+                    <col class="col-tl-time">
+                    <col class="col-tl-cat">
+                    <col class="col-tl-status">
+                    <col class="col-tl-desc">
+                </colgroup>
+                <thead><tr>
+                    <th class="cell-text">时间</th>
+                    <th class="cell-text">分类</th>
+                    <th class="cell-text">状态</th>
+                    <th class="cell-text">描述</th>
+                </tr></thead>
+                {body}
+            </table>
+        </div>"""
+    else:
+        table_html = (
+            '<div class="table-wrap"><table class="panel-fixed-rows tl-history-table">'
+            "<thead><tr>"
+            '<th class="cell-text">时间</th>'
+            '<th class="cell-text">分类</th>'
+            '<th class="cell-text">状态</th>'
+            '<th class="cell-text">描述</th>'
+            "</tr></thead>"
+            '<tbody><tr><td colspan="4" class="empty">暂无跟进事项</td></tr></tbody>'
+            "</table></div>"
+        )
+
     summary_line = _followup_panel_summary(
-        events, followup_case, summary, trust_mark, followup_entries
+        events,
+        followup_case,
+        summary,
+        trust_mark,
+        followup_entries,
+        followup_cases,
     )
     return f"""<div class="info-card panel-dual">
         <h3 class="info-card-title">跟进历史</h3>
@@ -1461,13 +1854,47 @@ def _followup_status_options(current: str | None) -> str:
     return options
 
 
+def _followup_category_options(current: str | None) -> str:
+    options = ""
+    for cat in FOLLOWUP_CASE_CATEGORIES:
+        selected = " selected" if cat == (current or FOLLOWUP_CASE_CATEGORIES[0]) else ""
+        options += f'<option value="{escape(cat)}"{selected}>{escape(cat)}</option>'
+    return options
+
+
+def _fmt_yyyymmddhhmm(value) -> str:
+    """事项创建时间展示：北京时间 YYYYMMDDHHMM。"""
+    dt = _parse_dt_to_beijing(value)
+    if dt is not None:
+        return dt.strftime("%Y%m%d%H%M")
+    text = str(value or "").strip()
+    if not text or text == "—":
+        return "—"
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 12:
+        return digits[:12]
+    if len(digits) >= 8:
+        return (digits + "0000")[:12]
+    return text[:16]
+
+
 def _followup_entry_tab_label(entry: dict) -> str:
-    return f"{_fmt_date_only(entry.get('created_at'))} · {_followup_status_label(entry.get('status_snapshot'))}"
+    return _fmt_date_only(entry.get("created_at"))
 
 
 def _attachment_ext(file_name: str) -> str:
     i = file_name.rfind(".")
     return file_name[i:].lower() if i >= 0 else ""
+
+
+def _format_attachment_short_name(file_name: str, *, stem_max: int = 5) -> str:
+    """长文件名缩短为 ABCDE***.png（主名最多 5 字符 + *** + 后缀）。"""
+    name = str(file_name or "").strip() or "file"
+    ext = _attachment_ext(name)
+    stem = name[: -len(ext)] if ext and name.lower().endswith(ext) else name
+    if len(stem) <= stem_max:
+        return name
+    return f"{stem[:stem_max]}***{ext}"
 
 
 def _attachment_open_kind(att: dict) -> str:
@@ -1481,16 +1908,26 @@ def _attachment_open_kind(att: dict) -> str:
 
 
 def _render_saved_attachment_link(att: dict) -> str:
+    """图片用小缩略图（复用原附件 URL，无额外生成）；其它文件用短文件名。"""
     aid = att.get("id")
     if not aid:
         return ""
-    fname = escape(str(att.get("file_name") or ""))
+    fname_raw = str(att.get("file_name") or "")
+    fname_full = escape(fname_raw)
     kind = _attachment_open_kind(att)
-    title = {"image": "点击预览", "pdf": "在新标签页打开"}.get(kind, "打开或下载")
+    href = f"/overdue/workbench/attachments/{int(aid)}"
+    if kind == "image":
+        return (
+            f'<a class="attachment-open-link attachment-thumb-link" data-kind="image"'
+            f' href="{href}" title="{fname_full} · 点击预览">'
+            f'<img class="attachment-thumb attachment-thumb--saved" src="{href}" '
+            f'alt="{escape(_format_attachment_short_name(fname_raw))}" loading="lazy"></a>'
+        )
+    title = {"pdf": "在新标签页打开"}.get(kind, "打开或下载")
+    short = escape(_format_attachment_short_name(fname_raw))
     return (
         f'<a class="attachment-open-link" data-kind="{kind}"'
-        f' href="/overdue/workbench/attachments/{int(aid)}"'
-        f' title="{title}">{fname}</a>'
+        f' href="{href}" title="{fname_full} · {title}">{short}</a>'
     )
 
 
@@ -1521,8 +1958,8 @@ def _render_attachment_uploader(*, existing_count: int = 0, label: str = "", col
     </div>"""
 
 
-def _followup_entry_is_mutable(status: str | None) -> bool:
-    return status in ("open", "in_progress")
+def _followup_entry_is_mutable(case_status: str | None) -> bool:
+    return case_status in ("open", "in_progress", "settled_week")
 
 
 def _render_followup_field_cell(label: str, inner_html: str) -> str:
@@ -1548,14 +1985,27 @@ def _render_saved_attachment_chip(att: dict) -> str:
     aid = att.get("id")
     if not aid:
         return ""
-    fname = escape(str(att.get("file_name") or ""))
+    fname_raw = str(att.get("file_name") or "")
+    fname_full = escape(fname_raw)
     kind = _attachment_open_kind(att)
-    title = {"image": "点击预览", "pdf": "在新标签页打开"}.get(kind, "打开或下载")
+    href = f"/overdue/workbench/attachments/{int(aid)}"
+    if kind == "image":
+        meta = (
+            f'<a class="attachment-open-link attachment-thumb-link" data-kind="image"'
+            f' href="{href}" title="{fname_full} · 点击预览">'
+            f'<img class="attachment-thumb attachment-thumb--saved" src="{href}" '
+            f'alt="{escape(_format_attachment_short_name(fname_raw))}" loading="lazy"></a>'
+        )
+    else:
+        title = {"pdf": "在新标签页打开"}.get(kind, "打开或下载")
+        short = escape(_format_attachment_short_name(fname_raw))
+        meta = (
+            f'<a class="attachment-open-link attachment-chip-meta-link" data-kind="{kind}"'
+            f' href="{href}" title="{fname_full} · {title}">{short}</a>'
+        )
     return (
         f'<span class="attachment-chip attachment-chip-saved" data-attachment-id="{int(aid)}">'
-        f'<a class="attachment-open-link attachment-chip-meta-link" data-kind="{kind}"'
-        f' href="/overdue/workbench/attachments/{int(aid)}"'
-        f' title="{title}">{fname}</a>'
+        f"{meta}"
         f'<button type="button" class="attachment-chip-remove attachment-saved-remove"'
         f' aria-label="删除附件">×</button>'
         f"</span>"
@@ -1613,19 +2063,15 @@ def _render_followup_attachment_links(entry: dict) -> str:
 
 def _render_followup_entry_cite_attrs(entry: dict) -> str:
     return (
-        f'data-status="{escape(str(entry.get("status_snapshot") or ""))}" '
         f'data-owner="{escape(str(entry.get("owner_name") or ""))}" '
         f'data-reason="{escape(str(entry.get("overdue_reason") or ""))}" '
-        f'data-plan="{escape(str(entry.get("follow_up_plan") or ""))}" '
-        f'data-feedback="{escape(str(entry.get("trust_feedback") or ""))}" '
-        f'data-note="{escape(str(entry.get("note") or ""))}"'
+        f'data-plan="{escape(str(entry.get("follow_up_plan") or ""))}"'
     )
 
 
 def _render_followup_meta_row_dual(
     *,
     created_display: str,
-    status: str,
     owner_name: str,
 ) -> str:
     owner_esc = escape(owner_name)
@@ -1635,13 +2081,7 @@ def _render_followup_meta_row_dual(
             f'<div class="field-display field-display--meta">{created_display}</div>',
         )}
         {_render_followup_field_cell(
-            "跟进记录状态",
-            f'{_render_followup_status_badge(status, view_only_class="followup-view-only")}'
-            f'<select name="status" class="followup-edit-only">'
-            f"{_followup_status_options(status)}</select>",
-        )}
-        {_render_followup_field_cell(
-            "负责人",
+            "跟进人",
             f"{_render_followup_field_display(owner_name, extra_class='followup-view-only')}"
             f'<input name="owner_name" class="followup-edit-only" value="{owner_esc}">',
         )}
@@ -1652,15 +2092,10 @@ def _render_followup_body_grid_dual(
     *,
     reason: str = "",
     plan: str = "",
-    feedback: str = "",
-    note: str = "",
 ) -> str:
-    # 2×2：左列 逾期原因/信托反馈，右列 跟进方案/补充说明
     fields = (
-        ("逾期原因", "overdue_reason", reason),
+        ("原因说明", "overdue_reason", reason),
         ("跟进方案", "follow_up_plan", plan),
-        ("信托反馈", "trust_feedback", feedback),
-        ("补充说明", "note", note),
     )
     parts: list[str] = ['<div class="followup-body-grid">']
     for label, name, val in fields:
@@ -1706,24 +2141,21 @@ def _render_followup_entry_panel(
     data_date: str,
 ) -> str:
     eid = int(entry["id"])
-    status = entry.get("status_snapshot") or "open"
-    mutable = _followup_entry_is_mutable(status)
+    case_status = entry.get("case_status")
+    mutable = _followup_entry_is_mutable(case_status)
     created = escape(_fmt_date_only(entry.get("created_at")))
     cite_attrs = _render_followup_entry_cite_attrs(entry)
     disabled = "" if mutable else " disabled"
-    disabled_title = "" if mutable else ' title="已结案记录不可编辑或删除"'
+    disabled_title = "" if mutable else ' title="事项已结案，记录不可编辑或删除"'
     att_count = len(entry.get("attachments") or [])
     shell_layout = f"""<div class="followup-shell-layout">
                 {_render_followup_meta_row_dual(
                     created_display=created,
-                    status=status,
                     owner_name=str(entry.get("owner_name") or ""),
                 )}
                 {_render_followup_body_grid_dual(
                     reason=str(entry.get("overdue_reason") or ""),
                     plan=str(entry.get("follow_up_plan") or ""),
-                    feedback=str(entry.get("trust_feedback") or ""),
-                    note=str(entry.get("note") or ""),
                 )}
                 {_render_followup_attachment_zone(
                     entry,
@@ -1772,30 +2204,29 @@ def _render_followup_create_pane(
     workbench_qs,
     data_date: str,
     *,
-    current_status: str,
+    case_id: int,
     owner_val: str,
     last_reason: str,
     last_plan: str,
+    form_id: str = "followup-form",
 ) -> str:
     return f"""<div class="followup-entry-shell followup-entry-shell--create" data-editing="1">
-        <form class="followup-form" id="followup-form" method="post" enctype="multipart/form-data"
+        <form class="followup-form" id="{escape(form_id)}" method="post" enctype="multipart/form-data"
               action="/overdue/workbench/followups/entries{workbench_qs()}">
             <input type="hidden" name="redirect_to_workbench" value="1">
             {product_hidden}
             {asset_hidden}
             {bucket_hidden}
             <input type="hidden" name="data_date" value="{data_date}">
+            <input type="hidden" name="case_id" value="{int(case_id)}">
             <div class="followup-shell-layout">
                 {_render_followup_meta_row_dual(
                     created_display="保存后自动生成",
-                    status=current_status,
                     owner_name=owner_val,
                 )}
                 {_render_followup_body_grid_dual(
                     reason=last_reason,
                     plan=last_plan,
-                    feedback="",
-                    note="",
                 )}
                 {_render_followup_attachment_zone(
                     {"attachments": []},
@@ -1805,7 +2236,108 @@ def _render_followup_create_pane(
             <div class="followup-actions-bar" id="followup-form-actions">
                 <div class="followup-create-actions">
                     <button type="submit" class="btn primary">保存本次跟进</button>
-                    <button type="button" class="btn" id="followup-clear">清空</button>
+                    <button type="button" class="btn followup-clear-btn">清空</button>
+                </div>
+            </div>
+        </form>
+    </div>"""
+
+
+def _render_followup_case_chip(case: dict, *, active: bool) -> str:
+    cid = int(case["id"])
+    cat = escape(str(case.get("category") or "—"))
+    status = escape(_followup_status_label(case.get("status")))
+    desc = escape(_truncate_summary(case.get("description") or "", 24))
+    created = escape(_fmt_yyyymmddhhmm(case.get("created_at") or case.get("opened_at")))
+    active_cls = " active" if active else ""
+    desc_part = f" · {desc}" if desc and desc != "—" else ""
+    return (
+        f'<button type="button" class="case-chip{active_cls}" data-case-id="{cid}">'
+        f'<span class="case-chip-main">{cat} · {status}</span>'
+        f'<span class="case-chip-sub">{created}{desc_part}</span>'
+        f"</button>"
+    )
+
+
+def _render_followup_case_edit_panel(
+    case: dict,
+    product_hidden: str,
+    asset_hidden: str,
+    bucket_hidden: str,
+    workbench_qs,
+    data_date: str,
+) -> str:
+    cid = int(case["id"])
+    desc = escape(str(case.get("description") or ""))
+    created = escape(_fmt_yyyymmddhhmm(case.get("created_at") or case.get("opened_at")))
+    return f"""<div class="followup-case-edit">
+        <form method="post" action="/overdue/workbench/followups/cases/{cid}{workbench_qs()}">
+            <input type="hidden" name="redirect_to_workbench" value="1">
+            {product_hidden}
+            {asset_hidden}
+            {bucket_hidden}
+            <input type="hidden" name="data_date" value="{data_date}">
+            <div class="followup-case-edit-grid">
+                {_render_followup_field_cell(
+                    "分类",
+                    f'<select name="category">{_followup_category_options(case.get("category"))}</select>',
+                )}
+                {_render_followup_field_cell(
+                    "状态",
+                    f'<select name="status">{_followup_status_options(case.get("status"))}</select>',
+                )}
+                <div class="followup-field followup-case-desc">
+                    <span class="followup-field-label">描述</span>
+                    <input type="text" name="description" class="followup-case-desc-input"
+                           value="{desc}" placeholder="事项说明（可选）">
+                </div>
+                {_render_followup_field_cell(
+                    "创建时间",
+                    f'<div class="field-display field-display--meta">{created}</div>',
+                )}
+                <div class="followup-case-actions">
+                    <button type="submit" class="btn btn-compact primary">保存事项</button>
+                </div>
+            </div>
+        </form>
+    </div>"""
+
+
+def _render_followup_case_create_panel(
+    product_hidden: str,
+    asset_hidden: str,
+    bucket_hidden: str,
+    workbench_qs,
+    data_date: str,
+) -> str:
+    return f"""<div class="followup-case-create">
+        <form method="post" action="/overdue/workbench/followups/cases{workbench_qs()}">
+            <input type="hidden" name="redirect_to_workbench" value="1">
+            {product_hidden}
+            {asset_hidden}
+            {bucket_hidden}
+            <input type="hidden" name="data_date" value="{data_date}">
+            <input type="hidden" name="status" value="open">
+            <div class="followup-case-edit-grid">
+                {_render_followup_field_cell(
+                    "分类",
+                    f'<select name="category">{_followup_category_options(FOLLOWUP_CASE_CATEGORIES[0])}</select>',
+                )}
+                {_render_followup_field_cell(
+                    "状态",
+                    f'<div class="field-display field-display--meta">{escape(FOLLOWUP_STATUS_LABELS["open"])}</div>',
+                )}
+                <div class="followup-field followup-case-desc">
+                    <span class="followup-field-label">描述</span>
+                    <input type="text" name="description" class="followup-case-desc-input"
+                           value="" placeholder="事项说明（可选）">
+                </div>
+                {_render_followup_field_cell(
+                    "创建时间",
+                    '<div class="field-display field-display--meta">保存后生成</div>',
+                )}
+                <div class="followup-case-actions">
+                    <button type="submit" class="btn btn-compact primary">创建跟进事项</button>
                 </div>
             </div>
         </form>
@@ -1821,55 +2353,158 @@ def _panel_followup_write(
     *,
     followup_expanded: bool = False,
     initial_pane: str = "followup-pane-new",
+    selected_case_id: int | None = None,
+    force_new_case: bool = False,
 ) -> str:
     data_date = escape(str(dto.get("data_date") or ""))
     asset = dto.get("asset") or {}
-    case = asset.get("followup_case") or {}
-    current_status = case.get("status") or "in_progress"
-    owner_val = case.get("owner_name") or ""
     asset_code = escape(str(dto.get("asset_code") or asset.get("asset_code") or ""))
     expanded = "1" if followup_expanded else "0"
+    cases = list(asset.get("followup_cases") or [])
     followup_entries = asset.get("followup_entries") or []
+    cases_by_id = {int(c["id"]): c for c in cases if c.get("id") is not None}
 
-    last_reason = ""
-    last_plan = ""
-    if followup_entries:
-        last_reason = followup_entries[0].get("overdue_reason") or ""
-        last_plan = followup_entries[0].get("follow_up_plan") or ""
-    else:
-        for ev in asset.get("timeline") or []:
-            if ev.get("event_type") == "followup" and not ev.get("legacy"):
-                last_reason = ev.get("overdue_reason") or ""
-                last_plan = ev.get("follow_up_plan") or ""
-                break
+    # Resolve selected case from URL / entry / default
+    resolved_case_id: int | None = None
+    show_new_case = bool(force_new_case) or not cases
+    if not show_new_case:
+        if selected_case_id is not None and int(selected_case_id) in cases_by_id:
+            resolved_case_id = int(selected_case_id)
+        elif initial_pane.startswith("followup-pane-entry-"):
+            try:
+                eid = int(initial_pane.rsplit("-", 1)[-1])
+            except ValueError:
+                eid = None
+            if eid is not None:
+                for entry in followup_entries:
+                    if int(entry["id"]) == eid and entry.get("case_id") is not None:
+                        resolved_case_id = int(entry["case_id"])
+                        break
+        if resolved_case_id is None and cases:
+            resolved_case_id = int(cases[0]["id"])
 
-    entry_tabs = (
-        f'<button type="button" class="entry-tab{" active" if initial_pane == "followup-pane-new" else ""}" '
-        f'data-pane="followup-pane-new">＋ 新建跟进</button>'
-    )
-    entry_panes = ""
-    for entry in followup_entries:
-        eid = int(entry["id"])
-        pane_id = f"followup-pane-entry-{eid}"
-        tab_active = " active" if initial_pane == pane_id else ""
-        entry_tabs += (
-            f'<button type="button" class="entry-tab{tab_active}" data-pane="{pane_id}">'
-            f"{escape(_followup_entry_tab_label(entry))}</button>"
+    case_chips = ""
+    for case in cases:
+        cid = int(case["id"])
+        case_chips += _render_followup_case_chip(
+            case, active=(not show_new_case and resolved_case_id == cid)
         )
-        pane_active = " active" if initial_pane == pane_id else ""
-        entry_panes += (
-            f'<div class="followup-pane{pane_active}" id="{pane_id}">'
-            f"{_render_followup_entry_panel(entry, product_hidden, asset_hidden, bucket_hidden, workbench_qs, data_date)}"
+    case_chips += (
+        f'<button type="button" class="case-chip case-chip-new'
+        f'{" active" if show_new_case else ""}" data-case-id="new">＋ 事项</button>'
+    )
+
+    case_panels = ""
+    # New-case panel
+    case_panels += (
+        f'<div class="followup-case-panel{" active" if show_new_case else ""}" '
+        f'data-case-panel="new">'
+        f"{_render_followup_case_create_panel(product_hidden, asset_hidden, bucket_hidden, workbench_qs, data_date)}"
+        f"</div>"
+    )
+    for case in cases:
+        cid = int(case["id"])
+        active = not show_new_case and resolved_case_id == cid
+        case_panels += (
+            f'<div class="followup-case-panel{" active" if active else ""}" '
+            f'data-case-panel="{cid}">'
+            f"{_render_followup_case_edit_panel(case, product_hidden, asset_hidden, bucket_hidden, workbench_qs, data_date)}"
             f"</div>"
         )
 
-    new_pane_active = " active" if initial_pane == "followup-pane-new" else ""
+    # Entry blocks per case
+    entries_blocks = ""
+    for case in cases:
+        cid = int(case["id"])
+        case_entries = [e for e in followup_entries if int(e.get("case_id") or 0) == cid]
+        active = not show_new_case and resolved_case_id == cid
+        case_active = case.get("status") in ("open", "in_progress", "settled_week")
+
+        last_reason = ""
+        last_plan = ""
+        owner_val = str(case.get("owner_name") or "")
+        if case_entries:
+            last_reason = case_entries[0].get("overdue_reason") or ""
+            last_plan = case_entries[0].get("follow_up_plan") or ""
+            if not owner_val:
+                owner_val = str(case_entries[0].get("owner_name") or "")
+
+        # Prefer initial pane if it belongs to this case; else new
+        case_initial = f"followup-pane-new-{cid}"
+        if initial_pane.startswith("followup-pane-entry-"):
+            for entry in case_entries:
+                if f"followup-pane-entry-{int(entry['id'])}" == initial_pane:
+                    case_initial = initial_pane
+                    break
+
+        entry_tabs = (
+            f'<button type="button" class="entry-tab'
+            f'{" active" if case_initial == f"followup-pane-new-{cid}" else ""}" '
+            f'data-pane="followup-pane-new-{cid}">＋ 新建跟进</button>'
+        )
+        entry_panes = ""
+        for entry in case_entries:
+            eid = int(entry["id"])
+            pane_id = f"followup-pane-entry-{eid}"
+            tab_active = " active" if case_initial == pane_id else ""
+            entry_tabs += (
+                f'<button type="button" class="entry-tab{tab_active}" data-pane="{pane_id}">'
+                f"{escape(_followup_entry_tab_label(entry))}</button>"
+            )
+            pane_active = " active" if case_initial == pane_id else ""
+            entry_panes += (
+                f'<div class="followup-pane{pane_active}" id="{pane_id}">'
+                f"{_render_followup_entry_panel(entry, product_hidden, asset_hidden, bucket_hidden, workbench_qs, data_date)}"
+                f"</div>"
+            )
+
+        new_pane_active = " active" if case_initial == f"followup-pane-new-{cid}" else ""
+        if case_active:
+            create_html = _render_followup_create_pane(
+                product_hidden,
+                asset_hidden,
+                bucket_hidden,
+                workbench_qs,
+                data_date,
+                case_id=cid,
+                owner_val=owner_val,
+                last_reason=str(last_reason),
+                last_plan=str(last_plan),
+                form_id=f"followup-form-{cid}",
+            )
+            new_pane = (
+                f'<div class="followup-pane{new_pane_active}" id="followup-pane-new-{cid}">'
+                f"{create_html}</div>"
+            )
+        else:
+            new_pane = (
+                f'<div class="followup-pane{new_pane_active}" id="followup-pane-new-{cid}">'
+                f'<p class="muted">事项已结案，不可再新增跟进记录。可先将事项状态改回「待跟进」「跟进中」或「本周结算」。</p>'
+                f"</div>"
+            )
+
+        entries_blocks += f"""
+        <div class="followup-entries-block{" active" if active else ""}" data-case-entries="{cid}">
+            <div class="entry-tabs" role="tablist">{entry_tabs}</div>
+            {new_pane}
+            {entry_panes}
+        </div>"""
+
+    empty_entries_hint = ""
+    if show_new_case:
+        empty_entries_hint = (
+            '<div class="followup-entries-block active" data-case-entries="new">'
+            '<p class="muted">请先创建跟进事项，再录入跟进记录。</p>'
+            "</div>"
+        )
+
     return f"""
-    <div class="sticky-write-bar" id="followup-entry-form" data-expanded="{expanded}">
+    <div class="sticky-write-bar" id="followup-entry-form" data-expanded="{expanded}"
+         data-active-case="{"new" if show_new_case else (resolved_case_id or "")}">
         <div class="sticky-write-collapsed">
             <button type="button" class="write-toggle" id="followup-expand" aria-expanded="{"true" if followup_expanded else "false"}">
                 <span class="write-toggle-icon" aria-hidden="true">▶</span>
-                <span class="sticky-write-title">记录跟进 · {ASSET_CODE_LABEL} {asset_code}</span>
+                <span class="sticky-write-title">跟进事项 · {ASSET_CODE_LABEL} {asset_code}</span>
             </button>
             <span class="sticky-write-actions">
                 <button type="button" class="btn primary btn-compact" id="followup-expand-btn">展开录入</button>
@@ -1878,21 +2513,16 @@ def _panel_followup_write(
         </div>
         <div class="sticky-write-panel" id="followup-write-panel">
             <div class="sticky-write-inner">
-                <div class="entry-tabs" role="tablist">{entry_tabs}</div>
-                <div class="followup-pane{new_pane_active}" id="followup-pane-new">
-                    {_render_followup_create_pane(
-                        product_hidden,
-                        asset_hidden,
-                        bucket_hidden,
-                        workbench_qs,
-                        data_date,
-                        current_status=current_status,
-                        owner_val=owner_val,
-                        last_reason=str(last_reason),
-                        last_plan=str(last_plan),
-                    )}
-                </div>
-                {entry_panes}
+                <section class="followup-case-section" aria-label="跟进事项">
+                    <div class="followup-section-title">跟进事项</div>
+                    <div class="followup-case-strip" role="tablist">{case_chips}</div>
+                    {case_panels}
+                </section>
+                <section class="followup-entries-section" aria-label="跟进记录">
+                    <div class="followup-section-title">跟进记录</div>
+                    {entries_blocks}
+                    {empty_entries_hint}
+                </section>
             </div>
         </div>
     </div>
@@ -2128,12 +2758,18 @@ function initAttachmentUploader(container) {
                 chip.appendChild(thumbLink);
             }
 
-            var metaLink = document.createElement('a');
-            bindPendingAttachmentOpen(metaLink, file, blobUrl, getExt);
-            metaLink.classList.add('attachment-chip-meta-link');
-            var extLabel = getExt(file.name).replace('.', '').toUpperCase() || 'FILE';
-            metaLink.textContent = file.name + ' · ' + Math.round(file.size / 1024) + ' KB · ' + extLabel;
-            chip.appendChild(metaLink);
+            if (!isImage) {
+                var metaLink = document.createElement('a');
+                bindPendingAttachmentOpen(metaLink, file, blobUrl, getExt);
+                metaLink.classList.add('attachment-chip-meta-link');
+                var stem = file.name || 'file';
+                var ext = getExt(stem);
+                var base = ext ? stem.slice(0, stem.length - ext.length) : stem;
+                var shortName = base.length <= 5 ? stem : (base.slice(0, 5) + '***' + ext);
+                metaLink.textContent = shortName;
+                metaLink.title = file.name + ' · ' + Math.round(file.size / 1024) + ' KB';
+                chip.appendChild(metaLink);
+            }
 
             var removeBtn = document.createElement('button');
             removeBtn.type = 'button';
@@ -2379,20 +3015,54 @@ document.addEventListener('DOMContentLoaded', function() {
         return shell && shell.dataset.editing === '1';
     }
 
+    function switchFollowupCase(caseId) {
+        if (!caseId && caseId !== 0) return;
+        var id = String(caseId);
+        if (writeBar) writeBar.dataset.activeCase = id;
+        document.querySelectorAll('.case-chip').forEach(function(chip) {
+            chip.classList.toggle('active', String(chip.dataset.caseId) === id);
+        });
+        document.querySelectorAll('.followup-case-panel').forEach(function(panel) {
+            panel.classList.toggle('active', String(panel.dataset.casePanel) === id);
+        });
+        document.querySelectorAll('.followup-entries-block').forEach(function(block) {
+            block.classList.toggle('active', String(block.dataset.caseEntries) === id);
+        });
+    }
+
     function switchFollowupPane(paneId) {
-        var activePane = document.querySelector('.followup-pane.active');
+        if (!paneId) return;
+        var targetPane = document.getElementById(paneId);
+        if (!targetPane) return;
+        var block = targetPane.closest('.followup-entries-block');
+        if (block && block.dataset.caseEntries) {
+            switchFollowupCase(block.dataset.caseEntries);
+        }
+        var scope = block || document;
+        var activePane = scope.querySelector('.followup-pane.active');
         if (activePane && activePane.id !== paneId && paneHasUnsavedEdit(activePane)) {
             if (!confirm('有未保存修改，是否放弃？')) return;
             var activeShell = activePane.querySelector('.followup-entry-shell');
             cancelEntryEdit(activeShell);
         }
-        document.querySelectorAll('.followup-pane').forEach(function(pane) {
+        scope.querySelectorAll('.followup-pane').forEach(function(pane) {
             pane.classList.toggle('active', pane.id === paneId);
         });
-        document.querySelectorAll('.entry-tab').forEach(function(tab) {
+        scope.querySelectorAll('.entry-tab').forEach(function(tab) {
             tab.classList.toggle('active', tab.dataset.pane === paneId);
         });
     }
+
+    document.querySelectorAll('.case-chip').forEach(function(chip) {
+        chip.addEventListener('click', function() {
+            switchFollowupCase(chip.dataset.caseId);
+            if (chip.dataset.caseId !== 'new') {
+                var newPane = document.getElementById('followup-pane-new-' + chip.dataset.caseId);
+                if (newPane) switchFollowupPane(newPane.id);
+            }
+            expandWriteBar();
+        });
+    });
 
     document.querySelectorAll('.entry-tab').forEach(function(tab) {
         tab.addEventListener('click', function() {
@@ -2437,34 +3107,45 @@ document.addEventListener('DOMContentLoaded', function() {
 
     document.querySelectorAll('.entry-cite-btn').forEach(function(btn) {
         btn.addEventListener('click', function() {
-            var form = document.getElementById('followup-form');
+            var block = btn.closest('.followup-entries-block');
+            var caseId = block && block.dataset.caseEntries;
+            var form = caseId
+                ? document.getElementById('followup-form-' + caseId)
+                : document.querySelector('.followup-entries-block.active .followup-entry-shell--create form');
             if (!form) return;
-            var status = form.querySelector('[name="status"]');
             var owner = form.querySelector('[name="owner_name"]');
             var reason = form.querySelector('[name="overdue_reason"]');
             var plan = form.querySelector('[name="follow_up_plan"]');
-            var feedback = form.querySelector('[name="trust_feedback"]');
-            var note = form.querySelector('[name="note"]');
-            if (status && btn.dataset.status) status.value = btn.dataset.status;
             if (owner) owner.value = btn.dataset.owner || '';
             if (reason) reason.value = btn.dataset.reason || '';
             if (plan) plan.value = btn.dataset.plan || '';
-            if (feedback) feedback.value = btn.dataset.feedback || '';
-            if (note) note.value = btn.dataset.note || '';
-            switchFollowupPane('followup-pane-new');
+            if (caseId) switchFollowupPane('followup-pane-new-' + caseId);
             if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         });
     });
 
-    var initialFollowupPane = document.body.dataset.followupPane || 'followup-pane-new';
-    if (document.getElementById(initialFollowupPane)) {
+    var initialFollowupPane = document.body.dataset.followupPane || '';
+    if (initialFollowupPane && document.getElementById(initialFollowupPane)) {
         switchFollowupPane(initialFollowupPane);
-    } else {
-        switchFollowupPane('followup-pane-new');
+    } else if (writeBar && writeBar.dataset.activeCase) {
+        switchFollowupCase(writeBar.dataset.activeCase);
     }
+
+    document.querySelectorAll('.tl-case-toggle').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var block = btn.closest('.tl-case-block');
+            if (!block) return;
+            var open = !block.classList.contains('is-open');
+            block.classList.toggle('is-open', open);
+            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            var detail = block.querySelector('.tl-case-detail');
+            if (detail) detail.hidden = !open;
+        });
+    });
 
     document.querySelectorAll('.timeline-goto-entry').forEach(function(btn) {
         btn.addEventListener('click', function() {
+            if (btn.dataset.caseId) switchFollowupCase(btn.dataset.caseId);
             var paneId = btn.dataset.entryPane;
             if (paneId) switchFollowupPane(paneId);
             expandWriteBar();
@@ -2490,23 +3171,131 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    var filterForm = document.querySelector('.workbench-filter');
-    if (filterForm) {
-        filterForm.addEventListener('submit', function() {
-            var productSel = filterForm.querySelector('[name="list_product_id"]');
-            if (productSel && !productSel.value) {
-                var emptyList = document.createElement('input');
-                emptyList.type = 'hidden';
-                emptyList.name = 'list_product_id';
-                emptyList.value = '';
-                filterForm.appendChild(emptyList);
-                ['asset_code', 'custody_asset_code', 'trust_asset_id'].forEach(function(name) {
-                    var el = filterForm.querySelector('[name="' + name + '"]');
-                    if (el) el.remove();
+    var SIDEBAR_ALL_LABELS = {
+        'trust-product': '全部产品',
+        'delinquency-bucket': '全部等级',
+        'trust-marker': '全部标记',
+        'internal-status': '全部状态',
+        'city': '全部城市'
+    };
+    var SIDEBAR_COUNT_UNITS = {
+        'trust-product': '产品',
+        'delinquency-bucket': '等级',
+        'trust-marker': '标记',
+        'internal-status': '状态',
+        'city': '城市'
+    };
+
+    function bindSidebarMultiselects(form) {
+        if (!form) return;
+        var dirty = false;
+        form.querySelectorAll('[data-multiselect]').forEach(function(root) {
+            var panel = root.querySelector('.sf-multiselect-panel, .multiselect-panel');
+            var trigger = root.querySelector('.sf-multiselect-trigger, .multiselect-trigger, .sf-display');
+            var allBox = root.querySelector('.ms-all');
+            var key = root.getAttribute('data-multiselect') || '';
+            var allLabel = SIDEBAR_ALL_LABELS[key] || '全部';
+            var unit = SIDEBAR_COUNT_UNITS[key] || '项';
+            function updateTrigger() {
+                if (!trigger) return;
+                if (allBox && allBox.checked) {
+                    trigger.textContent = allLabel;
+                    return;
+                }
+                var names = [];
+                root.querySelectorAll('.ms-option').forEach(function(box) {
+                    if (box.checked) names.push(box.parentElement.textContent.trim());
+                });
+                if (!names.length) trigger.textContent = allLabel;
+                else if (names.length === 1) trigger.textContent = names[0];
+                else trigger.textContent = '已选' + names.length + unit;
+            }
+            function closePanelAndApply() {
+                if (!panel || panel.hidden) return;
+                panel.hidden = true;
+                if (dirty && form.id === 'sf-form') {
+                    dirty = false;
+                    submitSidebarFilter(form);
+                }
+            }
+            if (trigger && panel) {
+                trigger.addEventListener('click', function(ev) {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    form.querySelectorAll('.sf-multiselect-panel, .multiselect-panel').forEach(function(p) {
+                        if (p !== panel) p.hidden = true;
+                    });
+                    panel.hidden = !panel.hidden;
                 });
             }
+            document.addEventListener('click', function(ev) {
+                if (!root.contains(ev.target)) closePanelAndApply();
+            });
+            if (allBox) {
+                allBox.addEventListener('change', function() {
+                    root.querySelectorAll('.ms-option').forEach(function(box) {
+                        if (allBox.checked) { box.checked = false; box.disabled = true; }
+                        else { box.disabled = false; }
+                    });
+                    dirty = true;
+                    updateTrigger();
+                });
+                if (allBox.checked) {
+                    root.querySelectorAll('.ms-option').forEach(function(box) {
+                        box.disabled = true;
+                    });
+                }
+            }
+            root.querySelectorAll('.ms-option').forEach(function(box) {
+                box.addEventListener('change', function() {
+                    if (box.checked && allBox) {
+                        allBox.checked = false;
+                        root.querySelectorAll('.ms-option').forEach(function(other) {
+                            other.disabled = false;
+                        });
+                    }
+                    dirty = true;
+                    updateTrigger();
+                });
+            });
+            updateTrigger();
         });
     }
+
+    function submitSidebarFilter(form) {
+        var params = new URLSearchParams();
+        var productRoot = form.querySelector('[data-multiselect="trust-product"]');
+        var productAll = productRoot ? productRoot.querySelector('.ms-all') : null;
+        var useAllProducts = !productRoot || (productAll && productAll.checked);
+        var anyProduct = false;
+        var bucketRoot = form.querySelector('[data-multiselect="delinquency-bucket"]');
+        var bucketAll = bucketRoot ? bucketRoot.querySelector('.ms-all') : null;
+        var useAllBuckets = bucketRoot && bucketAll && bucketAll.checked;
+        form.querySelectorAll('input, select').forEach(function(el) {
+            if (!el.name || el.disabled) return;
+            if (el.classList.contains('ms-all')) return;
+            if (el.classList.contains('ms-option')) {
+                if (!el.checked) return;
+                if (el.classList.contains('tp-product')) {
+                    if (!useAllProducts) {
+                        params.append('list_product_ids', el.value);
+                        anyProduct = true;
+                    }
+                    return;
+                }
+                params.append(el.name, el.value);
+                return;
+            }
+            var val = (el.value || '').trim();
+            if (val) params.set(el.name, val);
+        });
+        if (useAllProducts || !anyProduct) params.set('list_product_id', '');
+        if (useAllBuckets) params.set('delinquency_bucket', '');
+        window.location = form.getAttribute('action') + '?' + params.toString();
+    }
+
+    bindSidebarMultiselects(document.getElementById('sf-form'));
+    bindSidebarMultiselects(document.querySelector('.workbench-filter'));
 
     document.querySelectorAll('.mark-select').forEach(function(sel) {
         sel.addEventListener('change', function() {
@@ -2545,29 +3334,121 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // Double-click to edit sidebar filter items (auto-submit on change)
-    document.querySelectorAll('.sf-item').forEach(function(item) {
-        var display = item.querySelector('.sf-display');
-        var sel = item.querySelector('.sf-select');
-        if (!display || !sel) return;
-        display.addEventListener('dblclick', function() {
-            sel.style.display = 'block';   // overlay on top; do NOT hide display
-            sel.focus();
+    (function() {
+        var MARKER_VISUAL = {
+            '无标记': { tone: 'none', short: '无' },
+            '已关注': { tone: 'watch', short: '已关注' },
+            '重点关注': { tone: 'focus', short: '重点关注' }
+        };
+        function closeAllMarkerMenus(except) {
+            document.querySelectorAll('.trust-marker-cell.is-open').forEach(function(cell) {
+                if (except && cell === except) return;
+                cell.classList.remove('is-open');
+                var menu = cell.querySelector('.trust-marker-menu');
+                var badge = cell.querySelector('.trust-marker-badge');
+                if (menu) menu.hidden = true;
+                if (badge) badge.setAttribute('aria-expanded', 'false');
+            });
+        }
+        function applyMarkerVisual(cell, value) {
+            var vis = MARKER_VISUAL[value] || { tone: 'none', short: value };
+            cell.dataset.value = value;
+            var badge = cell.querySelector('.trust-marker-badge');
+            var label = cell.querySelector('.trust-marker-label');
+            var dot = badge && badge.querySelector('.trust-marker-dot');
+            if (badge) {
+                badge.className = 'trust-marker-badge tone-' + vis.tone;
+                badge.title = '信托标记：' + value;
+                badge.setAttribute('aria-label', '信托标记：' + value + '，点击修改');
+            }
+            if (dot) dot.className = 'trust-marker-dot tone-' + vis.tone;
+            if (label) label.textContent = vis.short;
+            cell.querySelectorAll('.trust-marker-option').forEach(function(opt) {
+                var active = opt.dataset.value === value;
+                opt.classList.toggle('is-active', active);
+                opt.setAttribute('aria-selected', active ? 'true' : 'false');
+            });
+        }
+        function saveMarker(cell, value) {
+            var field = cell.dataset.field || 'trust_marker';
+            var payload = {
+                trust_product_id: parseInt(cell.dataset.trustProductId, 10),
+                asset_code: cell.dataset.assetCode,
+                data_date: cell.dataset.dataDate
+            };
+            payload[field] = value;
+            cell.classList.remove('saved', 'error');
+            cell.classList.add('saving');
+            fetch('/overdue/custody-marks', {
+                method: 'PATCH',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(function(res) {
+                return res.json().then(function(data) {
+                    cell.classList.remove('saving');
+                    if (!res.ok) {
+                        cell.classList.add('error');
+                        throw new Error(data.detail || '保存失败');
+                    }
+                    applyMarkerVisual(cell, value);
+                    cell.classList.add('saved');
+                    setTimeout(function() { cell.classList.remove('saved'); }, 1200);
+                });
+            }).catch(function() {
+                cell.classList.remove('saving');
+                cell.classList.add('error');
+            });
+        }
+        document.querySelectorAll('.trust-marker-cell').forEach(function(cell) {
+            var badge = cell.querySelector('.trust-marker-badge');
+            var menu = cell.querySelector('.trust-marker-menu');
+            if (!badge || !menu) return;
+            badge.addEventListener('click', function(e) {
+                e.stopPropagation();
+                var open = !cell.classList.contains('is-open');
+                closeAllMarkerMenus(open ? cell : null);
+                cell.classList.toggle('is-open', open);
+                menu.hidden = !open;
+                badge.setAttribute('aria-expanded', open ? 'true' : 'false');
+            });
+            menu.querySelectorAll('.trust-marker-option').forEach(function(opt) {
+                opt.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    var value = opt.dataset.value;
+                    closeAllMarkerMenus();
+                    if (!value || value === cell.dataset.value) return;
+                    saveMarker(cell, value);
+                });
+            });
         });
-        sel.addEventListener('change', function() {
-            display.textContent = this.options[this.selectedIndex].text;
-            sel.style.display = 'none';
-            var form = document.getElementById('sf-form');
-            if (form) form.submit();
+        document.addEventListener('click', function() { closeAllMarkerMenus(); });
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closeAllMarkerMenus();
         });
-        sel.addEventListener('blur', function() {
-            sel.style.display = 'none';
+    })();
+
+    document.querySelectorAll('.summary-status-open').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            expandWriteBar();
+            if (writeBar && writeBar.dataset.activeCase && writeBar.dataset.activeCase !== 'new') {
+                switchFollowupCase(writeBar.dataset.activeCase);
+            }
+            if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         });
     });
-    var form = document.getElementById('followup-form');
-    var clearBtn = document.getElementById('followup-clear');
-    if (clearBtn && form) {
+    document.querySelectorAll('.summary-new-case-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            switchFollowupCase('new');
+            expandWriteBar();
+            if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+    });
+
+    document.querySelectorAll('.followup-clear-btn').forEach(function(clearBtn) {
         clearBtn.addEventListener('click', function() {
+            var form = clearBtn.closest('form');
+            if (!form) return;
             form.reset();
             var uploader = form.querySelector('.attachment-uploader');
             if (uploader && uploader.clearAttachmentUploader) {
@@ -2580,7 +3461,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 btn.setAttribute('aria-expanded', 'false');
             });
         });
-    }
+    });
 
     document.querySelectorAll('.attachment-uploader').forEach(initAttachmentUploader);
     document.querySelectorAll('.followup-entry-shell:not(.followup-entry-shell--create)').forEach(initSavedAttachmentRemovers);
@@ -2620,10 +3501,31 @@ _WORKBENCH_SPECIFIC_CSS = """
     }
     .sf-item { display: inline-flex; align-items: center; position: relative; }
     .sf-display {
-        font-size: 12px; color: #e2e8f0; cursor: default; user-select: none;
+        font-size: 12px; line-height: 1.35; color: #e2e8f0; cursor: default; user-select: none;
         border-bottom: 1px dashed rgba(255,255,255,0.18); padding: 1px 0;
+        background: none; border-top: none; border-left: none; border-right: none;
+        font-family: inherit; font-weight: inherit; text-align: left;
     }
     .sf-display:hover { border-bottom-color: rgba(99,179,237,0.55); color: #93c5fd; }
+    .sf-multiselect-trigger { cursor: pointer; max-width: 11rem; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; }
+    .sf-multiselect-panel {
+        position: absolute; top: calc(100% + 4px); left: 0; z-index: 300;
+        min-width: 11rem; max-height: 14rem; overflow-y: auto;
+        padding: 0.35rem 0; border-radius: 8px;
+        background: rgba(15,23,42,0.98);
+        border: 1px solid rgba(148,163,184,0.25);
+        box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    }
+    .sf-multiselect-panel .multiselect-option {
+        display: flex; align-items: center; gap: 0.4rem;
+        padding: 0.28rem 0.65rem; font-size: 12px; color: #cbd5e1; cursor: pointer;
+    }
+    .sf-multiselect-panel .multiselect-option:hover { background: rgba(56,189,248,0.1); color: #f8fafc; }
+    .sf-multiselect-panel .multiselect-all {
+        border-bottom: 1px solid rgba(255,255,255,0.08); margin-bottom: 0.15rem;
+        padding-bottom: 0.4rem;
+    }
     .sf-select {
         display: none;
         position: absolute; top: -2px; left: -4px; z-index: 200;
@@ -2697,16 +3599,56 @@ _WORKBENCH_SPECIFIC_CSS = """
     .panel-fixed-rows tbody tr.row-pad td {
         color: transparent; border-color: rgba(255,255,255,0.04);
     }
-    .col-repay-custody { width: 38%; }
-    .col-repay-date { width: 28%; }
-    .col-repay-amt { width: 34%; }
-    .col-tl-time { width: 22%; }
-    .col-tl-type { width: 12%; }
-    .col-tl-title { width: 44%; }
-    .col-tl-detail { width: 22%; }
+    .tl-history-table tbody.tl-case-block tr.tl-case-detail { height: auto; }
+    .panel-fixed-rows th.cell-text,
+    .panel-fixed-rows td.cell-text { text-align: left; }
+    .panel-fixed-rows th.num,
+    .panel-fixed-rows td.num { text-align: right; }
+    .col-repay-asset { width: 26%; }
+    .col-repay-custody { width: 26%; }
+    .col-repay-date { width: 22%; }
+    .col-repay-amt { width: 26%; }
+    .col-tl-time { width: 24%; }
+    .col-tl-cat { width: 18%; }
+    .col-tl-status { width: 16%; }
+    .col-tl-desc { width: 42%; }
+    .tl-case-toggle {
+        display: inline-flex; align-items: center; gap: 0.35rem;
+        background: none; border: none; color: #e2e8f0; cursor: pointer;
+        padding: 0; font: inherit; font-size: inherit;
+    }
+    .tl-case-toggle:hover { color: #7dd3fc; }
+    .tl-case-caret {
+        display: inline-block; width: 0.7rem; font-size: 0.65rem; color: #94a3b8;
+        transition: transform 0.12s ease;
+    }
+    .tl-case-block.is-open .tl-case-caret { transform: rotate(90deg); }
+    .tl-case-block.is-open .tl-case-row td { color: #f8fafc; }
+    .tl-case-detail td {
+        padding: 0.35rem 0.4rem 0.55rem !important;
+        white-space: normal; overflow: visible;
+        background: rgba(15,23,42,0.35);
+    }
+    .tl-entry-wrap {
+        border: 1px solid rgba(148,163,184,0.18); border-radius: 6px;
+        padding: 0.35rem 0.45rem; background: rgba(0,0,0,0.18);
+    }
+    .tl-entry-table {
+        width: 100%; border-collapse: collapse; table-layout: fixed;
+        font-size: 0.78rem;
+    }
+    .tl-entry-table th,
+    .tl-entry-table td {
+        text-align: left; padding: 0.2rem 0.3rem;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .tl-entry-table th { color: #94a3b8; font-weight: 500; }
+    .tl-entry-table tr:last-child td { border-bottom: none; }
     .timeline-goto-entry, .timeline-detail-link {
         background: none; border: none; color: #38bdf8; cursor: pointer;
         padding: 0; font: inherit; font-size: inherit;
+        max-width: 100%; overflow: hidden; text-overflow: ellipsis;
     }
     .timeline-goto-entry:hover, .timeline-detail-link:hover { text-decoration: underline; }
     .panel-expand { margin-top: 0.5rem; }
@@ -2744,6 +3686,95 @@ _WORKBENCH_SPECIFIC_CSS = """
     .summary-chip.has-tip:hover .tip-panel,
     .summary-chip.has-tip:focus-within .tip-panel { display: block; }
     .summary-chip-editable .mark-display { font-size: 13px; }
+    .summary-chip-mark, .summary-chip-status { align-items: center; }
+    .summary-chip-mark .tip-panel,
+    .summary-chip-status .tip-panel { min-width: 9rem; }
+    .internal-status-cell {
+        display: inline-flex; align-items: center; gap: 0.3rem; min-height: 1.35rem;
+    }
+    .internal-status-link {
+        display: inline-flex; align-items: center; justify-content: center;
+        text-decoration: none; line-height: 1; background: none; border: none;
+        padding: 0; cursor: pointer; font: inherit; color: inherit;
+    }
+    .status-dot, .status-count {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 1.35rem; height: 1.35rem; min-width: 1.35rem;
+        border-radius: 50%; box-sizing: border-box;
+    }
+    .status-dot {
+        background: #22c55e;
+        box-shadow: 0 0 0 2px rgba(34,197,94,0.22);
+    }
+    .status-count {
+        padding: 0; font-size: 0.72rem; font-weight: 700; line-height: 1;
+        color: #0f172a; background: #f59e0b;
+        box-shadow: 0 0 0 1px rgba(245,158,11,0.35);
+    }
+    .status-count--settled {
+        border-radius: 999px;
+        background: linear-gradient(135deg, #fbbf24, #34d399);
+        box-shadow: 0 0 0 1px rgba(52,211,153,0.35);
+    }
+    .internal-status-add {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 1.2rem; height: 1.2rem; border-radius: 4px;
+        font-size: 0.95rem; font-weight: 700; line-height: 1;
+        color: #64748b; text-decoration: none; background: none;
+        opacity: 0.28; border: 1px solid transparent; cursor: pointer;
+        transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+    .summary-line:hover .internal-status-add,
+    .internal-status-cell:focus-within .internal-status-add,
+    .internal-status-add:focus-visible {
+        opacity: 1; color: #e2e8f0;
+        border-color: rgba(56,189,248,0.45);
+        background: rgba(56,189,248,0.12);
+    }
+    .trust-marker-cell { position: relative; display: inline-flex; align-items: center; }
+    .trust-marker-badge {
+        display: inline-flex; align-items: center; gap: 0.35rem;
+        padding: 0.12rem 0.4rem; border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: rgba(255,255,255,0.04); color: #cbd5e1;
+        font-size: 0.78rem; cursor: pointer; line-height: 1.2;
+    }
+    .trust-marker-badge:hover,
+    .trust-marker-cell.is-open .trust-marker-badge {
+        border-color: rgba(56,189,248,0.4);
+        background: rgba(56,189,248,0.08);
+    }
+    .trust-marker-dot {
+        width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+        background: #64748b;
+    }
+    .trust-marker-dot.tone-none {
+        background: transparent; border: 1.5px solid #64748b;
+    }
+    .trust-marker-dot.tone-watch { background: #f59e0b; }
+    .trust-marker-dot.tone-focus { background: #f87171; }
+    .trust-marker-badge.tone-none { color: #94a3b8; }
+    .trust-marker-badge.tone-watch { color: #fbbf24; }
+    .trust-marker-badge.tone-focus { color: #fecaca; }
+    .trust-marker-menu {
+        position: absolute; top: calc(100% + 0.25rem); left: 0; z-index: 50;
+        min-width: 8.5rem; padding: 0.25rem;
+        border-radius: 8px; border: 1px solid rgba(148,163,184,0.25);
+        background: #0f172a; box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+        display: flex; flex-direction: column; gap: 0.1rem;
+    }
+    .trust-marker-menu[hidden] { display: none !important; }
+    .trust-marker-option {
+        display: flex; align-items: center; gap: 0.4rem;
+        width: 100%; padding: 0.35rem 0.45rem; border: none; border-radius: 6px;
+        background: transparent; color: #e2e8f0; font-size: 0.78rem;
+        cursor: pointer; text-align: left;
+    }
+    .trust-marker-option:hover { background: rgba(56,189,248,0.12); }
+    .trust-marker-option.is-active { background: rgba(56,189,248,0.18); }
+    .trust-marker-cell.saving { opacity: 0.6; }
+    .trust-marker-cell.saved .trust-marker-badge { border-color: #34d399; }
+    .trust-marker-cell.error .trust-marker-badge { border-color: #f87171; }
     .summary-chip-line { max-width: 100%; }
     .check-ok { color: #34d399; font-weight: 600; }
     .check-bad { color: #f87171; font-weight: 600; }
@@ -2814,6 +3845,14 @@ _WORKBENCH_SPECIFIC_CSS = """
     .queue-line2 {
         font-size: 0.72rem; color: #94a3b8; margin-top: 0.2rem;
         display: flex; flex-wrap: wrap; gap: 0.35rem 0.5rem; align-items: center;
+    }
+    .queue-bucket-days {
+        display: inline-flex; align-items: center; gap: 0.3rem; white-space: nowrap;
+    }
+    .queue-bucket-days .badge { font-size: 0.68rem; padding: 0.05rem 0.3rem; }
+    .queue-status { flex-shrink: 0; }
+    .queue-status .status-dot, .queue-status .status-count {
+        width: 1.15rem; height: 1.15rem; min-width: 1.15rem; font-size: 0.68rem;
     }
     .custody-card {
         padding: 0.75rem; margin: 0.5rem 0.75rem;
@@ -2909,6 +3948,93 @@ _WORKBENCH_SPECIFIC_CSS = """
         overflow: visible;
     }
     .sticky-write-title { font-size: 0.95rem; color: #f8fafc; }
+    .followup-section-title {
+        font-size: 0.72rem; font-weight: 600; letter-spacing: 0.02em;
+        color: #94a3b8; margin: 0 0 0.25rem;
+    }
+    .followup-case-section {
+        border-left: 3px solid rgba(56,189,248,0.55);
+        background: rgba(56,189,248,0.06);
+        border-radius: 8px;
+        padding: 0.35rem 0.55rem 0.4rem;
+        margin-bottom: 0.45rem;
+    }
+    .followup-entries-section {
+        border-top: 1px solid rgba(255,255,255,0.1);
+        padding-top: 0.45rem;
+        margin-top: 0.1rem;
+    }
+    .followup-case-strip {
+        display: flex; flex-wrap: nowrap; gap: 0.3rem;
+        overflow-x: auto; margin: 0 0 0.3rem; padding-bottom: 0;
+    }
+    .case-chip {
+        flex-shrink: 0; display: flex; flex-direction: row; align-items: center; gap: 0.35rem;
+        padding: 0.22rem 0.55rem; border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.15); background: rgba(15,23,42,0.45);
+        color: #94a3b8; cursor: pointer; text-align: left; max-width: 18rem;
+    }
+    .case-chip.active {
+        background: rgba(56,189,248,0.22); border-color: rgba(56,189,248,0.5); color: #e2e8f0;
+    }
+    .case-chip-new { border-style: dashed; }
+    .case-chip-main { font-size: 0.78rem; font-weight: 600; color: inherit; white-space: nowrap; }
+    .case-chip-sub {
+        font-size: 0.7rem; color: #64748b; white-space: nowrap;
+        overflow: hidden; text-overflow: ellipsis; max-width: 8rem;
+    }
+    .case-chip.active .case-chip-sub { color: #94a3b8; }
+    .followup-case-panel { display: none; margin-bottom: 0; }
+    .followup-case-panel.active { display: block; }
+    .followup-case-edit-grid {
+        display: grid;
+        grid-template-columns: 8.5rem 7.5rem minmax(10rem, 16rem);
+        gap: 0.25rem 0.5rem; align-items: end;
+    }
+    .followup-case-edit-grid .followup-case-desc {
+        grid-column: 3; grid-row: 1;
+        max-width: 16rem;
+    }
+    .followup-case-edit-grid .followup-field:nth-child(4) {
+        grid-column: 1; grid-row: 2;
+    }
+    .followup-case-edit-grid .followup-case-actions {
+        grid-column: 2 / span 2; grid-row: 2;
+        display: flex; align-items: end; padding-bottom: 0.05rem;
+    }
+    .followup-case-edit-grid select,
+    .followup-case-edit-grid .followup-case-desc-input,
+    .followup-case-edit-grid .field-display--meta {
+        width: 100%; margin-top: 0; padding: 0.28rem 0.4rem; border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25);
+        color: #e2e8f0; box-sizing: border-box; font-size: 0.8rem;
+        height: 1.7rem; min-height: 1.7rem; max-height: 1.7rem;
+    }
+    .followup-case-edit-grid .field-display--meta {
+        display: flex; align-items: center;
+    }
+    .followup-case-edit-grid .followup-case-desc-input {
+        max-width: 16rem;
+    }
+    .followup-case-edit-grid .followup-field-label {
+        margin-bottom: 0.1rem; font-size: 0.72rem;
+    }
+    @media (max-width: 720px) {
+        .followup-case-edit-grid {
+            grid-template-columns: 1fr 1fr;
+        }
+        .followup-case-edit-grid .followup-case-desc {
+            grid-column: 1 / -1; grid-row: auto; max-width: 16rem;
+        }
+        .followup-case-edit-grid .followup-field:nth-child(4) {
+            grid-column: 1; grid-row: auto;
+        }
+        .followup-case-edit-grid .followup-case-actions {
+            grid-column: 2; grid-row: auto;
+        }
+    }
+    .followup-entries-block { display: none; }
+    .followup-entries-block.active { display: block; }
     .entry-tabs {
         display: flex; flex-wrap: nowrap; gap: 0.35rem;
         overflow-x: auto; margin: 0.35rem 0 0.45rem;
@@ -2957,7 +4083,7 @@ _WORKBENCH_SPECIFIC_CSS = """
     }
     .followup-meta-row {
         display: grid;
-        grid-template-columns: 9rem 9rem minmax(0, 1fr);
+        grid-template-columns: 9rem minmax(0, 1fr);
         gap: 0.45rem 0.65rem;
         align-items: start;
     }
@@ -2992,13 +4118,22 @@ _WORKBENCH_SPECIFIC_CSS = """
         white-space: pre-wrap; word-break: break-word;
     }
     .field-display--attachment {
-        height: 2.75rem; min-height: 2.75rem; max-height: 2.75rem;
+        height: auto; min-height: 2.75rem; max-height: 4.5rem;
         overflow-y: auto; overflow-x: hidden;
+    }
+    .followup-view-only {
+        display: inline-flex; flex-wrap: wrap; gap: 0.35rem; align-items: center;
     }
     .followup-saved-attachments {
         display: flex; flex-wrap: wrap; gap: 0.35rem;
         align-items: center; width: 100%;
     }
+    .attachment-thumb--saved {
+        width: 36px; height: 36px; border-radius: 5px;
+        border: 1px solid rgba(148,163,184,0.35);
+        background: rgba(15,23,42,0.55);
+    }
+    .attachment-thumb-link { display: inline-flex; line-height: 0; }
     .attachment-chip-saved {
         max-width: 100%;
     }

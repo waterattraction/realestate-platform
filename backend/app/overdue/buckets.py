@@ -302,3 +302,37 @@ def sql_agg_delinquency_filter(
     return sql_overdue_asset_filter(
         overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
     )
+
+
+def sql_agg_delinquency_filter_any(
+    filter_buckets: list[str] | None,
+    overdue_days_expr: str,
+    remaining_amount_expr: str,
+    *,
+    tolerance_param: str = ":tolerance",
+) -> str:
+    """HAVING：None/空=不过滤；多值=任一等级命中。"""
+    if not filter_buckets:
+        return "TRUE"
+    if len(filter_buckets) == 1:
+        return sql_agg_delinquency_filter(
+            filter_buckets[0],
+            overdue_days_expr,
+            remaining_amount_expr,
+            tolerance_param=tolerance_param,
+        )
+    parts = [
+        f"({sql_agg_delinquency_filter(b, overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)})"
+        for b in filter_buckets
+    ]
+    return "(" + " OR ".join(parts) + ")"
+
+
+def matches_any_delinquency_bucket_filter(
+    item_bucket: str, filter_buckets: list[str] | None
+) -> bool:
+    if not filter_buckets:
+        return True
+    return any(
+        matches_delinquency_bucket_filter(item_bucket, b) for b in filter_buckets
+    )

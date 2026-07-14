@@ -141,7 +141,7 @@ class EventRepo:
             rows = conn.execute(
                 text(
                     """
-                    SELECT e.id, e.status_snapshot, e.created_at, c.id AS case_id
+                    SELECT e.id, e.owner_name, e.created_at, c.id AS case_id, c.category
                     FROM trust_overdue_followup_entries e
                     INNER JOIN trust_overdue_followup_cases c ON c.id = e.case_id
                     INNER JOIN trust_assets ta
@@ -167,7 +167,7 @@ class EventRepo:
                     correlation_id=f"followup:case:{rec.get('case_id')}",
                     recorded_at=rec.get("created_at"),
                     source_ref=str(eid),
-                    payload_summary=f"Follow-up {rec.get('status_snapshot')}",
+                    payload_summary=f"Follow-up {rec.get('category') or ''}".strip(),
                 )
             )
         return events

@@ -65,13 +65,25 @@
 
 ## followup status
 
-逾期跟进状态（`trust_overdue_followups.status`）。
+逾期跟进状态（`trust_overdue_followups.status`，legacy）。
 
 | Value | 中文 | 含义 |
 |-------|------|------|
 | `open` | 待处理 | 新建 |
 | `in_progress` | 跟进中 | 处理中 |
 | `resolved` | 已解决 | 已解决 |
+| `closed` | 已关闭 | 终态 |
+
+## followup case status
+
+跟进事项状态（`trust_overdue_followup_cases.status`）。
+
+| Value | 中文 | 含义 |
+|-------|------|------|
+| `open` | 待跟进 | 新建默认 |
+| `in_progress` | 跟进中 | 处理中 |
+| `settled_week` | 本周结算 | 本周内结算；仍可写跟进记录 |
+| `resolved` | 已解决 | 终态 |
 | `closed` | 已关闭 | 终态 |
 
 ## trust product status
@@ -95,18 +107,39 @@
 | `pending` | 待激活 | 待生效 | seed |
 | `active` | 生效中 | 运行中 | seed |
 
-## trust asset internal status
+## trust asset trust marker
 
-`trust_asset_trust_marks.internal_status`（中文值，非英文枚举）。
+`trust_asset_trust_marks.trust_marker`（中文值）。
 
 | Value | 中文 |
 |-------|------|
-| `待跟进` | 待跟进 |
-| `跟进中` | 跟进中 |
-| `已解决` | 已解决 |
-| `已关闭` | 已关闭 |
+| `无标记` | 无标记 |
+| `已关注` | 已关注 |
+| `重点关注` | 重点关注 |
 
-> 与 `followup status` **不同字段、不同表**；勿混用。
+## trust asset internal status
+
+`trust_asset_trust_marks.internal_status`（中文值，**由跟进事项派生**）。
+
+| Value | 中文 | 含义 |
+|-------|------|------|
+| `正常` | 正常 | 无问题态 / 本周结算事项 |
+| `待跟进(N)` | 待跟进(N) | N = open/in_progress（优先于本周结算） |
+| `本周结算(M)` | 本周结算(M) | 无问题态且 M = settled_week |
+
+> 列表筛选「待跟进」/「本周结算」分别匹配前缀。与事项 `status` 不同字段；勿混用。
+
+## followup case category
+
+`trust_overdue_followup_cases.category`。
+
+| Value | 中文 |
+|-------|------|
+| `轻度逾期` | 轻度逾期 |
+| `重度逾期` | 重度逾期 |
+| `回购` | 回购 |
+| `置换` | 置换 |
+| `潜在风险` | 潜在风险 |
 
 ## risk alert status
 

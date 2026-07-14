@@ -397,7 +397,7 @@ def _required_asset_ineligibility_reason(
         )
         if delinquency_bucket == "ES":
             return f"非 M1（{label}）"
-        return f"非 M1（{label}，逾期 {overdue_days} 天，仅接受 M1）"
+        return f"非 M1（{label}，未付 {overdue_days} 天，仅接受 M1）"
     if last_renovation_payment_date is None:
         return "缺少装修款截止日"
     if last_renovation_payment_date > renovation_deadline:

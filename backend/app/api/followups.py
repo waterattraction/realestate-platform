@@ -1,16 +1,20 @@
-"""Followup write API — single entry POST + attachments."""
+"""Followup write API — cases + entries + attachments."""
 
-from pathlib import Path
 from typing import Annotated
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 
 from app import auth
 from app import query_utils
 from app.db import get_engine
-from app.repo.followup_repo import FollowupRepo
+from app.repo.followup_repo import (
+    CASE_CATEGORIES,
+    DEFAULT_CASE_CATEGORY,
+    DEFAULT_CASE_STATUS,
+    FollowupRepo,
+)
 from app.service.followup_upload import (
     attachment_content_disposition,
     save_entry_files,
@@ -20,43 +24,54 @@ from app.service.followup_upload import (
 router = APIRouter(tags=["overdue-followups"])
 
 
+def _safe_return_to(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    path = str(raw).strip()
+    if not path.startswith("/"):
+        return None
+    parsed = urlparse(path)
+    if parsed.scheme or parsed.netloc or parsed.path != "/overdue":
+        return None
+    return path
+
+
 def _workbench_followup_redirect_qs(
     trust_product_id: int,
     asset_code: str,
     *,
+    case_id: int | None = None,
     entry_id: int | None = None,
+    new_case: bool = False,
+    request: Request | None = None,
 ) -> str:
     qs = (
         f"?trust_product_id={trust_product_id}"
         f"&asset_code={quote(asset_code)}"
         f"&followup_expanded=1"
     )
+    if case_id is not None:
+        qs += f"&followup_case_id={case_id}"
     if entry_id is not None:
         qs += f"&followup_entry_id={entry_id}"
+    if new_case:
+        qs += "&new_followup_case=1"
+    if request is not None:
+        bucket = query_utils.clean_optional_str(request.query_params.get("delinquency_bucket"))
+        if bucket:
+            qs += f"&delinquency_bucket={quote(bucket)}"
+        rt = _safe_return_to(request.query_params.get("return_to"))
+        if rt:
+            qs += f"&return_to={quote(rt, safe='')}"
     return qs
 
-_engine = get_engine()
-_repo = FollowupRepo(_engine)
-_get_user = auth.make_current_user_dependency(_engine)
 
-
-@router.post("/overdue/workbench/followups/entries")
-async def create_followup_entry(
-    current_user: Annotated[dict, Depends(_get_user)],
-    trust_product_id: int = Form(...),
-    asset_code: str = Form(""),
-    custody_asset_code: str = Form(""),
-    data_date: str = Form(...),
-    status: str = Form("in_progress"),
-    owner_name: str = Form(""),
-    overdue_reason: str = Form(""),
-    follow_up_plan: str = Form(""),
-    trust_feedback: str = Form(""),
-    note: str = Form(""),
-    entry_type: str = Form("manual"),
-    redirect_to_workbench: str | None = Form(None),
-    files: list[UploadFile] = File(default=[]),
-):
+def _resolve_asset_code(
+    trust_product_id: int,
+    asset_code: str,
+    custody_asset_code: str,
+    data_date: str | None,
+) -> str:
     ac = query_utils.clean_optional_str(asset_code) or ""
     if not ac and custody_asset_code:
         from app.service.overdue_workbench import build_overdue_workbench_service
@@ -70,18 +85,128 @@ async def create_followup_entry(
         ac = resolved or ""
     if not ac:
         raise HTTPException(status_code=400, detail="asset_code is required")
+    return ac
 
+
+_engine = get_engine()
+_repo = FollowupRepo(_engine)
+_get_user = auth.make_current_user_dependency(_engine)
+
+
+@router.post("/overdue/workbench/followups/cases")
+async def create_followup_case(
+    request: Request,
+    current_user: Annotated[dict, Depends(_get_user)],
+    trust_product_id: int = Form(...),
+    asset_code: str = Form(""),
+    custody_asset_code: str = Form(""),
+    data_date: str = Form(...),
+    category: str = Form(DEFAULT_CASE_CATEGORY),
+    description: str = Form(""),
+    status: str = Form(DEFAULT_CASE_STATUS),
+    owner_name: str = Form(""),
+    redirect_to_workbench: str | None = Form(None),
+):
+    ac = _resolve_asset_code(
+        trust_product_id, asset_code, custody_asset_code, data_date
+    )
+    cat = (category or DEFAULT_CASE_CATEGORY).strip()
+    if cat not in CASE_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"Invalid category: {cat}")
     try:
-        result = _repo.insert_entry_and_update_case(
+        result = _repo.create_case(
             trust_product_id=trust_product_id,
             asset_code=ac,
             data_date=data_date,
-            status=status or "in_progress",
+            category=cat,
+            description=description or None,
+            status=status or DEFAULT_CASE_STATUS,
+            owner_name=owner_name or None,
+            created_by=current_user.get("username"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if redirect_to_workbench:
+        qs = _workbench_followup_redirect_qs(
+            trust_product_id, ac, case_id=int(result["case_id"]), request=request
+        )
+        return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
+    return result
+
+
+@router.post("/overdue/workbench/followups/cases/{case_id}")
+async def update_followup_case(
+    case_id: int,
+    request: Request,
+    current_user: Annotated[dict, Depends(_get_user)],
+    trust_product_id: int = Form(...),
+    asset_code: str = Form(""),
+    custody_asset_code: str = Form(""),
+    data_date: str = Form(""),
+    status: str = Form(""),
+    category: str = Form(""),
+    description: str = Form(""),
+    owner_name: str = Form(""),
+    redirect_to_workbench: str | None = Form(None),
+):
+    ac = _resolve_asset_code(
+        trust_product_id, asset_code, custody_asset_code, data_date or None
+    )
+    try:
+        result = _repo.update_case(
+            case_id=case_id,
+            trust_product_id=trust_product_id,
+            asset_code=ac,
+            status=status or None,
+            category=category or None,
+            description=description if description != "" else None,
+            owner_name=owner_name or None,
+            updated_by=current_user.get("username"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if redirect_to_workbench:
+        qs = _workbench_followup_redirect_qs(
+            trust_product_id, ac, case_id=case_id, request=request
+        )
+        return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
+    return result
+
+
+@router.post("/overdue/workbench/followups/entries")
+async def create_followup_entry(
+    request: Request,
+    current_user: Annotated[dict, Depends(_get_user)],
+    trust_product_id: int = Form(...),
+    asset_code: str = Form(""),
+    custody_asset_code: str = Form(""),
+    data_date: str = Form(""),
+    case_id: int = Form(...),
+    owner_name: str = Form(""),
+    overdue_reason: str = Form(""),
+    follow_up_plan: str = Form(""),
+    entry_type: str = Form("manual"),
+    redirect_to_workbench: str | None = Form(None),
+    files: list[UploadFile] = File(default=[]),
+    # 兼容旧表单字段（忽略）
+    status: str = Form(""),
+    trust_feedback: str = Form(""),
+    note: str = Form(""),
+):
+    del status, trust_feedback, note
+    ac = _resolve_asset_code(
+        trust_product_id, asset_code, custody_asset_code, data_date or None
+    )
+    try:
+        result = _repo.insert_entry(
+            case_id=case_id,
+            trust_product_id=trust_product_id,
+            asset_code=ac,
             owner_name=owner_name or None,
             overdue_reason=overdue_reason or None,
             follow_up_plan=follow_up_plan or None,
-            trust_feedback=trust_feedback or None,
-            note=note or None,
             entry_type=entry_type or "manual",
             created_by=current_user.get("username"),
         )
@@ -102,7 +227,11 @@ async def create_followup_entry(
 
     if redirect_to_workbench:
         qs = _workbench_followup_redirect_qs(
-            trust_product_id, ac, entry_id=int(result["entry_id"])
+            trust_product_id,
+            ac,
+            case_id=int(result["case_id"]),
+            entry_id=int(result["entry_id"]),
+            request=request,
         )
         return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
 
@@ -112,46 +241,34 @@ async def create_followup_entry(
 @router.post("/overdue/workbench/followups/entries/{entry_id}")
 async def update_followup_entry(
     entry_id: int,
+    request: Request,
     current_user: Annotated[dict, Depends(_get_user)],
     trust_product_id: int = Form(...),
     asset_code: str = Form(""),
     custody_asset_code: str = Form(""),
     data_date: str = Form(""),
-    status: str = Form("in_progress"),
     owner_name: str = Form(""),
     overdue_reason: str = Form(""),
     follow_up_plan: str = Form(""),
-    trust_feedback: str = Form(""),
-    note: str = Form(""),
     redirect_to_workbench: str | None = Form(None),
     remove_attachment_ids: list[int] = Form(default=[]),
     files: list[UploadFile] = File(default=[]),
+    status: str = Form(""),
+    trust_feedback: str = Form(""),
+    note: str = Form(""),
 ):
-    ac = query_utils.clean_optional_str(asset_code) or ""
-    if not ac and custody_asset_code:
-        from app.service.overdue_workbench import build_overdue_workbench_service
-
-        svc = build_overdue_workbench_service(_engine)
-        resolved = svc.resolve_asset_code(
-            trust_product_id,
-            query_utils.clean_optional_str(custody_asset_code) or "",
-            data_date or None,
-        )
-        ac = resolved or ""
-    if not ac:
-        raise HTTPException(status_code=400, detail="asset_code is required")
-
+    del status, trust_feedback, note
+    ac = _resolve_asset_code(
+        trust_product_id, asset_code, custody_asset_code, data_date or None
+    )
     try:
         result = _repo.update_entry(
             entry_id=entry_id,
             trust_product_id=trust_product_id,
             asset_code=ac,
-            status=status or "in_progress",
             owner_name=owner_name or None,
             overdue_reason=overdue_reason or None,
             follow_up_plan=follow_up_plan or None,
-            trust_feedback=trust_feedback or None,
-            note=note or None,
             updated_by=current_user.get("username"),
         )
     except ValueError as exc:
@@ -183,7 +300,11 @@ async def update_followup_entry(
 
     if redirect_to_workbench:
         qs = _workbench_followup_redirect_qs(
-            trust_product_id, ac, entry_id=entry_id
+            trust_product_id,
+            ac,
+            case_id=int(result["case_id"]),
+            entry_id=entry_id,
+            request=request,
         )
         return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
 
@@ -193,26 +314,16 @@ async def update_followup_entry(
 @router.post("/overdue/workbench/followups/entries/{entry_id}/delete")
 def delete_followup_entry(
     entry_id: int,
+    request: Request,
     current_user: Annotated[dict, Depends(_get_user)],
     trust_product_id: int = Form(...),
     asset_code: str = Form(""),
     custody_asset_code: str = Form(""),
     redirect_to_workbench: str | None = Form(None),
 ):
-    ac = query_utils.clean_optional_str(asset_code) or ""
-    if not ac and custody_asset_code:
-        from app.service.overdue_workbench import build_overdue_workbench_service
-
-        svc = build_overdue_workbench_service(_engine)
-        resolved = svc.resolve_asset_code(
-            trust_product_id,
-            query_utils.clean_optional_str(custody_asset_code) or "",
-            None,
-        )
-        ac = resolved or ""
-    if not ac:
-        raise HTTPException(status_code=400, detail="asset_code is required")
-
+    ac = _resolve_asset_code(
+        trust_product_id, asset_code, custody_asset_code, None
+    )
     try:
         result = _repo.delete_entry(
             entry_id=entry_id,
@@ -224,7 +335,9 @@ def delete_followup_entry(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if redirect_to_workbench:
-        qs = _workbench_followup_redirect_qs(trust_product_id, ac)
+        qs = _workbench_followup_redirect_qs(
+            trust_product_id, ac, case_id=int(result["case_id"]), request=request
+        )
         return RedirectResponse(url=f"/overdue/workbench{qs}", status_code=303)
 
     return result

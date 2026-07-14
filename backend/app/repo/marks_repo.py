@@ -4,8 +4,8 @@ from sqlalchemy.engine import Engine
 from app.repo._serialize import row_to_dict
 
 
-TRUST_MARKER_DEFAULT = "未标记"
-INTERNAL_STATUS_DEFAULT = "待跟进"
+TRUST_MARKER_DEFAULT = "无标记"
+INTERNAL_STATUS_DEFAULT = "正常"
 
 
 class MarksRepo:
@@ -16,8 +16,9 @@ class MarksRepo:
         self,
         trust_product_id: int,
         asset_code: str,
-        data_date: str,
+        data_date: str | None = None,
     ) -> dict:
+        """按资产主编号取标记；data_date 仅作返回占位，不参与查询。"""
         with self._engine.connect() as conn:
             row = conn.execute(
                 text(
@@ -36,14 +37,12 @@ class MarksRepo:
                     FROM trust_asset_trust_marks
                     WHERE trust_product_id = :trust_product_id
                       AND asset_code = :asset_code
-                      AND data_date = :data_date
                     LIMIT 1
                     """
                 ),
                 {
                     "trust_product_id": trust_product_id,
                     "asset_code": asset_code,
-                    "data_date": data_date,
                 },
             ).fetchone()
         if row is None:
@@ -56,6 +55,8 @@ class MarksRepo:
                 "marker_note": None,
             }
         data = row_to_dict(row)
+        if data.get("data_date") is not None:
+            data["data_date"] = str(data["data_date"])
         data["trust_marker"] = data.get("trust_marker") or TRUST_MARKER_DEFAULT
         data["internal_status"] = data.get("internal_status") or INTERNAL_STATUS_DEFAULT
         return data
@@ -65,12 +66,12 @@ class MarksRepo:
         *,
         trust_product_id: int,
         asset_code: str,
-        data_date: str,
+        data_date: str | None = None,
         trust_marker: str | None = None,
         internal_status: str | None = None,
         updated_by: str | None = None,
     ) -> dict:
-        existing = self.fetch_mark(trust_product_id, asset_code, data_date)
+        existing = self.fetch_mark(trust_product_id, asset_code)
         if existing.get("id"):
             new_marker = trust_marker if trust_marker is not None else existing["trust_marker"]
             new_status = (
@@ -83,6 +84,7 @@ class MarksRepo:
                         UPDATE trust_asset_trust_marks
                         SET trust_marker = :trust_marker,
                             internal_status = :internal_status,
+                            data_date = COALESCE(:data_date, data_date),
                             updated_by = :updated_by,
                             updated_at = NOW()
                         WHERE id = :id
@@ -92,6 +94,7 @@ class MarksRepo:
                         "id": existing["id"],
                         "trust_marker": new_marker,
                         "internal_status": new_status,
+                        "data_date": data_date,
                         "updated_by": updated_by,
                     },
                 )
@@ -99,7 +102,11 @@ class MarksRepo:
                 **existing,
                 "trust_marker": new_marker,
                 "internal_status": new_status,
+                "data_date": data_date or existing.get("data_date"),
             }
+
+        if data_date is None:
+            raise ValueError("data_date is required when creating a trust mark row")
 
         new_marker = trust_marker or TRUST_MARKER_DEFAULT
         new_status = internal_status or INTERNAL_STATUS_DEFAULT
