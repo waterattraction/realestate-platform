@@ -1134,9 +1134,17 @@ def _render_sidebar(
             <div class="queue-body compact-queue" id="asset-queue">{asset_list_html}</div>
             <script>
             (function(){{
+                var queue = document.getElementById('asset-queue');
+                if (!queue) return;
+                var active = queue.querySelector('.queue-item.active');
+                if (active) {{
+                    active.scrollIntoView({{ block: 'nearest', behavior: 'instant' }});
+                    sessionStorage.removeItem('_queueScroll');
+                    return;
+                }}
                 var pos = sessionStorage.getItem('_queueScroll');
                 if (pos !== null) {{
-                    document.getElementById('asset-queue').scrollTop = parseInt(pos, 10);
+                    queue.scrollTop = parseInt(pos, 10);
                     sessionStorage.removeItem('_queueScroll');
                 }}
             }})();
@@ -3227,10 +3235,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
     var activeQueueItem = document.querySelector('.compact-queue .queue-item.active');
     if (activeQueueItem) {
-        // Only scroll on fresh load (sessionStorage already handled the click-navigation case)
-        if (!sessionStorage.getItem('_queueScroll')) {
-            activeQueueItem.scrollIntoView({ block: 'nearest', behavior: 'instant' });
-        }
+        activeQueueItem.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+        sessionStorage.removeItem('_queueScroll');
     }
 
     // Save scroll position before navigating to a new asset

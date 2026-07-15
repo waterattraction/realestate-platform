@@ -433,15 +433,29 @@ def _custody_marks_join_sql() -> str:
 
 
 def _sort_custody_items_in_bucket(items: list, bucket: str) -> list:
+    """Tab 内显式次级键：天数/回款日 DESC → 资产主编号 ASC（托管号仅防抖）。
+
+    先按主编号升序，再按主排序键降序（稳定排序保留同天数下的主编号序）。
+    """
+    tied = sorted(
+        items,
+        key=lambda it: (
+            str(it.get("asset_code") or ""),
+            str(it.get("custody_asset_code") or ""),
+        ),
+    )
     if bucket == "ES":
         return sorted(
-            items,
-            key=lambda it: it.get("last_payment_date") or "0000-01-01",
+            tied,
+            key=lambda it: it.get("last_payment_date") or "",
             reverse=True,
         )
     return sorted(
-        items,
-        key=lambda it: -(it.get("overdue_days") if it.get("overdue_days") is not None else -1),
+        tied,
+        key=lambda it: (
+            it.get("overdue_days") if it.get("overdue_days") is not None else -1
+        ),
+        reverse=True,
     )
 
 
@@ -1135,8 +1149,8 @@ def fetch_overdue_overview(
             ORDER BY
                 {overdue_buckets.sql_custody_list_sort_priority("mc.overdue_days", "mc.remaining_amount")},
                 COALESCE(mc.overdue_days, 0) DESC,
-                mc.max_payment_date DESC NULLS LAST,
-                mc.custody_asset_code
+                mc.asset_code ASC,
+                mc.custody_asset_code ASC
         """),
         {
             **query_params,
@@ -3253,7 +3267,8 @@ def render_overdue_html(
         )};
         if (tabKey) activatePortfolioTab(tabKey);
         if (!focusAsset) return;
-        var row = document.querySelector('tr[data-asset-code="' + focusAsset + '"]');
+        var row = document.getElementById('portfolio-row-' + focusAsset)
+            || document.querySelector('tr[data-asset-code="' + focusAsset + '"]');
         if (!row) return;
         var panel = row.closest('.tab-panel');
         if (panel && panel.id && panel.id.indexOf('tab-') === 0) {{
@@ -3261,11 +3276,15 @@ def render_overdue_html(
         }}
         row.classList.add('portfolio-row-focus');
         try {{
-            row.scrollIntoView({{ block: 'center', behavior: 'smooth' }});
-        }} catch (e) {{
-            row.scrollIntoView(true);
+            row.scrollIntoView({{ block: 'center', behavior: 'instant' }});
+        }} catch (e1) {{
+            try {{
+                row.scrollIntoView({{ block: 'center', behavior: 'auto' }});
+            }} catch (e2) {{
+                row.scrollIntoView(true);
+            }}
         }}
-        setTimeout(function() {{ row.classList.remove('portfolio-row-focus'); }}, 4000);
+        setTimeout(function() {{ row.classList.remove('portfolio-row-focus'); }}, 2500);
     }})();
 
     (function() {{

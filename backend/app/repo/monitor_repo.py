@@ -5,6 +5,7 @@ from app.overdue.buckets import (
     OVERDUE_ASSET_MIN_DAYS,
     RECONCILIATION_TOLERANCE_DEFAULT,
     sql_agg_delinquency_filter_any,
+    sql_custody_list_sort_priority,
 )
 from app.repo._serialize import row_to_dict, rows_to_dicts
 
@@ -268,11 +269,16 @@ class MonitorRepo:
         delinquency_bucket: str | None = None,
         delinquency_buckets: list[str] | None = None,
         trust_product_ids: list[int] | None = None,
+        prefer_trust_product_id: int | None = None,
+        prefer_asset_code: str | None = None,
     ) -> list[dict]:
-        """Return one row per asset_code for the workbench left-column list."""
+        """Return one row per asset_code for the workbench left-column list.
+
+        全序：等级优先级 → 未付天数 DESC → 资产主编号 ASC → trust_product_id。
+        有 prefer_* 时：keyset 取「当前起连续最多 limit 户」；否则全序 Top limit。
+        """
         from app import query_utils
 
-        # trust_product_ids 优先；兼容旧单参 trust_product_id
         ids = trust_product_ids
         if ids is None and trust_product_id is not None:
             ids = [trust_product_id]
@@ -295,7 +301,6 @@ class MonitorRepo:
             if markers
             else ""
         )
-        # followup_status(es) 含「待跟进(N)」派生值，SQL 精确匹配不够，由 get_asset_list 后置过滤
         _ = (followup_status, followup_statuses)
         buckets = delinquency_buckets
         if buckets is None and delinquency_bucket:
@@ -306,6 +311,10 @@ class MonitorRepo:
             "SUM(m.remaining_amount)",
             tolerance_param=":tolerance",
         )
+        sort_priority = sql_custody_list_sort_priority(
+            "MAX(m.overdue_days)",
+            "SUM(m.remaining_amount)",
+        )
         params: dict = {
             "data_date": data_date,
             "tolerance": RECONCILIATION_TOLERANCE_DEFAULT,
@@ -313,30 +322,119 @@ class MonitorRepo:
             **pid_params,
             **marker_params,
         }
+
+        agg_sql = f"""
+            SELECT
+                m.asset_code,
+                m.trust_product_id,
+                tp.name AS trust_product_name,
+                MAX(m.overdue_days)     AS overdue_days,
+                SUM(m.remaining_amount) AS remaining_amount,
+                COUNT(*)                AS split_count,
+                ARRAY_AGG(
+                    DISTINCT COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                    ORDER BY COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
+                ) AS custody_asset_codes,
+                ({sort_priority}) AS sort_priority
+            FROM trust_asset_monitor_records m
+            INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
+            INNER JOIN trust_products tp ON tp.id = m.trust_product_id
+            WHERE m.data_date = :data_date
+              {pid_sql}
+              {marker_clause}
+            GROUP BY m.asset_code, m.trust_product_id, tp.name
+            HAVING {having_clause}
+        """
+
+        prefer_code = (prefer_asset_code or "").strip() or None
+        use_keyset = prefer_trust_product_id is not None and prefer_code is not None
+
         with self._engine.connect() as conn:
+            if use_keyset:
+                cur = conn.execute(
+                    text(
+                        f"""
+                        SELECT sort_priority, overdue_days, asset_code, trust_product_id
+                        FROM ({agg_sql}) agg
+                        WHERE trust_product_id = :prefer_pid
+                          AND asset_code = :prefer_code
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        **params,
+                        "prefer_pid": int(prefer_trust_product_id),
+                        "prefer_code": prefer_code,
+                    },
+                ).fetchone()
+                if cur is not None:
+                    params.update(
+                        {
+                            "cur_priority": int(cur.sort_priority),
+                            "cur_days": int(cur.overdue_days or 0),
+                            "cur_code": str(cur.asset_code),
+                            "cur_pid": int(cur.trust_product_id),
+                        }
+                    )
+                    rows = conn.execute(
+                        text(
+                            f"""
+                            SELECT
+                                asset_code,
+                                trust_product_id,
+                                trust_product_name,
+                                overdue_days,
+                                remaining_amount,
+                                split_count,
+                                custody_asset_codes
+                            FROM ({agg_sql}) agg
+                            WHERE (
+                                sort_priority > :cur_priority
+                                OR (
+                                    sort_priority = :cur_priority
+                                    AND COALESCE(overdue_days, 0) < :cur_days
+                                )
+                                OR (
+                                    sort_priority = :cur_priority
+                                    AND COALESCE(overdue_days, 0) = :cur_days
+                                    AND asset_code > :cur_code
+                                )
+                                OR (
+                                    sort_priority = :cur_priority
+                                    AND COALESCE(overdue_days, 0) = :cur_days
+                                    AND asset_code = :cur_code
+                                    AND trust_product_id >= :cur_pid
+                                )
+                            )
+                            ORDER BY
+                                sort_priority ASC,
+                                COALESCE(overdue_days, 0) DESC,
+                                asset_code ASC,
+                                trust_product_id ASC
+                            LIMIT :limit
+                            """
+                        ),
+                        params,
+                    ).fetchall()
+                    return rows_to_dicts(rows)
+
             rows = conn.execute(
                 text(
                     f"""
                     SELECT
-                        m.asset_code,
-                        m.trust_product_id,
-                        tp.name AS trust_product_name,
-                        MAX(m.overdue_days)     AS overdue_days,
-                        SUM(m.remaining_amount) AS remaining_amount,
-                        COUNT(*)                AS split_count,
-                        ARRAY_AGG(
-                            DISTINCT COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
-                            ORDER BY COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code)
-                        ) AS custody_asset_codes
-                    FROM trust_asset_monitor_records m
-                    INNER JOIN trust_assets ta ON ta.id = m.trust_asset_id
-                    INNER JOIN trust_products tp ON tp.id = m.trust_product_id
-                    WHERE m.data_date = :data_date
-                      {pid_sql}
-                      {marker_clause}
-                    GROUP BY m.asset_code, m.trust_product_id, tp.name
-                    HAVING {having_clause}
-                    ORDER BY MAX(m.overdue_days) DESC
+                        asset_code,
+                        trust_product_id,
+                        trust_product_name,
+                        overdue_days,
+                        remaining_amount,
+                        split_count,
+                        custody_asset_codes
+                    FROM ({agg_sql}) agg
+                    ORDER BY
+                        sort_priority ASC,
+                        COALESCE(overdue_days, 0) DESC,
+                        asset_code ASC,
+                        trust_product_id ASC
                     LIMIT :limit
                     """
                 ),

@@ -415,12 +415,15 @@ class OverdueWorkbenchService:
         followup_statuses: list[str] | None = None,
         cities: list[str] | None = None,
         trust_product_ids: list[int] | None = None,
+        prefer_trust_product_id: int | None = None,
+        prefer_asset_code: str | None = None,
     ) -> dict:
         """Return asset_list dict (asset_code-based) for render.py.
 
         trust_product_ids: None = 全部产品；非空 = 多选限定。
         delinquency_buckets / trust_markers / followup_statuses / cities:
         None = 不限；非空 = 组合筛选。
+        prefer_*：当前资产主编号，keyset 取「当前起连续最多 100 户」。
         """
         ids = trust_product_ids
         if ids is None and trust_product_id is not None:
@@ -445,6 +448,8 @@ class OverdueWorkbenchService:
             trust_markers=markers,
             delinquency_buckets=buckets,
             trust_product_ids=ids,
+            prefer_trust_product_id=prefer_trust_product_id,
+            prefer_asset_code=prefer_asset_code,
         )
         pairs = [(int(r["trust_product_id"]), str(r["asset_code"])) for r in rows]
         city_map = self._fetch_city_by_asset(pairs) if cities else {}
@@ -571,6 +576,8 @@ class OverdueWorkbenchService:
             trust_markers=markers,
             followup_statuses=statuses,
             cities=cities,
+            prefer_trust_product_id=trust_product_id,
+            prefer_asset_code=resolved_asset,
         )
 
         custody_codes = list(old.get("custody_asset_codes") or [])
