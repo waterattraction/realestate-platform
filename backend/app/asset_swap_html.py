@@ -27,7 +27,7 @@ def render_swap_page(
     <div class="container">
     <nav class="breadcrumb"><a href="/">首页</a> / 资产置换推荐</nav>
     <h1>资产置换推荐</h1>
-    <p class="muted">只读推荐，不写入数据库。转出资产限美好生活系列产品；候选来自美润1号（仅 M1）。</p>
+    <p class="muted">只读推荐，不写入数据库。转出资产限美好生活系列产品；候选来自美润1号（M1 且未付天数 ≤ 25 天）。</p>
 
     <div class="swap-grid">
         <div class="card panel panel-source">
@@ -52,7 +52,7 @@ def render_swap_page(
             <div class="swap-input-row">
                 <div class="swap-field">
                     <label for="required_asset_codes">手工指定房源（可选）</label>
-                    <p class="swap-field-hint">填写后必须进入推荐方案</p>
+                    <p class="swap-field-hint">填写后必须进入推荐方案；未付超过 25 天仍可指定，查询结果会提示</p>
                     <textarea class="swap-textarea swap-textarea-compact" id="required_asset_codes" rows="2"
                         placeholder="必须纳入方案的主编号"></textarea>
                 </div>
@@ -69,6 +69,7 @@ def render_swap_page(
                 <button type="button" class="scheme-tab" data-scheme="c" title="多视角对比">方案 C</button>
             </div>
             <div class="meta-bar" id="meta-line"></div>
+            <div id="required-warn" class="required-warn" style="display:none"></div>
             <div id="form-error" class="form-error" style="display:none"></div>
             <div id="scheme-panel-a" class="scheme-panel"></div>
             <div id="scheme-panel-b" class="scheme-panel" style="display:none"></div>
@@ -109,6 +110,8 @@ def render_swap_page(
         if (!msg) {{ el.style.display = 'none'; el.textContent = ''; return; }}
         el.textContent = msg;
         el.style.display = 'block';
+        const warnEl = document.getElementById('required-warn');
+        if (warnEl) {{ warnEl.style.display = 'none'; warnEl.textContent = ''; }}
     }}
 
     function renderSource(source) {{
@@ -126,8 +129,10 @@ def render_swap_page(
             </div>`;
         let rows = '';
         (source.assets || []).forEach(a => {{
+            const city = a.city || '—';
             rows += `<tr>
                 <td class="src-code" title="${{a.asset_code}}">${{a.asset_code}}</td>
+                <td class="src-city" title="${{city}}">${{city}}</td>
                 <td class="src-date">${{a.issue_date}}</td>
                 <td class="src-num">${{fmtNum(a.remaining_amount)}}</td>
                 <td class="src-rate">${{a.asset_transfer_discount_rate_display}}</td>
@@ -137,6 +142,7 @@ def render_swap_page(
         document.getElementById('source-table-wrap').innerHTML = rows ? `
             <table class="swap-table swap-table-source"><thead><tr>
                 <th class="src-code">资产主编号</th>
+                <th class="src-city">城市</th>
                 <th class="src-date">发行日</th>
                 <th class="src-num">剩余还款</th>
                 <th class="src-rate">折扣率</th>
@@ -162,9 +168,11 @@ def render_swap_page(
         let rows = '';
         (combo.assets || []).forEach((a, i) => {{
             const isPinned = a.pinned || pinned.has(a.asset_code);
+            const city = a.city || '—';
             rows += `<tr class="${{isPinned ? 'row-pinned' : ''}}">
                 <td class="col-idx">${{i + 1}}</td>
                 <td class="col-code" title="${{a.asset_code}}">${{a.asset_code}}${{isPinned ? '<span class="pin-badge">指定</span>' : ''}}</td>
+                <td class="col-city" title="${{city}}">${{city}}</td>
                 <td class="col-custody" title="${{a.custody_asset_code || ''}}">${{a.custody_asset_code || '—'}}</td>
                 <td class="col-num">${{fmtNum(a.remaining_amount)}}</td>
                 <td class="col-rate">${{a.asset_transfer_discount_rate_display}}</td>
@@ -179,6 +187,7 @@ def render_swap_page(
                 <table class="swap-table swap-table-candidate"><thead><tr>
                     <th class="col-idx">#</th>
                     <th class="col-code">资产主编号</th>
+                    <th class="col-city">城市</th>
                     <th class="col-custody">房源托管号</th>
                     <th class="col-num">剩余还款</th>
                     <th class="col-rate">折扣率</th>
@@ -238,11 +247,24 @@ def render_swap_page(
         renderSource(data.source);
         const m = data.meta || {{}};
         const req = data.required || {{}};
+        const maxOd = m.candidate_max_overdue_days ?? 25;
         let meta = `候选池 <strong>${{m.candidate_pool_size ?? 0}}</strong> 户 · 目标产品 <strong>${{m.target_product_name ?? ''}}</strong>`;
+        meta += ` · 自动候选未付 ≤ <strong>${{maxOd}}</strong> 天`;
         if (req.asset_count) {{
             meta += ` · 指定 <strong>${{req.asset_count}}</strong> 户（${{fmtNum(req.total_remaining)}}）`;
         }}
         document.getElementById('meta-line').innerHTML = meta;
+        const warnEl = document.getElementById('required-warn');
+        const warns = req.overdue_warnings || [];
+        if (warnEl) {{
+            if (warns.length) {{
+                warnEl.style.display = 'block';
+                warnEl.textContent = '提示：必选房源未付天数超过 ' + maxOd + ' 天\\n' + warns.join('\\n');
+            }} else {{
+                warnEl.style.display = 'none';
+                warnEl.textContent = '';
+            }}
+        }}
         renderSchemeA(data);
         renderSchemeB(data);
         renderSchemeC(data);
@@ -392,8 +414,8 @@ def _page_shell(title: str, body: str) -> str:
         .chip-good {{ background: rgba(34,197,94,0.12); color: #86efac; }}
         .chip-good strong {{ color: #bbf7d0; }}
         .combo-chips {{ margin-bottom: 0.65rem; }}
-        .table-wrap {{ margin-top: 0.75rem; }}
-        .table-wrap-source {{ overflow-x: visible; }}
+        .table-wrap {{ margin-top: 0.75rem; overflow-x: hidden; }}
+        .table-wrap-source {{ overflow-x: hidden; }}
         .swap-table {{
             width: 100%;
             border-collapse: collapse;
@@ -401,7 +423,7 @@ def _page_shell(title: str, body: str) -> str:
         }}
         .swap-table th,
         .swap-table td {{
-            padding: 0.45rem 0.5rem;
+            padding: 0.4rem 0.35rem;
             border-bottom: 1px solid rgba(255,255,255,0.08);
             vertical-align: middle;
         }}
@@ -410,35 +432,43 @@ def _page_shell(title: str, body: str) -> str:
             font-weight: 600;
             text-align: left;
             white-space: nowrap;
-            font-size: 0.78rem;
+            font-size: 0.76rem;
         }}
         .swap-table tbody tr:hover {{ background: rgba(255,255,255,0.03); }}
         .swap-table-source {{ table-layout: fixed; }}
         .swap-table-source .src-code {{
-            width: 36%; text-align: left;
-            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-            font-size: 0.78rem; word-break: break-all;
-        }}
-        .swap-table-source .src-date {{ width: 17%; text-align: center; white-space: nowrap; }}
-        .swap-table-source .src-num {{ width: 20%; text-align: right; font-variant-numeric: tabular-nums; }}
-        .swap-table-source .src-rate {{ width: 12%; text-align: right; white-space: nowrap; }}
-        .swap-table-candidate {{ table-layout: fixed; }}
-        .swap-table-candidate .col-idx {{ width: 2rem; text-align: center; }}
-        .swap-table-candidate .col-code {{
-            width: 19%; text-align: left;
+            width: 26%; text-align: left;
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
             font-size: 0.76rem; word-break: break-all;
+        }}
+        .swap-table-source .src-city {{
+            width: 12%; text-align: center; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+        }}
+        .swap-table-source .src-date {{ width: 15%; text-align: center; white-space: nowrap; font-size: 0.76rem; }}
+        .swap-table-source .src-num {{ width: 17%; text-align: right; font-variant-numeric: tabular-nums; }}
+        .swap-table-source .src-rate {{ width: 10%; text-align: right; white-space: nowrap; }}
+        .swap-table-candidate {{ table-layout: fixed; }}
+        .swap-table-candidate .col-idx {{ width: 1.6rem; text-align: center; }}
+        .swap-table-candidate .col-code {{
+            width: 15%; text-align: left;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.74rem; word-break: break-all;
+        }}
+        .swap-table-candidate .col-city {{
+            width: 8%; text-align: center; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis; font-size: 0.76rem;
         }}
         .swap-table-candidate .col-custody {{
-            width: 17%; text-align: left;
+            width: 14%; text-align: left;
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-            font-size: 0.76rem; word-break: break-all;
+            font-size: 0.74rem; word-break: break-all;
         }}
-        .swap-table-candidate .col-date {{ width: 13%; text-align: center; white-space: nowrap; font-size: 0.76rem; }}
-        .swap-table-candidate .col-num {{ width: 13%; text-align: right; font-variant-numeric: tabular-nums; }}
-        .swap-table-candidate .col-rate {{ width: 9%; text-align: right; white-space: nowrap; }}
+        .swap-table-candidate .col-date {{ width: 12%; text-align: center; white-space: nowrap; font-size: 0.74rem; }}
+        .swap-table-candidate .col-num {{ width: 12%; text-align: right; font-variant-numeric: tabular-nums; }}
+        .swap-table-candidate .col-rate {{ width: 8%; text-align: right; white-space: nowrap; }}
         .swap-table-candidate .col-bucket {{ width: 5%; text-align: center; }}
-        .swap-table-candidate .col-overdue {{ width: 8%; text-align: right; white-space: nowrap; }}
+        .swap-table-candidate .col-overdue {{ width: 7%; text-align: right; white-space: nowrap; }}
         .pin-badge {{
             display: inline-block; margin-left: 0.25rem;
             padding: 0.05rem 0.3rem; border-radius: 4px; font-size: 0.65rem;
@@ -451,6 +481,12 @@ def _page_shell(title: str, body: str) -> str:
             background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);
         }}
         .meta-bar strong {{ color: #cbd5e1; }}
+        .required-warn {{
+            color: #fbbf24; font-size: 0.85rem; margin-bottom: 0.75rem;
+            padding: 0.5rem 0.65rem; border-radius: 8px;
+            background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3);
+            white-space: pre-line; line-height: 1.45;
+        }}
         .form-error {{
             color: #fca5a5; font-size: 0.85rem; margin-bottom: 0.75rem;
             padding: 0.5rem 0.65rem; border-radius: 8px;
@@ -469,6 +505,7 @@ def _page_shell(title: str, body: str) -> str:
         .combo-card {{
             margin-bottom: 1rem; padding: 0.75rem;
             border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+            overflow-x: hidden;
         }}
         .warn {{ color: #fbbf24; font-size: 0.85rem; }}
         .scheme-panel h3 {{ font-size: 0.9rem; color: #cbd5e1; margin: 1rem 0 0.5rem; }}

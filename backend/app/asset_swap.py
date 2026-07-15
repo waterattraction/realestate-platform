@@ -30,6 +30,8 @@ MAX_REQUIRED_ASSETS = N_MAX
 POOL_CAP = 500
 SEARCH_POOL_CAP = 80
 RATE_EPS = 1e-6
+# 自动候选池未付天数上限（必选房源仍可超过，仅提示）
+SWAP_CANDIDATE_MAX_OVERDUE_DAYS = 25
 
 TOLERANCE = RECONCILIATION_TOLERANCE_DEFAULT
 
@@ -116,6 +118,7 @@ class SourceAsset:
     remaining_amount: float
     asset_transfer_discount_rate: float
     renovation_deadline: date
+    city: str | None = None
 
 
 @dataclass
@@ -179,10 +182,11 @@ def _fetch_source_asset(
                 r.asset_code,
                 r.remaining_amount,
                 iss.issue_date,
-                iss.asset_transfer_discount_rate
+                iss.asset_transfer_discount_rate,
+                iss.city
             FROM trust_asset_monitor_records r
             {au._monitor_latest_snapshot_join_sql()}
-            {_issuance_lateral_join_sql("i.issue_date, i.asset_transfer_discount_rate")}
+            {_issuance_lateral_join_sql("i.issue_date, i.asset_transfer_discount_rate, i.city")}
             WHERE r.trust_product_id = :trust_product_id
               AND r.asset_code = :asset_code
             LIMIT 1
@@ -218,6 +222,7 @@ def _fetch_source_asset(
         remaining_amount=remaining,
         asset_transfer_discount_rate=float(rate),
         renovation_deadline=_add_months(issue_date, 36),
+        city=str(row.city).strip() if getattr(row, "city", None) else None,
     )
 
 
@@ -258,6 +263,7 @@ def fetch_candidates(
         "r.trust_product_id = :meirun_product_id",
         f"r.remaining_amount > {TOLERANCE}",
         sql_m1_filter("r.overdue_days", "r.remaining_amount"),
+        f"COALESCE(r.overdue_days, 0) <= {SWAP_CANDIDATE_MAX_OVERDUE_DAYS}",
         "r.last_renovation_payment_date IS NOT NULL",
         "r.last_renovation_payment_date <= :renovation_deadline",
         "iss.asset_transfer_discount_rate IS NOT NULL",
@@ -305,6 +311,8 @@ def fetch_candidates(
         od = int(row.overdue_days or 0)
         bucket = calc_delinquency_bucket(od, remaining, tolerance=TOLERANCE)
         if bucket != "M1":
+            continue
+        if od > SWAP_CANDIDATE_MAX_OVERDUE_DAYS:
             continue
         candidates.append(
             Candidate(
@@ -851,6 +859,7 @@ def fetch_swap_recommendations(
                 {
                     "asset_code": a.asset_code,
                     "issue_date": a.issue_date.isoformat(),
+                    "city": a.city or "—",
                     "remaining_amount": a.remaining_amount,
                     "asset_transfer_discount_rate": a.asset_transfer_discount_rate,
                     "asset_transfer_discount_rate_display": format_rate(
@@ -878,6 +887,14 @@ def fetch_swap_recommendations(
             "assets": [
                 {**c.to_dict(), "pinned": True} for c in pinned
             ],
+            "overdue_warnings": [
+                (
+                    f"{c.asset_code}：未付天数 {c.overdue_days} 天，"
+                    f"超过 {SWAP_CANDIDATE_MAX_OVERDUE_DAYS} 天"
+                )
+                for c in pinned
+                if c.overdue_days > SWAP_CANDIDATE_MAX_OVERDUE_DAYS
+            ],
         },
         "schemes": {
             "a": {
@@ -903,5 +920,6 @@ def fetch_swap_recommendations(
             "candidate_pool_size": len(candidates),
             "n_max": N_MAX,
             "pool_cap": POOL_CAP,
+            "candidate_max_overdue_days": SWAP_CANDIDATE_MAX_OVERDUE_DAYS,
         },
     }

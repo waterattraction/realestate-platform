@@ -183,6 +183,9 @@ class TestComboSort(unittest.TestCase):
         )
         self.assertIsNone(reason)
 
+    def test_candidate_max_overdue_constant(self):
+        self.assertEqual(asset_swap.SWAP_CANDIDATE_MAX_OVERDUE_DAYS, 25)
+
 
 @unittest.skipUnless(os.getenv("DATABASE_URL"), "DATABASE_URL not set")
 class TestAssetSwapIntegration(unittest.TestCase):
