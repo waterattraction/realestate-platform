@@ -3084,13 +3084,85 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
+    function followupApiError(data) {
+        if (!data) return '操作失败';
+        if (typeof data.detail === 'string') return data.detail;
+        if (Array.isArray(data.detail)) {
+            return data.detail.map(function(d) {
+                return d.msg || JSON.stringify(d);
+            }).join('; ') || '操作失败';
+        }
+        return data.message || '操作失败';
+    }
+
+    function reloadWorkbenchAfterFollowup(data) {
+        var url = new URL(window.location.href);
+        url.searchParams.set('followup_expanded', '1');
+        url.searchParams.delete('new_followup');
+        url.searchParams.delete('new_followup_case');
+        var caseId = data && data.case_id != null ? data.case_id : null;
+        var entryId = data && data.entry_id != null ? data.entry_id : null;
+        if (data && data.deleted) entryId = null;
+        if (caseId != null) url.searchParams.set('followup_case_id', String(caseId));
+        else url.searchParams.delete('followup_case_id');
+        if (entryId != null) url.searchParams.set('followup_entry_id', String(entryId));
+        else url.searchParams.delete('followup_entry_id');
+        window.location.replace(url.toString());
+    }
+
+    function submitFollowupForm(form, extraDisableEls) {
+        if (!form || form.dataset.submitting === '1') return;
+        form.dataset.submitting = '1';
+        var fd = new FormData(form);
+        fd.delete('redirect_to_workbench');
+        var btns = Array.prototype.slice.call(
+            form.querySelectorAll('button[type="submit"]')
+        );
+        if (extraDisableEls && extraDisableEls.length) {
+            extraDisableEls.forEach(function(el) {
+                if (el && btns.indexOf(el) < 0) btns.push(el);
+            });
+        }
+        btns.forEach(function(b) { b.disabled = true; });
+        fetch(form.getAttribute('action') || form.action, {
+            method: 'POST',
+            body: fd,
+            credentials: 'same-origin',
+            headers: { 'Accept': 'application/json' }
+        }).then(function(res) {
+            return res.text().then(function(text) {
+                var data = {};
+                if (text) {
+                    try { data = JSON.parse(text); }
+                    catch (e) { data = { detail: text }; }
+                }
+                if (!res.ok) throw new Error(followupApiError(data));
+                reloadWorkbenchAfterFollowup(data || {});
+            });
+        }).catch(function(err) {
+            form.dataset.submitting = '0';
+            btns.forEach(function(b) { b.disabled = false; });
+            alert(err.message || '操作失败');
+        });
+    }
+
+    if (writeBar) {
+        writeBar.addEventListener('submit', function(e) {
+            var form = e.target;
+            if (!form || form.tagName !== 'FORM') return;
+            if (!form.querySelector('[name="redirect_to_workbench"]')) return;
+            e.preventDefault();
+            submitFollowupForm(form);
+        });
+    }
+
     document.querySelectorAll('.entry-delete-btn').forEach(function(btn) {
         btn.addEventListener('click', function() {
             if (btn.disabled) return;
             if (!confirm('确定删除该条跟进记录？此操作不可恢复。')) return;
             var shell = btn.closest('.followup-entry-shell');
             var form = shell && shell.querySelector('.entry-delete-form');
-            if (form) form.submit();
+            if (form) submitFollowupForm(form, [btn]);
         });
     });
 
