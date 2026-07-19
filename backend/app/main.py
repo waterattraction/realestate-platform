@@ -24,6 +24,8 @@ from app import assetinfo_pipeline
 from app import assetinfo_upload
 from app import asset_swap
 from app import asset_swap_html
+from app import disclosure
+from app import disclosure_html
 from app import issuance_html
 from app import issuance_upload
 from app import query_utils
@@ -4455,19 +4457,19 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             </div>
         </section>
 
-        <section class="dash-section" aria-labelledby="sec-export">
+        <section class="dash-section" aria-labelledby="sec-disclosure">
             <div class="section-title">
                 <span class="section-num">5</span>
-                <h2 id="sec-export">数据导出</h2>
+                <h2 id="sec-disclosure">数据披露</h2>
             </div>
             <div class="op-row">
-                <a href="/assetinfo/repayment-records/export" class="op-chip op-orange">
+                <a href="/disclosure/repayment" class="op-chip op-orange">
                     <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-                    还款明细披露信息导出
+                    还款明细披露
                 </a>
-                <a href="/assetinfo/monitor-records/export" class="op-chip op-purple">
+                <a href="/disclosure/monitor" class="op-chip op-purple">
                     <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-                    资产监控表导出
+                    资产监控披露
                 </a>
             </div>
         </section>
@@ -5481,6 +5483,206 @@ def assetinfo_monitor_records_page(
         city_options=city_options,
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+def _disclosure_product_ids(
+    trust_product_id: str | None,
+    trust_product_ids: list[str] | None,
+) -> list[int] | None:
+    return query_utils.parse_trust_product_ids(trust_product_id, trust_product_ids)
+
+
+@app.get("/disclosure/repayment", response_class=HTMLResponse)
+def disclosure_repayment_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    as_of: str | None = None,
+):
+    pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
+    with engine.connect() as conn:
+        products = fetch_trust_products(conn)
+        snapshots = disclosure.list_snapshots(conn, "repayment")
+    html = disclosure_html.render_repayment_disclosure_page(
+        products,
+        snapshots,
+        selected_ids=pids,
+        as_of=query_utils.parse_optional_date(as_of) or "",
+        username=page_user["username"],
+    )
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+@app.get("/disclosure/monitor", response_class=HTMLResponse)
+def disclosure_monitor_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    as_of: str | None = None,
+):
+    pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
+    with engine.connect() as conn:
+        products = fetch_trust_products(conn)
+        snapshots = disclosure.list_snapshots(conn, "monitor")
+    html = disclosure_html.render_monitor_disclosure_page(
+        products,
+        snapshots,
+        selected_ids=pids,
+        as_of=query_utils.parse_optional_date(as_of) or "",
+        username=page_user["username"],
+    )
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+@app.get("/disclosure/repayment/snapshots")
+def disclosure_repayment_snapshots(
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.connect() as conn:
+        return {"items": disclosure.list_snapshots(conn, "repayment")}
+
+
+@app.get("/disclosure/monitor/snapshots")
+def disclosure_monitor_snapshots(
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.connect() as conn:
+        return {"items": disclosure.list_snapshots(conn, "monitor")}
+
+
+@app.get("/disclosure/repayment/preview")
+def disclosure_repayment_preview(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    as_of: str | None = None,
+    snapshot_id: int | None = None,
+):
+    with engine.connect() as conn:
+        if snapshot_id is not None:
+            return disclosure.preview_repayment_snapshot(conn, int(snapshot_id))
+        pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
+        return disclosure.preview_repayment_live(
+            conn, pids or [], disclosure.parse_as_of_date(as_of),
+        )
+
+
+@app.get("/disclosure/monitor/preview")
+def disclosure_monitor_preview(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    as_of: str | None = None,
+    snapshot_id: int | None = None,
+):
+    with engine.connect() as conn:
+        if snapshot_id is not None:
+            return disclosure.preview_monitor_snapshot(conn, int(snapshot_id))
+        pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
+        return disclosure.preview_monitor_live(
+            conn, pids or [], disclosure.parse_as_of_date(as_of),
+        )
+
+
+@app.post("/disclosure/repayment/freeze")
+def disclosure_repayment_freeze(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    as_of: str | None = None,
+    note: str | None = None,
+):
+    pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
+    with engine.begin() as conn:
+        return disclosure.freeze_repayment(
+            conn,
+            pids or [],
+            disclosure.parse_as_of_date(as_of),
+            note=note,
+            created_by=current_user.get("username"),
+        )
+
+
+@app.post("/disclosure/monitor/freeze")
+def disclosure_monitor_freeze(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    as_of: str | None = None,
+    note: str | None = None,
+):
+    pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
+    with engine.begin() as conn:
+        return disclosure.freeze_monitor(
+            conn,
+            pids or [],
+            disclosure.parse_as_of_date(as_of),
+            note=note,
+            created_by=current_user.get("username"),
+        )
+
+
+@app.delete("/disclosure/snapshots/{snapshot_id}")
+def disclosure_snapshot_delete(
+    snapshot_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.begin() as conn:
+        return disclosure.delete_snapshot(conn, snapshot_id)
+
+
+@app.get("/disclosure/repayment/export")
+def disclosure_repayment_export(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    as_of: str | None = None,
+    snapshot_id: int | None = None,
+):
+    pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
+    with engine.connect() as conn:
+        xlsx_bytes = disclosure.export_repayment_xlsx(
+            conn,
+            product_ids=pids,
+            as_of=disclosure.parse_as_of_date(as_of) if as_of else None,
+            snapshot_id=int(snapshot_id) if snapshot_id is not None else None,
+        )
+    ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
+    filename = f"还款明细披露信息_{ts}.xlsx"
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        },
+    )
+
+
+@app.get("/disclosure/monitor/export")
+def disclosure_monitor_export(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str | None = None,
+    trust_product_ids: list[str] | None = Query(default=None),
+    as_of: str | None = None,
+    snapshot_id: int | None = None,
+):
+    pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
+    with engine.connect() as conn:
+        xlsx_bytes = disclosure.export_monitor_xlsx(
+            conn,
+            product_ids=pids,
+            as_of=disclosure.parse_as_of_date(as_of) if as_of else None,
+            snapshot_id=int(snapshot_id) if snapshot_id is not None else None,
+        )
+    ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
+    filename = f"资产监控表_{ts}.xlsx"
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        },
+    )
 
 
 @app.get("/assetinfo/repayment-records/export")

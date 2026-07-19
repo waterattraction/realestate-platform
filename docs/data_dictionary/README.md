@@ -17,6 +17,7 @@
 | [monitor_records.md](monitor_records.md) | `trust_asset_monitor_records` | 监控 |
 | [repayment_records.md](repayment_records.md) | `trust_repayment_detail_records` | 还款 |
 | [repayment_plan_records.md](repayment_plan_records.md) | `trust_repayment_plan_records` | 回款计划 |
+| [disclosure_snapshots.md](disclosure_snapshots.md) | `disclosure_snapshots` 等 | 数据披露 |
 | [assetinfo_pipeline_runs.md](assetinfo_pipeline_runs.md) | `assetinfo_pipeline_runs` | 导入审计 |
 | [assetinfo_sheet_runs.md](assetinfo_sheet_runs.md) | `assetinfo_sheet_runs` | 导入审计 |
 | [data_mapping_config.md](data_mapping_config.md) | `data_mapping_config` | 导入配置 |

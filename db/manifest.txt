@@ -52,3 +52,4 @@ migrations/20260714_trust_marks_asset_level.sql
 migrations/20260719_issuance_full_columns.sql
 migrations/20260720_monitor_repayment_template_columns.sql
 migrations/20260720_monitor_owner_code_widen.sql
+migrations/20260720_disclosure_snapshots.sql
