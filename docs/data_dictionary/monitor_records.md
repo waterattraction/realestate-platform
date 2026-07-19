@@ -56,7 +56,7 @@
 | collection_contract_code | 收房合同编码 | VARCHAR(100) | 否 | Excel | 监控模版 | 20260720 |
 | custody_agreement_sign_date | 托管协议签署日期 | DATE | 否 | Excel | 监控模版 | 20260720 |
 | collection_contract_years | 收房合同签约年数 | NUMERIC(10,2) | 否 | Excel | 监控模版 | 20260720 |
-| owner_code | 业主代码 | VARCHAR(100) | 否 | Excel | 监控模版 | 20260720 |
+| owner_code | 业主代码 | VARCHAR(200) | 否 | Excel | 监控模版 | 20260720；原 100 过短已扩 |
 | withholding_ratio | 代扣比例 | NUMERIC(10,6) | 否 | Excel | 监控模版；>1 按百分数转小数 | 20260720 |
 | actual_monthly_rent | 实际出房月租金 | NUMERIC(18,2) | 否 | Excel | 监控模版 | 20260720 |
 
@@ -101,3 +101,4 @@
 | — | custody/source | `db/migrations/20250302_asset_code_semantics_v2.sql` |
 | — | overdue 重算列 | `db/migrations/20250501_overdue_recalc_columns.sql` |
 | 2026-07-20 | 监控模版扩展列 | `db/migrations/20260720_monitor_repayment_template_columns.sql` |
+| 2026-07-20 | owner_code 扩至 VARCHAR(200) | `db/migrations/20260720_monitor_owner_code_widen.sql` |

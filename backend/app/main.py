@@ -5278,7 +5278,7 @@ def assetinfo_repayment_records_page(
             for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
         ]
     html = assetinfo_html.render_records_page(
-        "还款明细数据", "/assetinfo/repayment-records/data", filters, data, products,
+        "还款明细导入数据", "/assetinfo/repayment-records/data", filters, data, products,
         record_type="repayment",
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
@@ -5475,7 +5475,7 @@ def assetinfo_monitor_records_page(
             conn, filters.get("trust_product_id"),
         )
     html = assetinfo_html.render_records_page(
-        "资产监控数据", "/assetinfo/monitor-records/data", filters, data, products,
+        "资产监控导入数据", "/assetinfo/monitor-records/data", filters, data, products,
         record_type="monitor",
         discount_rate_options=discount_rate_options,
         city_options=city_options,
@@ -5558,7 +5558,7 @@ def assetinfo_monitor_records_export(
         items, _total = assetinfo_upload.fetch_monitor_records_for_export(conn, filters)
     xlsx_bytes = assetinfo_upload.build_monitor_export_xlsx(items)
     ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
-    filename = f"资产监控数据_{ts}.xlsx"
+    filename = f"资产监控导入数据_{ts}.xlsx"
     return Response(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -2538,13 +2538,9 @@ def _append_monitor_issuance_filters(
 
     city_filter = filters.get("city")
     if city_filter == ISSUANCE_CITY_UNKNOWN:
-        where_parts.append(
-            "(COALESCE(NULLIF(TRIM(r.city), ''), NULLIF(TRIM(iss.city), '')) IS NULL)"
-        )
+        where_parts.append("(NULLIF(TRIM(r.city), '') IS NULL)")
     elif city_filter:
-        where_parts.append(
-            "COALESCE(NULLIF(TRIM(r.city), ''), iss.city) = :city"
-        )
+        where_parts.append("NULLIF(TRIM(r.city), '') = :city")
         params["city"] = city_filter
 
 
@@ -2589,10 +2585,8 @@ def _build_monitor_record_query(
         filters.get("sort_by"),
         filters.get("sort_dir"),
     )
-    select_extra = (
-        ", iss.asset_transfer_discount_rate, "
-        "COALESCE(NULLIF(TRIM(r.city), ''), iss.city) AS city_resolved"
-    )
+    # 城市只展示监控表 Excel 导入值，不再 COALESCE 发行城市（避免 city_resolved 重复列）
+    select_extra = ", iss.asset_transfer_discount_rate"
     return where_sql, params, snapshot_join, issuance_join, order_by_sql, select_extra
 
 
@@ -2615,8 +2609,7 @@ MONITOR_ROW_FLOAT_KEYS = frozenset({
 
 def _normalize_monitor_row(row) -> dict[str, Any]:
     item = dict(row._mapping)
-    if item.get("city_resolved") is not None:
-        item["city"] = item.get("city_resolved") or item.get("city")
+    item.pop("city_resolved", None)
     for k, v in item.items():
         if hasattr(v, "isoformat"):
             item[k] = str(v)
@@ -2680,22 +2673,16 @@ def fetch_monitor_city_options(
     conn: Connection,
     trust_product_id: int | None = None,
 ) -> list[str]:
-    """城市筛选项：监控表 city ∪ 发行表 city。"""
+    """城市筛选项：仅监控表 Excel 导入的 city。"""
     params: dict[str, Any] = {"unknown": ISSUANCE_CITY_UNKNOWN}
     product_filter = ""
     if trust_product_id is not None:
         product_filter = " AND trust_product_id = :trust_product_id"
         params["trust_product_id"] = trust_product_id
     sql = f"""
-        SELECT DISTINCT city FROM (
-            SELECT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
-            FROM trust_product_issuance_asset_records
-            WHERE 1 = 1{product_filter}
-            UNION
-            SELECT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
-            FROM trust_asset_monitor_records
-            WHERE city IS NOT NULL{product_filter}
-        ) c
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
+        FROM trust_asset_monitor_records
+        WHERE 1 = 1{product_filter}
         ORDER BY city
     """
     rows = conn.execute(text(sql), params)
