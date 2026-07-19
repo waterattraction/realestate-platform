@@ -127,11 +127,14 @@ def _lookup_trust_product_by_name(
     return None
 
 
-def _resolve_from_trust_product(
+def _resolve_trust_product_ref(
     conn: Connection,
     raw: str | None,
     source_row_number: int,
+    *,
+    label: str,
 ) -> tuple[int | None, str | None, list[str]]:
+    """解析信托产品引用；未匹配时 name 返回 Excel 原文并 warning。"""
     warnings: list[str] = []
     if not raw:
         return None, None, warnings
@@ -144,8 +147,32 @@ def _resolve_from_trust_product(
             hit = _lookup_trust_product_by_name(conn, token)
         if hit:
             return hit[0], hit[1], warnings
-    warnings.append(f"行{source_row_number}: 转出信托产品「{raw}」未匹配")
-    return None, None, warnings
+    warnings.append(f"行{source_row_number}: {label}「{raw}」未匹配")
+    return None, raw, warnings
+
+
+def _resolve_from_trust_product(
+    conn: Connection,
+    raw: str | None,
+    source_row_number: int,
+) -> tuple[int | None, str | None, list[str]]:
+    pid, pname, warnings = _resolve_trust_product_ref(
+        conn, raw, source_row_number, label="转出信托产品",
+    )
+    if pid is None and raw:
+        # 转出产品保持历史语义：未匹配不写入 name
+        return None, None, warnings
+    return pid, pname, warnings
+
+
+def _resolve_planned_trust_product(
+    conn: Connection,
+    raw: str | None,
+    source_row_number: int,
+) -> tuple[int | None, str | None, list[str]]:
+    return _resolve_trust_product_ref(
+        conn, raw, source_row_number, label="拟转入信托产品",
+    )
 
 
 def _parse_row(
@@ -194,6 +221,20 @@ def _parse_row(
         conn, from_name, source_row_number,
     )
     warnings.extend(from_warnings)
+
+    planned_col = col_map.get("planned_trust_product_name")
+    planned_raw_val = row[planned_col] if planned_col else None
+    planned_raw = (
+        str(planned_raw_val).strip()
+        if planned_raw_val is not None and not pd.isna(planned_raw_val)
+        else None
+    )
+    if planned_raw == "":
+        planned_raw = None
+    planned_pid, planned_pname, planned_warnings = _resolve_planned_trust_product(
+        conn, planned_raw, source_row_number,
+    )
+    warnings.extend(planned_warnings)
 
     mig_col = col_map.get("migration_type")
     mig_col_present = mig_col is not None
@@ -257,6 +298,11 @@ def _parse_row(
     if periods_col:
         periods = ic.to_int_value(row[periods_col])
 
+    agreed_periods_col = col_map.get("agreed_repayment_periods")
+    agreed_periods = None
+    if agreed_periods_col:
+        agreed_periods = ic.to_int_value(row[agreed_periods_col])
+
     property_address = opt_str("property_address")
     city_col = col_map.get("city")
     city_col_present = city_col is not None
@@ -281,6 +327,8 @@ def _parse_row(
         "from_trust_product_id": from_pid,
         "from_trust_product_name": from_pname,
         "from_trust_product_excel_raw": from_name,
+        "planned_trust_product_id": planned_pid,
+        "planned_trust_product_name": planned_pname,
         "migration_type": migration_type,
         "trust_asset_id": None,
         "issue_date": issue_date,
@@ -293,6 +341,10 @@ def _parse_row(
         "property_address": property_address,
         "city": city,
         "contractor_name": opt_str("contractor_name"),
+        "brand": opt_str("brand"),
+        "product_style": opt_str("product_style"),
+        "property_status": opt_str("property_status"),
+        "original_creditor": opt_str("original_creditor"),
         "receivable_contract_amount": contract_amt,
         "asset_transfer_discount_rate": opt_rate("asset_transfer_discount_rate"),
         "receivable_transfer_amount": transfer_amt,
@@ -310,9 +362,19 @@ def _parse_row(
         "calculated_rent_withholding_per_period": opt_amount(
             "calculated_rent_withholding_per_period"
         ),
+        "agreed_repayment_periods": agreed_periods,
+        "installment_payable_amount": opt_amount("installment_payable_amount"),
+        "withheld_unpaid_amount": opt_amount("withheld_unpaid_amount"),
+        "withheld_repaid_amount": opt_amount("withheld_repaid_amount"),
+        "transferred_receipt_total": opt_amount("transferred_receipt_total"),
+        "rent_withholding_received_total": opt_amount("rent_withholding_received_total"),
         "first_rent_withholding_date": opt_date("first_rent_withholding_date"),
         "signing_date": opt_date("signing_date"),
         "rental_contract_end_date": opt_date("rental_contract_end_date"),
+        "expected_last_rent_payment_date_initial": opt_date(
+            "expected_last_rent_payment_date_initial"
+        ),
+        "expected_receivable_due_date": opt_date("expected_receivable_due_date"),
         "source_file_name": file_name,
         "source_sheet_name": sheet_name,
         "source_row_number": source_row_number,
@@ -599,6 +661,12 @@ def precheck_issuance_sheet(
         )
         return result
 
+    unmapped_cols = ic.find_unmapped_business_columns(df, file_name=file_name)
+    if unmapped_cols:
+        preview = "、".join(unmapped_cols[:8])
+        more = f" 等{len(unmapped_cols)}列" if len(unmapped_cols) > 8 else ""
+        result["warnings"].append(f"未映射业务列：{preview}{more}")
+
     rows, parse_errors, parse_warnings = parse_issuance_sheet(
         conn, df,
         trust_product_id=trust_product_id,
@@ -609,8 +677,8 @@ def precheck_issuance_sheet(
     )
     result["errors"].extend(parse_errors)
     result["warnings"].extend(parse_warnings)
-    result["error_count"] = len(parse_errors)
-    result["warning_count"] = len(parse_warnings)
+    result["error_count"] = len(result["errors"])
+    result["warning_count"] = len(result["warnings"])
 
     if parse_errors:
         result["reason"] = parse_errors[0]
@@ -727,10 +795,12 @@ def import_issuance_sheet(
     insert_sql = text("""
         INSERT INTO trust_product_issuance_asset_records (
             trust_product_id, trust_product_name,
-            from_trust_product_id, from_trust_product_name, migration_type,
+            from_trust_product_id, from_trust_product_name,
+            planned_trust_product_id, planned_trust_product_name, migration_type,
             trust_asset_id, issue_date, business_asset_key, custody_asset_code,
             issuance_weight, migration_reason,
             contract_name, debtor_name, property_address, city, contractor_name,
+            brand, product_style, property_status, original_creditor,
             receivable_contract_amount, asset_transfer_discount_rate,
             receivable_transfer_amount, min_institution_transferable_amount,
             remaining_unpaid_amount_beike_not_withheld, rental_price,
@@ -738,14 +808,20 @@ def import_issuance_sheet(
             withholding_periods_at_pooling, initial_expected_withholding_cycle,
             renovation_payment_method, rent_withholding_ratio,
             calculated_rent_withholding_per_period,
+            agreed_repayment_periods, installment_payable_amount,
+            withheld_unpaid_amount, withheld_repaid_amount,
+            transferred_receipt_total, rent_withholding_received_total,
             first_rent_withholding_date, signing_date, rental_contract_end_date,
+            expected_last_rent_payment_date_initial, expected_receivable_due_date,
             source_file_name, source_sheet_name, source_row_number
         ) VALUES (
             :trust_product_id, :trust_product_name,
-            :from_trust_product_id, :from_trust_product_name, :migration_type,
+            :from_trust_product_id, :from_trust_product_name,
+            :planned_trust_product_id, :planned_trust_product_name, :migration_type,
             :trust_asset_id, :issue_date, :business_asset_key, :custody_asset_code,
             :issuance_weight, :migration_reason,
             :contract_name, :debtor_name, :property_address, :city, :contractor_name,
+            :brand, :product_style, :property_status, :original_creditor,
             :receivable_contract_amount, :asset_transfer_discount_rate,
             :receivable_transfer_amount, :min_institution_transferable_amount,
             :remaining_unpaid_amount_beike_not_withheld, :rental_price,
@@ -753,7 +829,11 @@ def import_issuance_sheet(
             :withholding_periods_at_pooling, :initial_expected_withholding_cycle,
             :renovation_payment_method, :rent_withholding_ratio,
             :calculated_rent_withholding_per_period,
+            :agreed_repayment_periods, :installment_payable_amount,
+            :withheld_unpaid_amount, :withheld_repaid_amount,
+            :transferred_receipt_total, :rent_withholding_received_total,
             :first_rent_withholding_date, :signing_date, :rental_contract_end_date,
+            :expected_last_rent_payment_date_initial, :expected_receivable_due_date,
             :source_file_name, :source_sheet_name, :source_row_number
         )
     """)
@@ -1091,6 +1171,8 @@ ISSUANCE_COLUMN_ORDER = (
     "trust_product_name",
     "from_trust_product_id",
     "from_trust_product_name",
+    "planned_trust_product_id",
+    "planned_trust_product_name",
     "migration_type",
     "issue_date",
     "business_asset_key",
@@ -1112,6 +1194,7 @@ ISSUANCE_NUMERIC_COLUMNS = frozenset({
     "id",
     "trust_product_id",
     "from_trust_product_id",
+    "planned_trust_product_id",
     "receivable_contract_amount",
     "receivable_transfer_amount",
     "min_institution_transferable_amount",
@@ -1120,9 +1203,15 @@ ISSUANCE_NUMERIC_COLUMNS = frozenset({
     "total_rent_withholding_amount",
     "rent_withheld_amount_before_pooling",
     "calculated_rent_withholding_per_period",
+    "installment_payable_amount",
+    "withheld_unpaid_amount",
+    "withheld_repaid_amount",
+    "transferred_receipt_total",
+    "rent_withholding_received_total",
     "asset_transfer_discount_rate",
     "rent_withholding_ratio",
     "issuance_weight",
+    "agreed_repayment_periods",
 })
 
 ISSUANCE_DATE_COLUMNS = frozenset({
@@ -1130,6 +1219,8 @@ ISSUANCE_DATE_COLUMNS = frozenset({
     "first_rent_withholding_date",
     "signing_date",
     "rental_contract_end_date",
+    "expected_last_rent_payment_date_initial",
+    "expected_receivable_due_date",
 })
 
 

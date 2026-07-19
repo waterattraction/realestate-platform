@@ -49,3 +49,5 @@ migrations/20260713_drop_trust_overdue_followups.sql
 migrations/20260714_followup_cases_multi_and_entry_slim.sql
 migrations/20260714_followup_case_status_settled_week.sql
 migrations/20260714_trust_marks_asset_level.sql
+migrations/20260719_issuance_full_columns.sql
+migrations/20260720_monitor_repayment_template_columns.sql

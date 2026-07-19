@@ -48,6 +48,17 @@
 | risk_level | 风险等级 | VARCHAR(2) | 否 | 风险计算 | 风险展示 | risk_v2 |
 | updated_at | 更新时间 | TIMESTAMPTZ | 否 | 系统 | 重算标记 | migration |
 | overdue_days_as_of | 逾期天数截止日 | DATE | 否 | 系统 | 逾期重算 | migration |
+| asset_pool_code | 资产包编号 | VARCHAR(64) | 否 | Excel | 监控模版 | 20260720 |
+| renovation_vendor | 装修服务商 | VARCHAR(200) | 否 | Excel | 监控模版 | 20260720 |
+| asset_status | 资产状态 | VARCHAR(100) | 否 | Excel | 监控模版 | 20260720 |
+| community_name | 小区名称 | VARCHAR(200) | 否 | Excel | 监控模版 | 20260720 |
+| city | 城市 | VARCHAR(64) | 否 | Excel | 监控模版；筛选项与发行 city 合并 | 20260720 |
+| collection_contract_code | 收房合同编码 | VARCHAR(100) | 否 | Excel | 监控模版 | 20260720 |
+| custody_agreement_sign_date | 托管协议签署日期 | DATE | 否 | Excel | 监控模版 | 20260720 |
+| collection_contract_years | 收房合同签约年数 | NUMERIC(10,2) | 否 | Excel | 监控模版 | 20260720 |
+| owner_code | 业主代码 | VARCHAR(100) | 否 | Excel | 监控模版 | 20260720 |
+| withholding_ratio | 代扣比例 | NUMERIC(10,6) | 否 | Excel | 监控模版；>1 按百分数转小数 | 20260720 |
+| actual_monthly_rent | 实际出房月租金 | NUMERIC(18,2) | 否 | Excel | 监控模版 | 20260720 |
 
 ## 索引说明
 
@@ -79,6 +90,7 @@
 - **`data_date` 是监控快照日期**（Excel「统计日期」），与发行的 `issue_date` **完全不同**。
 - `asset_code` 为历史兼容；新逻辑优先 `custody_asset_code` / `source_asset_code`。
 - 历史可能存在同 `(product, data_date, asset)` 多行，见 ops 清理脚本。
+- 还款披露导出的「当期逾期天数」取本表最新 `overdue_days`，**不从还款 Excel 导入**。
 
 ## 变更记录
 
@@ -88,3 +100,4 @@
 | — | risk 列 | `db/modules/risk/schema.sql` |
 | — | custody/source | `db/migrations/20250302_asset_code_semantics_v2.sql` |
 | — | overdue 重算列 | `db/migrations/20250501_overdue_recalc_columns.sql` |
+| 2026-07-20 | 监控模版扩展列 | `db/migrations/20260720_monitor_repayment_template_columns.sql` |

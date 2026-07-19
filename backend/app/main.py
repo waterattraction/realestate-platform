@@ -4350,10 +4350,6 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                             <svg viewBox="0 0 24 24"><path d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h16v2H4v-2z"/></svg>
                             产品管理
                         </a>
-                        <a href="/asset-swap" class="op-chip op-teal">
-                            <svg viewBox="0 0 24 24"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
-                            资产置换推荐
-                        </a>
                     </div>
                     <div class="mini-kpi-row">
                         <span>最近发行日 <strong>{dash_date(latest_issue_date)}</strong></span>
@@ -4374,13 +4370,13 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                             <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
                             还款明细
                         </a>
+                        <a href="/assetinfo/repayment-plan-records" class="op-chip op-orange">
+                            <svg viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7v-5z"/></svg>
+                            回款计划
+                        </a>
                         <a href="/assetinfo/monitor-records" class="op-chip op-purple">
                             <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
                             监控快照
-                        </a>
-                        <a href="/assetinfo/asset-stats" class="op-chip op-teal">
-                            <svg viewBox="0 0 24 24"><path d="M5 9.2h3V19H5V9.2zM10.6 5h2.8v14h-2.8V5zm5.6 8H19v6h-2.8v-6z"/></svg>
-                            资产情况统计
                         </a>
                     </div>
                     <div class="mini-kpi-row">
@@ -4391,10 +4387,29 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             </div>
         </section>
 
-        <section class="dash-section" aria-labelledby="sec-risk">
+        <section class="dash-section" aria-labelledby="sec-swap">
             <div class="section-title">
                 <span class="section-num">3</span>
-                <h2 id="sec-risk">风险管理</h2>
+                <h2 id="sec-swap">资产置换和回购</h2>
+            </div>
+            <div class="op-row">
+                <a href="/asset-swap" class="op-chip op-teal">
+                    <svg viewBox="0 0 24 24"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
+                    资产置换推荐
+                </a>
+            </div>
+        </section>
+
+        <section class="dash-section" aria-labelledby="sec-portfolio">
+            <div class="section-title">
+                <span class="section-num">4</span>
+                <h2 id="sec-portfolio">资产组合管理</h2>
+            </div>
+            <div class="op-row">
+                <a href="/assetinfo/asset-stats" class="op-chip op-teal">
+                    <svg viewBox="0 0 24 24"><path d="M5 9.2h3V19H5V9.2zM10.6 5h2.8v14h-2.8V5zm5.6 8H19v6h-2.8v-6z"/></svg>
+                    资产情况统计
+                </a>
             </div>
             <div class="risk-grid">
                 <a href="/risk/workbench" class="risk-card">
@@ -4436,6 +4451,23 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                     </div>
                     <div class="risk-card-value">按城市</div>
                     <div class="risk-card-foot">监控快照 · M 级着色 →</div>
+                </a>
+            </div>
+        </section>
+
+        <section class="dash-section" aria-labelledby="sec-export">
+            <div class="section-title">
+                <span class="section-num">5</span>
+                <h2 id="sec-export">数据导出</h2>
+            </div>
+            <div class="op-row">
+                <a href="/assetinfo/repayment-records/export" class="op-chip op-orange">
+                    <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                    还款明细披露信息导出
+                </a>
+                <a href="/assetinfo/monitor-records/export" class="op-chip op-purple">
+                    <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                    资产监控表导出
                 </a>
             </div>
         </section>
@@ -5252,6 +5284,73 @@ def assetinfo_repayment_records_page(
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
 
 
+@app.get("/assetinfo/repayment-plan-records/data")
+def assetinfo_repayment_plan_records_data(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    page: str | None = Query(default=None),
+    page_size: str | None = Query(default=None),
+    trust_product_id: str | None = Query(default=None),
+    data_date: str | None = Query(default=None),
+    asset_code: str | None = Query(default=None),
+    custody_asset_code: str | None = Query(default=None),
+    source_asset_code: str | None = Query(default=None),
+    source_file_name: str | None = Query(default=None),
+    source_sheet_name: str | None = Query(default=None),
+):
+    page_no, page_sz = query_utils.parse_pagination(page, page_size)
+    filters = assetinfo_upload.build_record_filters(
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        asset_code=asset_code,
+        custody_asset_code=custody_asset_code,
+        source_asset_code=source_asset_code,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+    )
+    with engine.connect() as conn:
+        return assetinfo_upload.fetch_paginated_records(
+            conn, "repayment_plan", page_no, page_sz, filters,
+        )
+
+
+@app.get("/assetinfo/repayment-plan-records", response_class=HTMLResponse)
+def assetinfo_repayment_plan_records_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
+    page: str | None = Query(default=None),
+    page_size: str | None = Query(default=None),
+    trust_product_id: str | None = Query(default=None),
+    data_date: str | None = Query(default=None),
+    asset_code: str | None = Query(default=None),
+    custody_asset_code: str | None = Query(default=None),
+    source_asset_code: str | None = Query(default=None),
+    source_file_name: str | None = Query(default=None),
+    source_sheet_name: str | None = Query(default=None),
+):
+    page_no, page_sz = query_utils.parse_pagination(page, page_size)
+    filters = assetinfo_upload.build_record_filters(
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        asset_code=asset_code,
+        custody_asset_code=custody_asset_code,
+        source_asset_code=source_asset_code,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+    )
+    with engine.connect() as conn:
+        data = assetinfo_upload.fetch_paginated_records(
+            conn, "repayment_plan", page_no, page_sz, filters,
+        )
+        products = [
+            {"id": r.id, "name": r.name}
+            for r in conn.execute(text("SELECT id, name FROM trust_products ORDER BY id"))
+        ]
+    html = assetinfo_html.render_records_page(
+        "回款计划数据", "/assetinfo/repayment-plan-records/data", filters, data, products,
+        record_type="repayment_plan",
+    )
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
 def _build_monitor_record_filters(
     *,
     trust_product_id: str | None = None,
@@ -5382,6 +5481,45 @@ def assetinfo_monitor_records_page(
         city_options=city_options,
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+@app.get("/assetinfo/repayment-records/export")
+def assetinfo_repayment_records_export(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str | None = Query(default=None),
+    data_date: str | None = Query(default=None),
+    asset_code: str | None = Query(default=None),
+    custody_asset_code: str | None = Query(default=None),
+    source_asset_code: str | None = Query(default=None),
+    source_file_name: str | None = Query(default=None),
+    source_sheet_name: str | None = Query(default=None),
+):
+    filters = assetinfo_upload.build_record_filters(
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        asset_code=asset_code,
+        custody_asset_code=custody_asset_code,
+        source_asset_code=source_asset_code,
+        source_file_name=source_file_name,
+        source_sheet_name=source_sheet_name,
+    )
+    with engine.connect() as conn:
+        repayment_items, _total = assetinfo_upload.fetch_repayment_records_for_export(
+            conn, filters,
+        )
+        plan_items = assetinfo_upload.fetch_repayment_plan_records_for_export(conn, filters)
+    xlsx_bytes = assetinfo_upload.build_repayment_disclosure_export_xlsx(
+        repayment_items, plan_items,
+    )
+    ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
+    filename = f"还款明细披露信息_{ts}.xlsx"
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+        },
+    )
 
 
 @app.get("/assetinfo/monitor-records/export")

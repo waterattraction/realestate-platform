@@ -16,6 +16,26 @@ RECONCILIATION_TOLERANCE = 0.01
 COL_ALIASES: dict[str, tuple[str, ...]] = {
     "remaining_amount": ("剩余还款金额", "剩余应还款余额"),
     "last_renovation_payment_date": ("最后一期装修款付款时间",),
+    "asset_pool_code": ("资产包编号",),
+    "current_payer": ("当前还款方",),
+    "planned_repayment_amount": ("当期计划还款金额",),
+    "initial_renovation_amount": ("初始受让装修金额",),
+    "cumulative_repaid_amount": ("累计已还款金额",),
+    "remaining_balance": ("剩余应还款余额",),
+    "renovation_vendor": ("装修服务商",),
+    "asset_status": ("资产状态",),
+    "community_name": ("小区名称",),
+    "city": ("城市", "所属城市", "所属区域"),
+    "collection_contract_code": ("收房合同编码",),
+    "custody_agreement_sign_date": ("托管协议签署日期",),
+    "collection_contract_years": ("收房合同签约年数",),
+    "owner_code": ("业主代码",),
+    "withholding_ratio": ("代扣比例",),
+    "actual_monthly_rent": ("实际出房月租金",),
+    "current_bill_date": ("当期账单日",),
+    "repayment_amount_detail": ("回款金额明细",),
+    "planned_monthly_repayment_amount": ("后续计划每月回款金额",),
+    "final_planned_repayment_amount": ("最后一期计划回款金额",),
 }
 
 MONITOR_FIXED_COLUMNS: tuple[str, ...] = (
@@ -23,6 +43,8 @@ MONITOR_FIXED_COLUMNS: tuple[str, ...] = (
     "初始受让金额",
     "已还款金额",
 )
+
+REPAYMENT_PLAN_SHEET_KEYWORD = "回款计划"
 
 
 def is_excel_error(value) -> bool:
@@ -93,6 +115,29 @@ def to_numeric_value(value) -> float | None:
         return None
 
 
+def to_rate_value(value) -> float | None:
+    num = to_numeric_value(value)
+    if num is None:
+        return None
+    if num > 1 and num <= 100:
+        return num / 100.0
+    return num
+
+
+def to_optional_str(value) -> str | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if is_excel_error(value):
+        return None
+    if isinstance(value, float) and value == int(value):
+        text_val = str(int(value))
+    elif isinstance(value, int):
+        text_val = str(value)
+    else:
+        text_val = str(value).strip()
+    return text_val or None
+
+
 def amounts_equal(a: float, b: float, tolerance: float = RECONCILIATION_TOLERANCE) -> bool:
     return abs(a - b) <= tolerance
 
@@ -126,3 +171,7 @@ def monitor_sheet_missing_columns(df: pd.DataFrame) -> list[str]:
 
 def is_monitor_sheet(df: pd.DataFrame) -> bool:
     return not monitor_sheet_missing_columns(df)
+
+
+def is_repayment_plan_sheet(sheet_name: str) -> bool:
+    return REPAYMENT_PLAN_SHEET_KEYWORD in str(sheet_name or "")

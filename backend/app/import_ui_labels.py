@@ -19,6 +19,7 @@ IMPORT_ACTION_LABELS: dict[str, str] = {
 SHEET_TYPE_LABELS: dict[str, str] = {
     "asset_monitor": "资产监控",
     "repayment_detail": "还款明细",
+    "repayment_plan": "回款计划",
     "issuance_asset": "发行资产明细",
     "ambiguous_sheet_type": "Sheet类型冲突",
     "unknown": "无法识别",

@@ -332,6 +332,33 @@ class TestFromTrustProductColumnPick(unittest.TestCase):
         col = ic.pick_column(df, "from_trust_product_name")
         self.assertEqual(col, "当前信托计划（已发行）")
 
+    def test_planned_transfer_not_mapped_to_from_trust(self):
+        df = pd.DataFrame(columns=[
+            "房源编码",
+            "实际成交价（应收账款合同金额）",
+            "应收账款转让价款",
+            "拟转入计划（未发行）",
+        ])
+        self.assertIsNone(ic.pick_column(df, "from_trust_product_name"))
+        self.assertEqual(
+            ic.pick_column(df, "planned_trust_product_name"),
+            "拟转入计划（未发行）",
+        )
+
+    def test_dual_from_and_planned_columns(self):
+        df = pd.DataFrame(columns=[
+            "当前信托计划（已发行）",
+            "拟转入计划（未发行）",
+        ])
+        self.assertEqual(
+            ic.pick_column(df, "from_trust_product_name"),
+            "当前信托计划（已发行）",
+        )
+        self.assertEqual(
+            ic.pick_column(df, "planned_trust_product_name"),
+            "拟转入计划（未发行）",
+        )
+
 
 class TestFromTrustProductResolve(unittest.TestCase):
     def _mock_conn(self, *, aliases: dict[str, tuple[int, str]], products: dict[str, tuple[int, str]]):
@@ -618,6 +645,56 @@ class TestFileScopedMinColumnAliases(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["min_institution_transferable_amount"], 120000.0)
+
+
+class TestFullColumnAliases(unittest.TestCase):
+    def test_short_withholding_and_cycle_aliases(self):
+        df = pd.DataFrame(columns=[
+            "代扣金额",
+            "预计代扣周期-最初",
+            "贝壳已租金代扣金额合计",
+            "基础交易合同名称",
+        ])
+        self.assertEqual(
+            ic.pick_column(df, "total_rent_withholding_amount"), "代扣金额",
+        )
+        self.assertEqual(
+            ic.pick_column(df, "initial_expected_withholding_cycle"),
+            "预计代扣周期-最初",
+        )
+        self.assertEqual(
+            ic.pick_column(df, "rent_withheld_amount_before_pooling"),
+            "贝壳已租金代扣金额合计",
+        )
+        self.assertEqual(ic.pick_column(df, "contract_name"), "基础交易合同名称")
+
+    def test_find_unmapped_business_columns_allows_xuhao(self):
+        df = pd.DataFrame(columns=[
+            "房源编码",
+            "实际成交价（应收账款合同金额）",
+            "应收账款转让价款",
+            "序号",
+            "神秘新列",
+        ])
+        unmapped = ic.find_unmapped_business_columns(df)
+        self.assertEqual(unmapped, ["神秘新列"])
+
+    def test_precheck_warns_unmapped_business_columns(self):
+        df = pd.DataFrame([{
+            "房源编码": "H001",
+            "实际成交价（应收账款合同金额）": 1000000,
+            "应收账款转让价款": 900000,
+            "神秘新列": "x",
+        }])
+        conn = MagicMock()
+        conn.execute.return_value.fetchone.return_value = MagicMock(
+            cnt=0, amount_sum=0, ex=False,
+        )
+        conn.execute.return_value.fetchall.return_value = []
+        result = iu.precheck_issuance_sheet(
+            conn, 4, "美润1号", date(2026, 3, 20), "file.xlsx", "Sheet1", df,
+        )
+        self.assertTrue(any("未映射业务列" in w and "神秘新列" in w for w in result["warnings"]))
 
 
 if __name__ == "__main__":

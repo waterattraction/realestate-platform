@@ -52,22 +52,35 @@
 
 | `remaining_unpaid_amount_beike_not_withheld` | 剩余未还款金额--贝壳未代扣 |
 | `rental_price` | 出房价格 |
-| `total_rent_withholding_amount` | 总租金代扣金额、租金代扣金额 |
-| `rent_withheld_amount_before_pooling` | 已租金代扣金额合计-封包前 |
+| `total_rent_withholding_amount` | 总租金代扣金额、租金代扣金额、代扣金额 |
+| `rent_withheld_amount_before_pooling` | 已租金代扣金额合计-封包前、贝壳已租金代扣金额合计 |
 | `withholding_periods_at_pooling` | 代扣支付期数-封包日（计算） |
-| `initial_expected_withholding_cycle` | 预计代扣支付周期-最初 |
+| `initial_expected_withholding_cycle` | 预计代扣支付周期-最初、预计代扣周期-最初 |
 | `renovation_payment_method` | 装修付款形式 |
 | `rent_withholding_ratio` | 租金代扣比例(%)、租金代扣比例 |
 | `calculated_rent_withholding_per_period` | 每期租金代扣金额（计算） |
 | `first_rent_withholding_date` | 首次付款日期、首次租金代扣日期 |
 | `signing_date` | 签约日期 |
 | `rental_contract_end_date` | 出房合同结束日 |
-| `contract_name` | 合同名称 |
+| `contract_name` | 合同名称、基础交易合同名称 |
 | `debtor_name` | 债务人姓名（业主名称）、债务人姓名、业主名称 |
 | `property_address` | 房源地址 |
 | `city` | 所属城市、所属区域、城市 |
 | `contractor_name` | 施工方名称 |
-| `from_trust_product_name` | 当前信托计划（已发行）、原信托计划、转出信托计划、当前信托计划、拟转入计划（未发行） |
+| `from_trust_product_name` | 当前信托计划（已发行）、原信托计划、转出信托计划、当前信托计划 |
+| `planned_trust_product_name` | 拟转入计划（未发行） |
+| `brand` | 品牌 |
+| `product_style` | 产品风格 |
+| `property_status` | 房屋状态 |
+| `expected_last_rent_payment_date_initial` | 预计最后一期 租金支付日-最初 |
+| `agreed_repayment_periods` | 约定还款期数 |
+| `installment_payable_amount` | 每期应付金额 |
+| `withheld_unpaid_amount` | 已代扣未付款 |
+| `withheld_repaid_amount` | 已代扣已回款（新）、已代扣已回款 |
+| `transferred_receipt_total` | 已转让收款合计 |
+| `rent_withholding_received_total` | 已租金代扣到账合计 |
+| `original_creditor` | 原始债权人 |
+| `expected_receivable_due_date` | 预计应收账款到期日（日期）、预计应收账款到期日 |
 | `migration_type` | 迁移类型、资产迁移类型、migration_type |
 
 `source_asset_code` 发行模块不使用（见还款/监控）。完整 canonical 别名见 `docs/canonical/alias_dictionary.md`。
@@ -124,22 +137,35 @@
 | `min_institution_transferable_amount` | MIN金融机构可转让、MIN金额机构可转让最终 | `min_institution_transferable_amount` | 金额 | 否 | `to_numeric_value` | Excel错误→空+warning |
 | `remaining_unpaid_amount_beike_not_withheld` | 剩余未还款金额--贝壳未代扣 | `remaining_unpaid_amount_beike_not_withheld` | 金额 | 否 | `to_numeric_value` | 同上 |
 | `rental_price` | 出房价格 | `rental_price` | 金额 | 否 | `to_numeric_value` | 同上 |
-| `total_rent_withholding_amount` | 总租金代扣金额、租金代扣金额 | `total_rent_withholding_amount` | 金额 | 否 | `to_numeric_value` | 同上 |
-| `rent_withheld_amount_before_pooling` | 已租金代扣金额合计-封包前 | `rent_withheld_amount_before_pooling` | 金额 | 否 | `to_numeric_value` | 同上 |
+| `total_rent_withholding_amount` | 总租金代扣金额、租金代扣金额、代扣金额 | `total_rent_withholding_amount` | 金额 | 否 | `to_numeric_value` | 同上 |
+| `rent_withheld_amount_before_pooling` | 已租金代扣金额合计-封包前、贝壳已租金代扣金额合计 | `rent_withheld_amount_before_pooling` | 金额 | 否 | `to_numeric_value` | 同上 |
 | `withholding_periods_at_pooling` | 代扣支付期数-封包日（计算） | `withholding_periods_at_pooling` | 整数 | 否 | `to_int_value` | 无效→空 |
-| `initial_expected_withholding_cycle` | 预计代扣支付周期-最初 | `initial_expected_withholding_cycle` | 字符串 | 否 | trim | — |
+| `initial_expected_withholding_cycle` | 预计代扣支付周期-最初、预计代扣周期-最初 | `initial_expected_withholding_cycle` | 字符串 | 否 | trim | — |
 | `renovation_payment_method` | 装修付款形式 | `renovation_payment_method` | 字符串 | 否 | trim | — |
 | `rent_withholding_ratio` | 租金代扣比例(%)、租金代扣比例 | `rent_withholding_ratio` | 比例 | 否 | `to_rate_value` | — |
 | `calculated_rent_withholding_per_period` | 每期租金代扣金额（计算） | `calculated_rent_withholding_per_period` | 金额 | 否 | `to_numeric_value` | — |
 | `first_rent_withholding_date` | 首次付款日期、首次租金代扣日期 | `first_rent_withholding_date` | 日期 | 否 | `to_optional_date` | — |
 | `signing_date` | 签约日期 | `signing_date` | 日期 | 否 | `to_optional_date` | — |
 | `rental_contract_end_date` | 出房合同结束日 | `rental_contract_end_date` | 日期 | 否 | `to_optional_date` | — |
-| `contract_name` | 合同名称 | `contract_name` | 字符串 | 否 | trim | — |
+| `contract_name` | 合同名称、基础交易合同名称 | `contract_name` | 字符串 | 否 | trim | — |
 | `debtor_name` | 债务人姓名（业主名称）、债务人姓名、业主名称 | `debtor_name` | 字符串 | 否 | trim | — |
 | `property_address` | 房源地址 | `property_address` | 字符串 | 否 | trim | — |
 | `city` | 所属城市、所属区域、城市 | `city` | 字符串 | 否 | `resolve_city` | 无法识别→**warning** |
 | `contractor_name` | 施工方名称 | `contractor_name` | 字符串 | 否 | trim | — |
-| `from_trust_product_name` | 当前信托计划（已发行）、原信托计划、转出信托计划、当前信托计划、拟转入计划（未发行） | `from_trust_product_name` | 字符串 | 否 | alias→`trust_product_aliases` / `trust_products.name` | 未匹配→**warning** |
+| `from_trust_product_name` | 当前信托计划（已发行）、原信托计划、转出信托计划、当前信托计划 | `from_trust_product_name` | 字符串 | 否 | alias→`trust_product_aliases` / `trust_products.name` | 未匹配→**warning** |
+| `planned_trust_product_name` | 拟转入计划（未发行） | `planned_trust_product_name` | 字符串 | 否 | 同转出产品解析；未匹配保留 Excel 原文 | 未匹配→**warning** |
+| `brand` | 品牌 | `brand` | 字符串 | 否 | trim | — |
+| `product_style` | 产品风格 | `product_style` | 字符串 | 否 | trim | — |
+| `property_status` | 房屋状态 | `property_status` | 字符串 | 否 | trim | — |
+| `expected_last_rent_payment_date_initial` | 预计最后一期 租金支付日-最初 | `expected_last_rent_payment_date_initial` | 日期 | 否 | `to_optional_date` | — |
+| `agreed_repayment_periods` | 约定还款期数 | `agreed_repayment_periods` | 整数 | 否 | `to_int_value` | — |
+| `installment_payable_amount` | 每期应付金额 | `installment_payable_amount` | 金额 | 否 | `to_numeric_value` | — |
+| `withheld_unpaid_amount` | 已代扣未付款 | `withheld_unpaid_amount` | 金额 | 否 | `to_numeric_value` | — |
+| `withheld_repaid_amount` | 已代扣已回款（新）、已代扣已回款 | `withheld_repaid_amount` | 金额 | 否 | `to_numeric_value` | — |
+| `transferred_receipt_total` | 已转让收款合计 | `transferred_receipt_total` | 金额 | 否 | `to_numeric_value` | — |
+| `rent_withholding_received_total` | 已租金代扣到账合计 | `rent_withholding_received_total` | 金额 | 否 | `to_numeric_value` | — |
+| `original_creditor` | 原始债权人 | `original_creditor` | 字符串 | 否 | trim | — |
+| `expected_receivable_due_date` | 预计应收账款到期日（日期）、预计应收账款到期日 | `expected_receivable_due_date` | 日期 | 否 | `to_optional_date` | — |
 | `migration_type` | 迁移类型、资产迁移类型、migration_type | `migration_type` | 枚举 | 否 | `resolve_migration_type` | 未知→**warning**+按 transfer 处理 |
 
 **导入参数（非 Excel 列）：** `trust_product_id`、`issue_date` — 缺失则整批 **failed**。

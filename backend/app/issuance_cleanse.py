@@ -32,17 +32,23 @@ COL_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "remaining_unpaid_amount_beike_not_withheld": ("剩余未还款金额--贝壳未代扣",),
     "rental_price": ("出房价格",),
-    "total_rent_withholding_amount": ("总租金代扣金额", "租金代扣金额"),
-    "rent_withheld_amount_before_pooling": ("已租金代扣金额合计-封包前",),
+    "total_rent_withholding_amount": ("总租金代扣金额", "租金代扣金额", "代扣金额"),
+    "rent_withheld_amount_before_pooling": (
+        "已租金代扣金额合计-封包前",
+        "贝壳已租金代扣金额合计",
+    ),
     "withholding_periods_at_pooling": ("代扣支付期数-封包日（计算）",),
-    "initial_expected_withholding_cycle": ("预计代扣支付周期-最初",),
+    "initial_expected_withholding_cycle": (
+        "预计代扣支付周期-最初",
+        "预计代扣周期-最初",
+    ),
     "renovation_payment_method": ("装修付款形式",),
     "rent_withholding_ratio": ("租金代扣比例(%)", "租金代扣比例"),
     "calculated_rent_withholding_per_period": ("每期租金代扣金额（计算）",),
     "first_rent_withholding_date": ("首次付款日期", "首次租金代扣日期"),
     "signing_date": ("签约日期",),
     "rental_contract_end_date": ("出房合同结束日",),
-    "contract_name": ("合同名称",),
+    "contract_name": ("合同名称", "基础交易合同名称"),
     "debtor_name": ("债务人姓名（业主名称）", "债务人姓名", "业主名称"),
     "property_address": ("房源地址",),
     "city": ("所属城市", "所属区域", "城市"),
@@ -52,14 +58,31 @@ COL_ALIASES: dict[str, tuple[str, ...]] = {
         "原信托计划",
         "转出信托计划",
         "当前信托计划",
-        "拟转入计划（未发行）",
     ),
+    "planned_trust_product_name": ("拟转入计划（未发行）",),
+    "brand": ("品牌",),
+    "product_style": ("产品风格",),
+    "property_status": ("房屋状态",),
+    "expected_last_rent_payment_date_initial": ("预计最后一期 租金支付日-最初",),
+    "agreed_repayment_periods": ("约定还款期数",),
+    "installment_payable_amount": ("每期应付金额",),
+    "withheld_unpaid_amount": ("已代扣未付款",),
+    "withheld_repaid_amount": ("已代扣已回款（新）", "已代扣已回款"),
+    "transferred_receipt_total": ("已转让收款合计",),
+    "rent_withholding_received_total": ("已租金代扣到账合计",),
+    "original_creditor": ("原始债权人",),
+    "expected_receivable_due_date": ("预计应收账款到期日（日期）", "预计应收账款到期日"),
     "migration_type": (
         "迁移类型",
         "资产迁移类型",
         "migration_type",
     ),
 }
+
+# 预检：已知非业务列（不报警）
+UNMAPPED_HEADER_ALLOWLIST: frozenset[str] = frozenset({
+    "序号",
+})
 
 MIGRATION_TYPES: tuple[str, ...] = (
     "new_issuance",
@@ -345,6 +368,31 @@ def find_unmapped_discount_rate_columns(
         if "折扣率" in col_str and "%" in col_str:
             suspicious.append(col_str)
     return suspicious
+
+
+def _known_excel_headers(file_name: str | None = None) -> set[str]:
+    known: set[str] = set()
+    for field_key in COL_ALIASES:
+        known.update(aliases_for_field(field_key, file_name))
+    return known
+
+
+def find_unmapped_business_columns(
+    df: pd.DataFrame, *, file_name: str | None = None,
+) -> list[str]:
+    """Excel 表头中未纳入 COL_ALIASES 的业务列（排除白名单 / Unnamed）。"""
+    known = _known_excel_headers(file_name)
+    unmapped: list[str] = []
+    for col in df.columns:
+        col_str = str(col).strip()
+        if not col_str or col_str.startswith("Unnamed"):
+            continue
+        if col_str in UNMAPPED_HEADER_ALLOWLIST:
+            continue
+        if col_str in known:
+            continue
+        unmapped.append(col_str)
+    return unmapped
 
 
 def tokenize_from_trust_product_raw(raw: str) -> list[str]:

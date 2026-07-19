@@ -32,6 +32,8 @@
 | trust_product_name | 信托产品名称 | VARCHAR(200) | 是 | 导入快照 | 展示 | |
 | from_trust_product_id | 转出产品 ID | BIGINT | 否 | 解析 | 迁移来源产品 | FK；alias 解析 |
 | from_trust_product_name | 转出产品名称 | VARCHAR(200) | 否 | Excel/解析 | 迁移来源展示 | |
+| planned_trust_product_id | 拟转入产品 ID | BIGINT | 否 | 解析 | 拟转入计划 | FK；alias 解析 |
+| planned_trust_product_name | 拟转入产品名称 | VARCHAR(200) | 否 | Excel/解析 | 拟转入展示；未匹配保留原文 | |
 | migration_type | 迁移类型 | VARCHAR(32) | 否 | Excel/推断 | `new_issuance`/`transfer` 等 | |
 | trust_asset_id | 底层资产 ID | BIGINT | 否 | 系统 | 可选关联 `trust_assets` | 常为 NULL |
 | issue_date | 发行日 | DATE | 是 | 导入参数 | **唯一业务时间维度** | **无 data_date** |
@@ -44,6 +46,10 @@
 | property_address | 房源地址 | TEXT | 否 | Excel | 城市解析回退 | |
 | city | 城市 | VARCHAR(64) | 否 | Excel/解析 | 北京/上海等 | |
 | contractor_name | 施工方名称 | VARCHAR(200) | 否 | Excel | | |
+| brand | 品牌 | VARCHAR(100) | 否 | Excel | | |
+| product_style | 产品风格 | VARCHAR(100) | 否 | Excel | | |
+| property_status | 房屋状态 | VARCHAR(100) | 否 | Excel | | |
+| original_creditor | 原始债权人 | VARCHAR(200) | 否 | Excel | | |
 | receivable_contract_amount | 应收账款合同金额 | NUMERIC(18,2) | 是 | Excel | 必填金额 | ≥ 0 |
 | asset_transfer_discount_rate | 资产转让折扣率 | NUMERIC(10,6) | 否 | Excel | 0~1 小数 | |
 | receivable_transfer_amount | 应收账款转让价款 | NUMERIC(18,2) | 是 | Excel | 必填金额 | ≥ 0 |
@@ -57,9 +63,17 @@
 | renovation_payment_method | 装修付款形式 | VARCHAR(100) | 否 | Excel | | |
 | rent_withholding_ratio | 租金代扣比例 | NUMERIC(10,6) | 否 | Excel | 0~1 | |
 | calculated_rent_withholding_per_period | 每期代扣金额 | NUMERIC(18,2) | 否 | Excel | | |
+| agreed_repayment_periods | 约定还款期数 | INT | 否 | Excel | | |
+| installment_payable_amount | 每期应付金额 | NUMERIC(18,2) | 否 | Excel | | |
+| withheld_unpaid_amount | 已代扣未付款 | NUMERIC(18,2) | 否 | Excel | | |
+| withheld_repaid_amount | 已代扣已回款 | NUMERIC(18,2) | 否 | Excel | | |
+| transferred_receipt_total | 已转让收款合计 | NUMERIC(18,2) | 否 | Excel | | |
+| rent_withholding_received_total | 已租金代扣到账合计 | NUMERIC(18,2) | 否 | Excel | | |
 | first_rent_withholding_date | 首次租金代扣日 | DATE | 否 | Excel | | |
 | signing_date | 签约日期 | DATE | 否 | Excel | | |
 | rental_contract_end_date | 出房合同结束日 | DATE | 否 | Excel | | |
+| expected_last_rent_payment_date_initial | 预计最后一期租金支付日 | DATE | 否 | Excel | | |
+| expected_receivable_due_date | 预计应收账款到期日 | DATE | 否 | Excel | | |
 | source_file_name | 来源文件名 | VARCHAR(500) | 是 | 系统 | 覆盖 scope | |
 | source_sheet_name | 来源 Sheet | VARCHAR(200) | 是 | 系统 | 覆盖 scope | |
 | source_row_number | Excel 行号 | INT | 否 | 系统 | 追溯 | |
@@ -76,6 +90,7 @@
 | `idx_issuance_business_key` | `business_asset_key` | 冲突查询（非唯一） |
 | `idx_issuance_cross_file_check` | `trust_product_id, issue_date, custody_asset_code` | 跨文件重复 |
 | `idx_issuance_from_product` | `from_trust_product_id` | 转出产品 |
+| `idx_issuance_planned_product` | `planned_trust_product_id` | 拟转入产品 |
 | `idx_issuance_migration_type` | `migration_type` | 迁移类型 |
 | `idx_issuance_custody` | `trust_product_id, custody_asset_code` | 按托管号 |
 
@@ -107,3 +122,4 @@
 |------|------|-----------|
 | — | 基线表 | `db/modules/issuance/schema.sql` |
 | — | migration_type | `db/migrations/20250620_issuance_migration_type.sql` |
+| 2026-07-19 | 全列导入：拟转入 + 结算/首期业务列 | `db/migrations/20260719_issuance_full_columns.sql` |

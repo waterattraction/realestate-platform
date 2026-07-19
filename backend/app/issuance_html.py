@@ -390,6 +390,67 @@ def render_records_page(
     </div>"""
 
     json_qs = f"{filter_qs}&page={page}" if filter_qs else f"page={page}"
+    hscroll_script = """
+    <script>
+    (function() {
+        var wrap = document.getElementById('records-hscroll');
+        if (!wrap) return;
+        var key = 'recordsHScroll:' + window.location.pathname;
+        var colKey = key + ':col';
+
+        function anchorCol() {
+            var ths = wrap.querySelectorAll('thead th[data-col]');
+            var left = wrap.scrollLeft;
+            for (var i = 0; i < ths.length; i++) {
+                var th = ths[i];
+                if (th.offsetLeft + th.offsetWidth > left + 1) {
+                    return th.getAttribute('data-col');
+                }
+            }
+            return ths.length ? ths[ths.length - 1].getAttribute('data-col') : null;
+        }
+
+        function savePos() {
+            sessionStorage.setItem(key, String(wrap.scrollLeft));
+            var col = anchorCol();
+            if (col) sessionStorage.setItem(colKey, col);
+        }
+
+        function restorePos() {
+            var col = sessionStorage.getItem(colKey);
+            if (col) {
+                var th = wrap.querySelector('thead th[data-col="' + col + '"]');
+                if (th) {
+                    wrap.scrollLeft = th.offsetLeft;
+                    return;
+                }
+            }
+            var saved = sessionStorage.getItem(key);
+            if (saved !== null) {
+                var left = parseInt(saved, 10);
+                if (!isNaN(left)) wrap.scrollLeft = left;
+            }
+        }
+
+        // 等表格完成布局后再恢复；仅用像素会因各页列宽不同而错位
+        requestAnimationFrame(function() {
+            requestAnimationFrame(restorePos);
+        });
+        window.addEventListener('load', restorePos);
+
+        wrap.addEventListener('scroll', savePos, { passive: true });
+        document.querySelectorAll('a.pager-btn').forEach(function(a) {
+            a.addEventListener('click', savePos);
+        });
+        var filterForm = document.getElementById('f');
+        if (filterForm) {
+            filterForm.addEventListener('submit', function() {
+                sessionStorage.removeItem(key);
+                sessionStorage.removeItem(colKey);
+            });
+        }
+    })();
+    </script>"""
     body = f"""
     <nav class="breadcrumb"><a href="/">首页</a> / <a href="/issuance/upload">发行导入</a> / 发行资产明细</nav>
     <h1>发行资产明细</h1>
@@ -401,10 +462,11 @@ def render_records_page(
     </div>
     {pager}
     <p class="muted"><a href="{escape(data_path)}?{json_qs}">JSON</a></p>
-    <div class="card table-wrap">
+    <div class="card table-wrap" id="records-hscroll">
         <table class="records-table"><thead><tr>{headers}</tr></thead>
         <tbody>{rows or f'<tr><td colspan="{len(il.COLUMN_ORDER)}">无数据</td></tr>'}</tbody></table>
     </div>
     {pager}
+    {hscroll_script}
     """
     return _page_shell("发行资产明细", body)

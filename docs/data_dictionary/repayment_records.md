@@ -41,6 +41,12 @@
 | created_at | 创建时间 | TIMESTAMPTZ | 是 | 系统 | | |
 | custody_asset_code | 托管房源号 | VARCHAR(64) | 否 | Excel | 主体识别 | V2 |
 | source_asset_code | 资产分笔号 | VARCHAR(64) | 否 | Excel | 分笔识别 | V2 |
+| asset_pool_code | 资产包编号 | VARCHAR(64) | 否 | Excel | 披露模版 | 20260720 |
+| current_payer | 当前还款方 | VARCHAR(100) | 否 | Excel | 披露模版 | 20260720 |
+| planned_repayment_amount | 当期计划还款金额 | NUMERIC(18,2) | 否 | Excel | 披露模版 | 20260720 |
+| initial_renovation_amount | 初始受让装修金额 | NUMERIC(18,2) | 否 | Excel | 披露模版 | 20260720 |
+| cumulative_repaid_amount | 累计已还款金额 | NUMERIC(18,2) | 否 | Excel | 披露模版 | 20260720 |
+| remaining_balance | 剩余应还款余额 | NUMERIC(18,2) | 否 | Excel | 披露模版 | 20260720 |
 
 ## 索引说明
 
@@ -72,6 +78,8 @@
 - **`data_date` 是历史遗留字段**：当前导入逻辑中常与 `repayment_date` 同步写入，**不应再用于金额核对或新业务逻辑的时间维度**；金额核对应以 `repayment_date` 及监控的 `data_date` 为准（TODO：核对规则文档化）。
 - `asset_code` 历史兼容；优先使用 `custody_asset_code` + `source_asset_code`。
 - V1 导入 `period_no` 可能全为 NULL，跨文件防重需注意。
+- **披露模版「当期逾期天数」不写入本表**；导出时从 `trust_asset_monitor_records.overdue_days` 取最新快照。
+- 回款计划独有列见 `trust_repayment_plan_records`（`docs/data_dictionary/repayment_plan_records.md`）。
 
 ## 变更记录
 
@@ -79,3 +87,4 @@
 |------|------|-----------|
 | — | 基线 | `db/modules/overdue/schema.sql` |
 | — | custody/source | `db/migrations/20250302_asset_code_semantics_v2.sql` |
+| 2026-07-20 | 披露模版扩展列 | `db/migrations/20260720_monitor_repayment_template_columns.sql` |

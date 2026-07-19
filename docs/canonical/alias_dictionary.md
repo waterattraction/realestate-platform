@@ -18,12 +18,32 @@
 | 当前信托计划（已发行） | `from_trust_product_name` | 发行 Excel | 是 | 经 `trust_product_aliases` 解析 |
 | 原信托计划 | `from_trust_product_name` | 发行 Excel | 是 | |
 | 转出信托计划 | `from_trust_product_name` | 发行 Excel | 是 | |
-| 拟转入计划（未发行） | `from_trust_product_name` | 发行 Excel | 是 | |
+| 拟转入计划（未发行） | `planned_trust_product_name` | 发行 Excel | 是 | 独立字段，不再映射转出产品 |
 | 资产转让折扣率(%) | `asset_transfer_discount_rate` | 发行 Excel | 是 | |
 | 资产转让折扣率（数值）(%) | `asset_transfer_discount_rate` | 发行 Excel | **推荐** | 美润1号等 |
 | 资产转让折扣率(数值)(%) | `asset_transfer_discount_rate` | 发行 Excel | 是 | 无空格变体 |
 | 总租金代扣金额 | `total_rent_withholding_amount` | 发行 Excel | **推荐** | |
 | 租金代扣金额 | `total_rent_withholding_amount` | 发行 Excel | 是 | 简写 |
+| 代扣金额 | `total_rent_withholding_amount` | 发行 Excel | 是 | 结算底表短名 |
+| 贝壳已租金代扣金额合计 | `rent_withheld_amount_before_pooling` | 发行 Excel | 是 | |
+| 已租金代扣金额合计-封包前 | `rent_withheld_amount_before_pooling` | 发行 Excel | **推荐** | |
+| 预计代扣周期-最初 | `initial_expected_withholding_cycle` | 发行 Excel | 是 | |
+| 预计代扣支付周期-最初 | `initial_expected_withholding_cycle` | 发行 Excel | **推荐** | |
+| 基础交易合同名称 | `contract_name` | 发行 Excel | 是 | 美润首期 |
+| 品牌 | `brand` | 发行 Excel | 是 | |
+| 产品风格 | `product_style` | 发行 Excel | 是 | |
+| 房屋状态 | `property_status` | 发行 Excel | 是 | |
+| 预计最后一期 租金支付日-最初 | `expected_last_rent_payment_date_initial` | 发行 Excel | 是 | |
+| 约定还款期数 | `agreed_repayment_periods` | 发行 Excel | 是 | |
+| 每期应付金额 | `installment_payable_amount` | 发行 Excel | 是 | |
+| 已代扣未付款 | `withheld_unpaid_amount` | 发行 Excel | 是 | |
+| 已代扣已回款（新） | `withheld_repaid_amount` | 发行 Excel | 是 | |
+| 已代扣已回款 | `withheld_repaid_amount` | 发行 Excel | 是 | |
+| 已转让收款合计 | `transferred_receipt_total` | 发行 Excel | 是 | |
+| 已租金代扣到账合计 | `rent_withholding_received_total` | 发行 Excel | 是 | |
+| 原始债权人 | `original_creditor` | 发行 Excel | 是 | |
+| 预计应收账款到期日（日期） | `expected_receivable_due_date` | 发行 Excel | 是 | |
+| 预计应收账款到期日 | `expected_receivable_due_date` | 发行 Excel | 是 | |
 | 首次付款日期 | `first_rent_withholding_date` | 发行 Excel | 是 | |
 | 首次租金代扣日期 | `first_rent_withholding_date` | 发行 Excel | **推荐** | |
 | 所属城市 | `city` | 发行 Excel | 是 | |
@@ -60,3 +80,4 @@
 | 日期 | 变更 |
 |------|------|
 | 2026-06 | M2.5 首批别名 |
+| 2026-07 | 发行 6 文件全列：拟转入独立字段；代扣/合同/结算底表别名与新业务列 |

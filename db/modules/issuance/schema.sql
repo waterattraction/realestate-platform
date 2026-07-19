@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS trust_product_issuance_asset_records (
     trust_product_name                      VARCHAR(200) NOT NULL,
     from_trust_product_id                   BIGINT NULL REFERENCES trust_products (id),
     from_trust_product_name                 VARCHAR(200) NULL,
+    planned_trust_product_id                BIGINT NULL REFERENCES trust_products (id),
+    planned_trust_product_name              VARCHAR(200) NULL,
     migration_type                          VARCHAR(32) NULL,
     trust_asset_id                          BIGINT NULL REFERENCES trust_assets (id),
     issue_date                              DATE NOT NULL,
@@ -22,6 +24,10 @@ CREATE TABLE IF NOT EXISTS trust_product_issuance_asset_records (
     property_address                        TEXT NULL,
     city                                    VARCHAR(64) NULL,
     contractor_name                         VARCHAR(200) NULL,
+    brand                                   VARCHAR(100) NULL,
+    product_style                           VARCHAR(100) NULL,
+    property_status                         VARCHAR(100) NULL,
+    original_creditor                       VARCHAR(200) NULL,
     receivable_contract_amount              NUMERIC(18, 2) NOT NULL,
     asset_transfer_discount_rate            NUMERIC(10, 6) NULL,
     receivable_transfer_amount              NUMERIC(18, 2) NOT NULL,
@@ -35,9 +41,17 @@ CREATE TABLE IF NOT EXISTS trust_product_issuance_asset_records (
     renovation_payment_method               VARCHAR(100) NULL,
     rent_withholding_ratio                  NUMERIC(10, 6) NULL,
     calculated_rent_withholding_per_period  NUMERIC(18, 2) NULL,
+    agreed_repayment_periods                INT NULL,
+    installment_payable_amount              NUMERIC(18, 2) NULL,
+    withheld_unpaid_amount                  NUMERIC(18, 2) NULL,
+    withheld_repaid_amount                  NUMERIC(18, 2) NULL,
+    transferred_receipt_total               NUMERIC(18, 2) NULL,
+    rent_withholding_received_total         NUMERIC(18, 2) NULL,
     first_rent_withholding_date             DATE NULL,
     signing_date                            DATE NULL,
     rental_contract_end_date                DATE NULL,
+    expected_last_rent_payment_date_initial DATE NULL,
+    expected_receivable_due_date            DATE NULL,
     source_file_name                        VARCHAR(500) NOT NULL,
     source_sheet_name                       VARCHAR(200) NOT NULL,
     source_row_number                       INT NULL,
@@ -70,6 +84,9 @@ CREATE INDEX IF NOT EXISTS idx_issuance_cross_file_check
 
 CREATE INDEX IF NOT EXISTS idx_issuance_from_product
     ON trust_product_issuance_asset_records (from_trust_product_id);
+
+CREATE INDEX IF NOT EXISTS idx_issuance_planned_product
+    ON trust_product_issuance_asset_records (planned_trust_product_id);
 
 CREATE INDEX IF NOT EXISTS idx_issuance_migration_type
     ON trust_product_issuance_asset_records (migration_type);

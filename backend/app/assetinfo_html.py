@@ -89,6 +89,21 @@ def _page_shell(title: str, body: str) -> str:
         tr.row-reject {{ opacity: 0.55; }}
         tr.row-needs_confirm {{ background: rgba(251,191,36,0.06); }}
         .import-bar {{ margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.08); }}
+        .upload-field-product {{ max-width: 22rem; }}
+        .file-list {{
+            margin: 0.5rem 0 0.75rem;
+            padding: 0.55rem 0.75rem;
+            border-radius: 8px;
+            background: rgba(15,23,42,0.45);
+            border: 1px solid rgba(255,255,255,0.1);
+            font-size: 0.85rem;
+            color: #cbd5e1;
+        }}
+        .file-list ul {{ margin: 0.35rem 0 0; padding-left: 1.1rem; }}
+        .file-list li {{ margin: 0.15rem 0; word-break: break-all; }}
+        .import-summary {{ font-size: 0.9rem; color: #e2e8f0; }}
+        .import-summary h3 {{ margin: 0 0 0.5rem; font-size: 1rem; color: #f8fafc; }}
+        .import-summary ul {{ margin: 0.35rem 0 0.75rem; padding-left: 1.2rem; }}
         .filters {{ display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end; }}
         .pager {{
             display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center;
@@ -143,12 +158,13 @@ def render_upload_page(trust_products: list[dict]) -> str:
     body = f"""
     <nav class="breadcrumb"><a href="/">首页</a> / 资产情况 / 资产数据导入</nav>
     <h1>资产数据导入</h1>
-    <p class="muted">先预检，再确认导入。还款：托管房源编码 → 托管房源号；资产编号(房源) → 资产分笔号。监控：托管房源编码 → 托管房源号；资产编号(房源) → 资产信托号（左 12 位 → 资产主编号）。</p>
+    <p class="muted">先预检，再确认导入。仅导入勾选的 Sheet；映射规则以预检类型为准。</p>
     <div class="card">
         <label>信托产品</label>
-        <select id="trust_product_id" style="width:100%">{options}</select>
+        <select id="trust_product_id" class="upload-field-product">{options}</select>
         <label>Excel 文件（可多选）</label>
-        <input type="file" id="files" multiple accept=".xlsx,.xls" style="width:100%">
+        <input type="file" id="files" multiple accept=".xlsx,.xls">
+        <div class="file-list" id="fileList"><span class="muted">未选择任何文件</span></div>
         <button type="button" class="btn-primary" onclick="runPreview()">预检</button>
     </div>
     <div class="card" id="result"><p class="muted">预检结果将显示在此处</p></div>
@@ -161,6 +177,39 @@ def render_upload_page(trust_products: list[dict]) -> str:
     let batchUuid = null;
     let previewData = null;
     let confirmedKeys = new Set();
+
+    function updateFileList() {{
+        const input = document.getElementById('files');
+        const box = document.getElementById('fileList');
+        if (!input || !box) return;
+        const files = Array.from(input.files || []);
+        if (!files.length) {{
+            box.innerHTML = '<span class="muted">未选择任何文件</span>';
+            return;
+        }}
+        let html = '<strong>已选 ' + files.length + ' 个文件</strong><ul>';
+        files.forEach(f => {{
+            html += '<li>' + escapeHtml(f.name) + ' <span class="muted">(' + formatFileSize(f.size) + ')</span></li>';
+        }});
+        html += '</ul>';
+        box.innerHTML = html;
+    }}
+
+    function escapeHtml(s) {{
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }}
+
+    function formatFileSize(n) {{
+        if (n < 1024) return n + ' B';
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+        return (n / (1024 * 1024)).toFixed(1) + ' MB';
+    }}
+
+    document.getElementById('files').addEventListener('change', updateFileList);
 
     async function runPreview() {{
         const fd = new FormData();
@@ -249,6 +298,75 @@ def render_upload_page(trust_products: list[dict]) -> str:
         updateSelCount();
     }}
 
+    function renderImportResult(data, ok, selectedKeysList) {{
+        const selectedSet = new Set(selectedKeysList || []);
+        const allResults = data.sheet_results || [];
+        const scoped = allResults.filter(s => selectedSet.has(sheetKey(s)));
+        const types = new Set(scoped.map(s => s.sheet_type || s.type).filter(Boolean));
+
+        let html = '<div class="import-summary">';
+        html += '<h3 class="' + (ok ? 'ok' : 'err') + '">' + (ok ? '导入完成' : '导入失败') + '</h3>';
+        html += '<p class="muted">批次 ' + escapeHtml(String(data.batch_uuid || data.file_id || '—'));
+        html += ' · 产品 ' + escapeHtml(String(data.trust_product_name || data.trust_product_id || '—'));
+        html += ' · 本次选中 ' + scoped.length + ' 个 Sheet</p>';
+
+        html += '<ul>';
+        if (types.has('repayment_detail')) {{
+            html += '<li>还款明细写入 <strong>' + (data.inserted_repayment_count ?? 0) + '</strong> 行</li>';
+        }}
+        if (types.has('repayment_plan')) {{
+            html += '<li>回款计划写入 <strong>' + (data.inserted_repayment_plan_count ?? 0) + '</strong> 行</li>';
+        }}
+        if (types.has('asset_monitor')) {{
+            html += '<li>监控快照写入 <strong>' + (data.inserted_monitor_count ?? 0) + '</strong> 行</li>';
+        }}
+        if (scoped.length) {{
+            html += '<li>资产 upsert <strong>' + (data.upsert_asset_count ?? 0) + '</strong></li>';
+        }}
+        const scopedFailed = scoped.filter(s => (s.final_action || '') === 'failed').length;
+        const scopedSkipped = scoped.filter(s => (s.final_action || '') === 'skipped' || (s.final_action || '') === 'skip').length;
+        if (scopedFailed) html += '<li class="err">失败 Sheet <strong>' + scopedFailed + '</strong></li>';
+        if (scopedSkipped) html += '<li class="warn">跳过 Sheet <strong>' + scopedSkipped + '</strong></li>';
+        html += '</ul>';
+
+        if (types.has('asset_monitor') && data.risk_recalc_hint) {{
+            html += '<p class="snapshot-hint warn">' + escapeHtml(data.risk_recalc_hint) + '</p>';
+        }}
+
+        const scopedWarns = [];
+        scoped.forEach(s => {{
+            (s.quality_warnings || []).forEach(w => scopedWarns.push(w));
+        }});
+        if (types.has('asset_monitor') && (data.quality_warnings || []).length && !scopedWarns.length) {{
+            (data.quality_warnings || []).forEach(w => scopedWarns.push(w));
+        }}
+        if (scopedWarns.length) {{
+            html += '<p class="warn">质量提示</p><ul>';
+            scopedWarns.slice(0, 30).forEach(w => {{ html += '<li>' + escapeHtml(w) + '</li>'; }});
+            if (scopedWarns.length > 30) html += '<li class="muted">…另有 ' + (scopedWarns.length - 30) + ' 条</li>';
+            html += '</ul>';
+        }}
+
+        html += '<div class="table-wrap"><table><tr><th>文件名</th><th>工作表</th><th>类型</th><th>结果</th><th>写入行数</th><th>说明</th></tr>';
+        scoped.forEach(s => {{
+            const st = s.final_action || s.action || '—';
+            const typeLabel = sheetTypeLabel(s.type || s.sheet_type || '—');
+            html += '<tr>';
+            html += '<td>' + escapeHtml(s.file_name || '') + '</td>';
+            html += '<td>' + escapeHtml(s.sheet_name || '') + '</td>';
+            html += '<td>' + typeLabel + '</td>';
+            html += '<td><span class="' + previewStatusClass(st) + '">' + importActionLabel(st) + '</span></td>';
+            html += '<td>' + (s.inserted != null ? s.inserted : '—') + '</td>';
+            html += '<td>' + escapeHtml(s.reason || '') + '</td>';
+            html += '</tr>';
+        }});
+        html += '</table></div></div>';
+
+        const box = document.getElementById('result');
+        box.innerHTML = html;
+        document.getElementById('importBar').style.display = 'none';
+    }}
+
     async function runImport() {{
         if (!batchUuid) {{ alert('请先预检'); return; }}
         const keys = selectedKeys();
@@ -269,10 +387,12 @@ def render_upload_page(trust_products: list[dict]) -> str:
             body: JSON.stringify(body)
         }});
         const data = await res.json();
-        const pre = document.createElement('pre');
-        pre.textContent = JSON.stringify(data, null, 2);
-        document.getElementById('result').after(pre);
-        if (!res.ok) alert(data.detail || '导入失败');
+        if (!res.ok) {{
+            alert(data.detail || '导入失败');
+            renderImportResult(data, false, keys);
+            return;
+        }}
+        renderImportResult(data, true, keys);
     }}
 
     function renderPreview(data, ok) {{
@@ -355,14 +475,33 @@ RECORD_COLUMN_LABELS: dict[str, str] = {
     "data_date": "数据日期",
     "repayment_date": "还款日期",
     "period_no": "期数",
-    "actual_repayment_amount": "实际还款金额",
+    "actual_repayment_amount": "当期实际还款金额",
+    "asset_pool_code": "资产包编号",
+    "current_payer": "当前还款方",
+    "planned_repayment_amount": "当期计划还款金额",
+    "initial_renovation_amount": "初始受让装修金额",
+    "cumulative_repaid_amount": "累计已还款金额",
+    "remaining_balance": "剩余应还款余额",
     "initial_transfer_amount": "初始受让金额",
     "repaid_amount": "已还款金额",
     "remaining_amount": "剩余还款金额",
     "overdue_days": "未付天数",
     "asset_transfer_discount_rate": "资产转让折扣率(%)",
     "last_renovation_payment_date": "最后一期装修款付款时间",
+    "renovation_vendor": "装修服务商",
+    "asset_status": "资产状态",
+    "community_name": "小区名称",
     "city": "城市",
+    "collection_contract_code": "收房合同编码",
+    "custody_agreement_sign_date": "托管协议签署日期",
+    "collection_contract_years": "收房合同签约年数",
+    "owner_code": "业主代码",
+    "withholding_ratio": "代扣比例",
+    "actual_monthly_rent": "实际出房月租金",
+    "current_bill_date": "当期账单日",
+    "repayment_amount_detail": "回款金额明细",
+    "planned_monthly_repayment_amount": "后续计划每月回款金额",
+    "final_planned_repayment_amount": "最后一期计划回款金额",
     "source_file_name": "文件名",
     "source_sheet_name": "Sheet名",
     "synced_at": "同步时间",
@@ -377,18 +516,56 @@ RECORD_COLUMN_LABELS: dict[str, str] = {
 
 MONITOR_COLUMN_LABELS: dict[str, str] = {
     **RECORD_COLUMN_LABELS,
-    "source_asset_code": "资产信托号",
+    "source_asset_code": "资产编号(房源)",
+}
+
+REPAYMENT_PLAN_COLUMN_LABELS: dict[str, str] = {
+    **RECORD_COLUMN_LABELS,
+    "source_asset_code": "资产编号(房源)",
+    "data_date": "统计日期",
 }
 
 REPAYMENT_COLUMN_ORDER: tuple[str, ...] = (
     "trust_product_name",
-    "asset_code",
+    "asset_pool_code",
+    "current_payer",
     "custody_asset_code",
     "source_asset_code",
-    "data_date",
+    "asset_code",
+    "planned_repayment_amount",
+    "initial_renovation_amount",
+    "cumulative_repaid_amount",
+    "remaining_balance",
+    "actual_repayment_amount",
     "repayment_date",
     "period_no",
-    "actual_repayment_amount",
+    "data_date",
+    "source_file_name",
+    "source_sheet_name",
+    "synced_at",
+    "created_at",
+    "id",
+    "trust_product_id",
+    "trust_asset_id",
+)
+
+REPAYMENT_PLAN_COLUMN_ORDER: tuple[str, ...] = (
+    "trust_product_name",
+    "asset_pool_code",
+    "source_asset_code",
+    "custody_asset_code",
+    "asset_code",
+    "renovation_vendor",
+    "data_date",
+    "initial_transfer_amount",
+    "repaid_amount",
+    "remaining_amount",
+    "community_name",
+    "city",
+    "current_bill_date",
+    "repayment_amount_detail",
+    "planned_monthly_repayment_amount",
+    "final_planned_repayment_amount",
     "source_file_name",
     "source_sheet_name",
     "synced_at",
@@ -400,17 +577,27 @@ REPAYMENT_COLUMN_ORDER: tuple[str, ...] = (
 
 MONITOR_COLUMN_ORDER: tuple[str, ...] = (
     "trust_product_name",
+    "asset_pool_code",
+    "source_asset_code",
     "asset_code",
     "custody_asset_code",
-    "source_asset_code",
+    "renovation_vendor",
     "data_date",
-    "overdue_days",
     "initial_transfer_amount",
     "repaid_amount",
     "remaining_amount",
-    "asset_transfer_discount_rate",
+    "asset_status",
     "last_renovation_payment_date",
+    "community_name",
     "city",
+    "collection_contract_code",
+    "custody_agreement_sign_date",
+    "collection_contract_years",
+    "owner_code",
+    "withholding_ratio",
+    "actual_monthly_rent",
+    "overdue_days",
+    "asset_transfer_discount_rate",
     "source_file_name",
     "source_sheet_name",
     "synced_at",
@@ -426,6 +613,7 @@ MONITOR_COLUMN_ORDER: tuple[str, ...] = (
 
 RECORD_COLUMN_ORDERS: dict[str, tuple[str, ...]] = {
     "repayment": REPAYMENT_COLUMN_ORDER,
+    "repayment_plan": REPAYMENT_PLAN_COLUMN_ORDER,
     "monitor": MONITOR_COLUMN_ORDER,
 }
 
@@ -437,9 +625,18 @@ RECORD_NUMERIC_COLUMNS: frozenset[str] = frozenset({
     "initial_transfer_amount",
     "repaid_amount",
     "remaining_amount",
+    "planned_repayment_amount",
+    "initial_renovation_amount",
+    "cumulative_repaid_amount",
+    "remaining_balance",
+    "planned_monthly_repayment_amount",
+    "final_planned_repayment_amount",
     "overdue_days",
     "risk_score",
     "asset_transfer_discount_rate",
+    "withholding_ratio",
+    "actual_monthly_rent",
+    "collection_contract_years",
 })
 
 RECORD_DATE_ONLY_COLUMNS: frozenset[str] = frozenset({
@@ -448,6 +645,8 @@ RECORD_DATE_ONLY_COLUMNS: frozenset[str] = frozenset({
     "last_payment_date",
     "max_payment_date",
     "last_renovation_payment_date",
+    "custody_agreement_sign_date",
+    "current_bill_date",
 })
 
 RECORD_TIMESTAMP_COLUMNS: frozenset[str] = frozenset({
@@ -542,6 +741,8 @@ def _ordered_record_keys(keys: list[str], record_type: str) -> list[str]:
 def _record_column_label(key: str, record_type: str = "repayment") -> str:
     if record_type == "monitor":
         return MONITOR_COLUMN_LABELS.get(key, RECORD_COLUMN_LABELS.get(key, key))
+    if record_type == "repayment_plan":
+        return REPAYMENT_PLAN_COLUMN_LABELS.get(key, RECORD_COLUMN_LABELS.get(key, key))
     return RECORD_COLUMN_LABELS.get(key, key)
 
 
@@ -621,9 +822,14 @@ def render_records_page(
         <div><label>信托产品</label>
         <select name="trust_product_id" form="f" style="width:100%">{product_options}</select></div>"""
 
-    source_label = "资产信托号" if record_type == "monitor" else "资产分笔号"
+    source_label = (
+        "资产信托号" if record_type == "monitor"
+        else "资产编号(房源)" if record_type == "repayment_plan"
+        else "资产分笔号"
+    )
+    data_date_label = "统计日期" if record_type == "repayment_plan" else "数据日期"
     field_specs = [
-        ("data_date", "数据日期", "date", False),
+        ("data_date", data_date_label, "date", False),
         ("asset_code", "资产主编号", "text", True),
         ("custody_asset_code", "托管房源号", "text", True),
         ("source_asset_code", source_label, "text", True),
@@ -768,7 +974,17 @@ def render_records_page(
     export_link = ""
     if record_type == "monitor":
         export_href = f"/assetinfo/monitor-records/export?{filter_qs}" if filter_qs else "/assetinfo/monitor-records/export"
-        export_link = f' · <a href="{escape(export_href)}">导出 Excel</a>'
+        export_link = f' · <a href="{escape(export_href)}">导出 Excel（监控模版）</a>'
+    elif record_type in ("repayment", "repayment_plan"):
+        export_href = f"/assetinfo/repayment-records/export?{filter_qs}" if filter_qs else "/assetinfo/repayment-records/export"
+        export_link = f' · <a href="{escape(export_href)}">导出 Excel（披露模版）</a>'
+
+    empty_hint = ""
+    if record_type == "repayment_plan" and total == 0:
+        empty_hint = (
+            '<p class="snapshot-hint warn">暂无回款计划数据。请在 '
+            '<a href="/assetinfo/upload">资产数据导入</a> 中勾选还款披露 Excel 的「回款计划」Sheet 导入。</p>'
+        )
 
     sort_script = ""
     if record_type == "monitor":
@@ -797,6 +1013,71 @@ def render_records_page(
     }})();
     </script>"""
 
+    hscroll_script = """
+    <script>
+    (function() {
+        var wrap = document.getElementById('records-hscroll');
+        if (!wrap) return;
+        var key = 'recordsHScroll:' + window.location.pathname;
+        var colKey = key + ':col';
+
+        function anchorCol() {
+            var ths = wrap.querySelectorAll('thead th[data-col]');
+            var left = wrap.scrollLeft;
+            for (var i = 0; i < ths.length; i++) {
+                var th = ths[i];
+                if (th.offsetLeft + th.offsetWidth > left + 1) {
+                    return th.getAttribute('data-col');
+                }
+            }
+            return ths.length ? ths[ths.length - 1].getAttribute('data-col') : null;
+        }
+
+        function savePos() {
+            sessionStorage.setItem(key, String(wrap.scrollLeft));
+            var col = anchorCol();
+            if (col) sessionStorage.setItem(colKey, col);
+        }
+
+        function restorePos() {
+            var col = sessionStorage.getItem(colKey);
+            if (col) {
+                var th = wrap.querySelector('thead th[data-col="' + col + '"]');
+                if (th) {
+                    wrap.scrollLeft = th.offsetLeft;
+                    return;
+                }
+            }
+            var saved = sessionStorage.getItem(key);
+            if (saved !== null) {
+                var left = parseInt(saved, 10);
+                if (!isNaN(left)) wrap.scrollLeft = left;
+            }
+        }
+
+        requestAnimationFrame(function() {
+            requestAnimationFrame(restorePos);
+        });
+        window.addEventListener('load', restorePos);
+
+        wrap.addEventListener('scroll', savePos, { passive: true });
+        document.querySelectorAll('a.pager-btn').forEach(function(a) {
+            a.addEventListener('click', savePos);
+        });
+        var filterForm = document.getElementById('f');
+        if (filterForm) {
+            filterForm.addEventListener('submit', function() {
+                sessionStorage.removeItem(key);
+                sessionStorage.removeItem(colKey);
+            });
+        }
+    })();
+    </script>"""
+    empty_table = (
+        '<tr><td colspan="8">暂无数据</td></tr>'
+        if record_type == "repayment_plan"
+        else '<tr><td>无数据</td></tr>'
+    )
     body = f"""
     <nav class="breadcrumb"><a href="/">首页</a> / <a href="/assetinfo/upload">资产情况</a> / {escape(title)}</nav>
     <h1>{escape(title)}</h1>
@@ -806,13 +1087,15 @@ def render_records_page(
             <div><button type="submit" class="btn-primary">筛选</button></div>
         </form>
         {snapshot_banner}
+        {empty_hint}
     </div>
     {pager_block}
     <p class="muted"><a href="{escape(data_path)}?{json_qs}">JSON</a>{export_link}</p>
-    <div class="card table-wrap">
-        <table class="records-table"><thead><tr>{headers}</tr></thead><tbody>{rows or '<tr><td>无数据</td></tr>'}</tbody></table>
+    <div class="card table-wrap" id="records-hscroll">
+        <table class="records-table"><thead><tr>{headers}</tr></thead><tbody>{rows or empty_table}</tbody></table>
     </div>
     {pager_block}
     {sort_script}
+    {hscroll_script}
     """
     return _page_shell(title, body)

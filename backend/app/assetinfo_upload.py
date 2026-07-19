@@ -18,6 +18,7 @@ from sqlalchemy.engine import Connection
 
 from app import assetinfo_cleanse as cleanse
 from app import assetinfo_date_rules
+from app import assetinfo_templates as templates
 from app import query_utils
 from app.auth import record_assetinfo_run, record_sheet_run
 from app.issuance_labels import format_rate
@@ -201,7 +202,9 @@ def build_record_filters(
 
 
 REPAYMENT_SHEET_KEYWORD = "已还款"
-REPAYMENT_SKIP_SHEET = "回款计划"
+REPAYMENT_PLAN_SHEET = cleanse.REPAYMENT_PLAN_SHEET_KEYWORD
+# 兼容旧测试/调用名
+REPAYMENT_SKIP_SHEET = REPAYMENT_PLAN_SHEET
 
 REPAYMENT_FILE_KEYWORDS = ("还款明细",)
 REPAYMENT_SHEET_NAME_KEYWORDS = ("还款明细", "已还款", "还款披露")
@@ -221,6 +224,46 @@ COL_INITIAL = ("初始受让金额",)
 COL_REPAID = ("已还款金额",)
 COL_REMAINING = cleanse.COL_ALIASES["remaining_amount"]
 COL_LAST_RENOVATION_PAYMENT = cleanse.COL_ALIASES["last_renovation_payment_date"]
+
+REPAYMENT_OPTIONAL_FIELDS = (
+    "asset_pool_code",
+    "current_payer",
+    "planned_repayment_amount",
+    "initial_renovation_amount",
+    "cumulative_repaid_amount",
+    "remaining_balance",
+)
+
+MONITOR_OPTIONAL_FIELDS = (
+    "asset_pool_code",
+    "renovation_vendor",
+    "asset_status",
+    "community_name",
+    "city",
+    "collection_contract_code",
+    "custody_agreement_sign_date",
+    "collection_contract_years",
+    "owner_code",
+    "withholding_ratio",
+    "actual_monthly_rent",
+)
+
+MONITOR_OPTIONAL_DATE_FIELDS = frozenset({
+    "custody_agreement_sign_date",
+})
+MONITOR_OPTIONAL_RATE_FIELDS = frozenset({
+    "withholding_ratio",
+})
+MONITOR_OPTIONAL_AMOUNT_FIELDS = frozenset({
+    "collection_contract_years",
+    "actual_monthly_rent",
+})
+REPAYMENT_OPTIONAL_AMOUNT_FIELDS = frozenset({
+    "planned_repayment_amount",
+    "initial_renovation_amount",
+    "cumulative_repaid_amount",
+    "remaining_balance",
+})
 
 
 def upload_root() -> Path:
@@ -393,6 +436,8 @@ def _text_contains_any(text: str, keywords: tuple[str, ...]) -> bool:
 
 
 def _classify_by_name(file_name: str, sheet_name: str) -> str | None:
+    if cleanse.is_repayment_plan_sheet(sheet_name):
+        return "repayment_plan"
     if _text_contains_any(file_name, REPAYMENT_FILE_KEYWORDS):
         return "repayment_detail"
     if _text_contains_any(sheet_name, REPAYMENT_SHEET_NAME_KEYWORDS):
@@ -405,8 +450,8 @@ def _classify_by_name(file_name: str, sheet_name: str) -> str | None:
 
 
 def _classify_by_header(sheet_name: str, df: pd.DataFrame) -> str | None:
-    if REPAYMENT_SKIP_SHEET in sheet_name:
-        return "skip"
+    if cleanse.is_repayment_plan_sheet(sheet_name):
+        return "repayment_plan"
     if REPAYMENT_SHEET_KEYWORD in sheet_name:
         return "repayment_detail"
     if cleanse.is_monitor_sheet(df):
@@ -415,6 +460,9 @@ def _classify_by_header(sheet_name: str, df: pd.DataFrame) -> str | None:
 
 
 def classify_sheet(file_name: str, sheet_name: str, df: pd.DataFrame) -> SheetClassification:
+    if cleanse.is_repayment_plan_sheet(sheet_name):
+        return SheetClassification("repayment_plan", "repayment_plan", "repayment_plan")
+
     name_type = _classify_by_name(file_name, sheet_name)
     header_type = _classify_by_header(sheet_name, df)
 
@@ -425,12 +473,10 @@ def classify_sheet(file_name: str, sheet_name: str, df: pd.DataFrame) -> SheetCl
     ):
         return SheetClassification("ambiguous_sheet_type", name_type, header_type)
 
-    if name_type in ("repayment_detail", "asset_monitor"):
+    if name_type in ("repayment_detail", "asset_monitor", "repayment_plan"):
         return SheetClassification(name_type, name_type, header_type)
 
-    if header_type == "skip":
-        return SheetClassification("skip", name_type, header_type)
-    if header_type in ("repayment_detail", "asset_monitor"):
+    if header_type in ("repayment_detail", "asset_monitor", "repayment_plan"):
         return SheetClassification(header_type, name_type, header_type)
 
     return SheetClassification("unknown", name_type, header_type)
@@ -454,11 +500,9 @@ def classify_workbook(path: Path) -> str:
     xl = pd.ExcelFile(path)
     types = set()
     for name in xl.sheet_names:
-        if REPAYMENT_SKIP_SHEET in name:
-            continue
         df = pd.read_excel(path, sheet_name=name, header=0, nrows=5)
         result = classify_sheet(path.name, name, df)
-        if result.sheet_type not in ("skip", "unknown", "ambiguous_sheet_type"):
+        if result.sheet_type not in ("skip", "unknown", "ambiguous_sheet_type", "repayment_plan"):
             types.add(result.sheet_type)
     if "repayment_detail" in types and "asset_monitor" in types:
         return "mixed"
@@ -467,6 +511,32 @@ def classify_workbook(path: Path) -> str:
     if "asset_monitor" in types:
         return "asset_monitor"
     return "unknown"
+
+
+def _opt_field_from_row(
+    row: pd.Series,
+    col_map: dict[str, str | None],
+    field: str,
+    *,
+    as_amount: bool = False,
+    as_date: bool = False,
+    as_rate: bool = False,
+):
+    col = col_map.get(field)
+    if not col:
+        return None
+    val = row[col]
+    if as_date:
+        return cleanse.to_date_value(val)
+    if as_rate:
+        return cleanse.to_rate_value(val)
+    if as_amount:
+        return cleanse.to_numeric_value(val)
+    return cleanse.to_optional_str(val)
+
+
+def _build_optional_col_map(df: pd.DataFrame, fields: tuple[str, ...]) -> dict[str, str | None]:
+    return {field: cleanse.pick_aliased_column(df, field) for field in fields}
 
 
 def _load_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
@@ -1097,6 +1167,7 @@ def _parse_repayment_rows(
     col_period = cleanse.pick_column(df, *COL_PERIOD)
     col_amount = cleanse.pick_column(df, *COL_AMOUNT)
     col_date = cleanse.pick_column(df, *COL_REPAYMENT_DATE)
+    opt_cols = _build_optional_col_map(df, REPAYMENT_OPTIONAL_FIELDS)
 
     if not col_custody and not col_asset:
         return [], ["缺少托管房源编码或资产编号(房源)列"]
@@ -1119,7 +1190,7 @@ def _parse_repayment_rows(
             errors.append(f"行{idx + 2}: 无法解析 repayment_date")
             continue
         period_no = cleanse.clean_period_no(row[col_period]) if col_period else None
-        rows.append({
+        parsed = {
             "asset_code": asset_code,
             "custody_asset_code": custody,
             "source_asset_code": source,
@@ -1127,7 +1198,13 @@ def _parse_repayment_rows(
             "actual_repayment_amount": amount,
             "repayment_date": repayment_date,
             "data_date": repayment_date,
-        })
+        }
+        for field in REPAYMENT_OPTIONAL_FIELDS:
+            parsed[field] = _opt_field_from_row(
+                row, opt_cols, field,
+                as_amount=field in REPAYMENT_OPTIONAL_AMOUNT_FIELDS,
+            )
+        rows.append(parsed)
     return rows, errors
 
 
@@ -1181,6 +1258,7 @@ def _parse_monitor_rows(
     col_repaid = cleanse.pick_column(df, *COL_REPAID)
     col_remaining = cleanse.pick_aliased_column(df, "remaining_amount")
     col_last_renovation = cleanse.pick_aliased_column(df, "last_renovation_payment_date")
+    opt_cols = _build_optional_col_map(df, MONITOR_OPTIONAL_FIELDS)
     remaining_label = cleanse.aliased_column_label("remaining_amount")
 
     required_column_mapping = {
@@ -1191,6 +1269,7 @@ def _parse_monitor_rows(
         "repaid_amount": col_repaid,
         "remaining_amount": col_remaining,
         "last_renovation_payment_date": col_last_renovation,
+        **opt_cols,
     }
 
     missing = [label for label, col in [
@@ -1245,7 +1324,7 @@ def _parse_monitor_rows(
         last_renovation_payment_date = None
         if col_last_renovation:
             last_renovation_payment_date = cleanse.to_date_value(row[col_last_renovation])
-        candidate_rows.append({
+        candidate = {
             "asset_code": asset_code,
             "custody_asset_code": custody,
             "source_asset_code": source,
@@ -1254,7 +1333,15 @@ def _parse_monitor_rows(
             "repaid_amount": repaid,
             "remaining_amount": remaining,
             "last_renovation_payment_date": last_renovation_payment_date,
-        })
+        }
+        for field in MONITOR_OPTIONAL_FIELDS:
+            candidate[field] = _opt_field_from_row(
+                row, opt_cols, field,
+                as_amount=field in MONITOR_OPTIONAL_AMOUNT_FIELDS,
+                as_date=field in MONITOR_OPTIONAL_DATE_FIELDS,
+                as_rate=field in MONITOR_OPTIONAL_RATE_FIELDS,
+            )
+        candidate_rows.append(candidate)
 
     if not candidate_rows:
         return MonitorParseResult(
@@ -1747,10 +1834,14 @@ def _import_repayment_sheet(
                     trust_product_id, trust_asset_id, asset_code,
                     custody_asset_code, source_asset_code,
                     data_date, period_no, actual_repayment_amount, repayment_date,
+                    asset_pool_code, current_payer, planned_repayment_amount,
+                    initial_renovation_amount, cumulative_repaid_amount, remaining_balance,
                     source_file_name, source_sheet_name, synced_at
                 ) VALUES (
                     :pid, :aid, :ac, :custody, :source,
                     :dd, :pn, :amt, :rd,
+                    :asset_pool_code, :current_payer, :planned_repayment_amount,
+                    :initial_renovation_amount, :cumulative_repaid_amount, :remaining_balance,
                     :file, :sheet, :synced
                 )
             """),
@@ -1764,6 +1855,12 @@ def _import_repayment_sheet(
                 "pn": r.get("period_no"),
                 "amt": r["actual_repayment_amount"],
                 "rd": r["repayment_date"],
+                "asset_pool_code": r.get("asset_pool_code"),
+                "current_payer": r.get("current_payer"),
+                "planned_repayment_amount": r.get("planned_repayment_amount"),
+                "initial_renovation_amount": r.get("initial_renovation_amount"),
+                "cumulative_repaid_amount": r.get("cumulative_repaid_amount"),
+                "remaining_balance": r.get("remaining_balance"),
                 "file": file_name,
                 "sheet": sheet_name,
                 "synced": synced_at,
@@ -1837,12 +1934,18 @@ def _import_monitor_sheet(
                     custody_asset_code, source_asset_code,
                     data_date, initial_transfer_amount, repaid_amount, remaining_amount,
                     last_renovation_payment_date,
+                    asset_pool_code, renovation_vendor, asset_status, community_name, city,
+                    collection_contract_code, custody_agreement_sign_date,
+                    collection_contract_years, owner_code, withholding_ratio, actual_monthly_rent,
                     overdue_days, last_payment_date, max_payment_date,
                     source_file_name, source_sheet_name, synced_at
                 ) VALUES (
                     :pid, :aid, :ac, :custody, :source,
                     :dd, :initial, :repaid, :remaining,
                     :last_renovation,
+                    :asset_pool_code, :renovation_vendor, :asset_status, :community_name, :city,
+                    :collection_contract_code, :custody_agreement_sign_date,
+                    :collection_contract_years, :owner_code, :withholding_ratio, :actual_monthly_rent,
                     NULL, NULL, NULL,
                     :file, :sheet, :synced
                 )
@@ -1858,6 +1961,17 @@ def _import_monitor_sheet(
                 "repaid": r["repaid_amount"],
                 "remaining": r["remaining_amount"],
                 "last_renovation": r.get("last_renovation_payment_date"),
+                "asset_pool_code": r.get("asset_pool_code"),
+                "renovation_vendor": r.get("renovation_vendor"),
+                "asset_status": r.get("asset_status"),
+                "community_name": r.get("community_name"),
+                "city": r.get("city"),
+                "collection_contract_code": r.get("collection_contract_code"),
+                "custody_agreement_sign_date": r.get("custody_agreement_sign_date"),
+                "collection_contract_years": r.get("collection_contract_years"),
+                "owner_code": r.get("owner_code"),
+                "withholding_ratio": r.get("withholding_ratio"),
+                "actual_monthly_rent": r.get("actual_monthly_rent"),
                 "file": file_name,
                 "sheet": sheet_name,
                 "synced": synced_at,
@@ -1876,6 +1990,202 @@ def _import_monitor_sheet(
                 f"{item['row_count']} 行"
             )
     return inserted, upsert_count, "imported", batch_date, quality_warnings
+
+
+def _parse_repayment_plan_rows(df: pd.DataFrame) -> tuple[list[dict], list[str]]:
+    col_asset = cleanse.pick_column(df, *COL_ASSET_CODE)
+    col_custody = cleanse.pick_column(df, *COL_CUSTODY)
+    if not col_asset and not col_custody:
+        return [], ["缺少资产编号(房源)或托管房源编码列"]
+
+    field_keys = (
+        "asset_pool_code", "renovation_vendor", "data_date",
+        "initial_transfer_amount", "repaid_amount", "remaining_amount",
+        "community_name", "city", "current_bill_date", "repayment_amount_detail",
+        "planned_monthly_repayment_amount", "final_planned_repayment_amount",
+    )
+    opt_cols = _build_optional_col_map(df, field_keys)
+    # remaining_amount on plan sheet uses 剩余还款金额
+    if opt_cols.get("remaining_amount") is None:
+        opt_cols["remaining_amount"] = cleanse.pick_aliased_column(df, "remaining_amount")
+    if opt_cols.get("data_date") is None:
+        opt_cols["data_date"] = cleanse.pick_column(df, *COL_DATA_DATE)
+    if opt_cols.get("initial_transfer_amount") is None:
+        opt_cols["initial_transfer_amount"] = cleanse.pick_column(df, *COL_INITIAL)
+    if opt_cols.get("repaid_amount") is None:
+        opt_cols["repaid_amount"] = cleanse.pick_column(df, *COL_REPAID)
+
+    amount_fields = {
+        "initial_transfer_amount", "repaid_amount", "remaining_amount",
+        "planned_monthly_repayment_amount", "final_planned_repayment_amount",
+    }
+    date_fields = {"data_date", "current_bill_date"}
+
+    rows: list[dict] = []
+    errors: list[str] = []
+    for idx, row in df.iterrows():
+        asset_code, custody, source = _resolve_monitor_asset_fields(row, col_asset, col_custody)
+        if not asset_code and not custody:
+            continue
+        if not asset_code:
+            asset_code = custody or source or ""
+        parsed = {
+            "asset_code": asset_code,
+            "custody_asset_code": custody,
+            "source_asset_code": source,
+            "source_row_number": int(idx) + 2,
+        }
+        for field in field_keys:
+            parsed[field] = _opt_field_from_row(
+                row, opt_cols, field,
+                as_amount=field in amount_fields,
+                as_date=field in date_fields,
+            )
+        rows.append(parsed)
+    if not rows and not errors:
+        errors.append("无有效回款计划行")
+    return rows, errors
+
+
+def precheck_repayment_plan_sheet(
+    conn: Connection,
+    trust_product_id: int,
+    product_name: str,
+    file_name: str,
+    sheet_name: str,
+    df: pd.DataFrame,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "file_name": file_name,
+        "sheet_name": sheet_name,
+        "sheet_type": "repayment_plan",
+        "row_count": 0,
+        "amount_sum": 0.0,
+        "exists": False,
+        "importable": False,
+        "action": "failed",
+        "reason": "",
+        "warnings": [],
+        "db_row_count": 0,
+    }
+    if not trust_product_id:
+        result["reason"] = "trust_product_id 缺失，无法预检回款计划"
+        return result
+    rows, errors = _parse_repayment_plan_rows(df)
+    if errors and not rows:
+        result["reason"] = errors[0]
+        return result
+    result["row_count"] = len(rows)
+    result["warnings"] = errors[:20]
+    existing = conn.execute(
+        text("""
+            SELECT COUNT(*) AS cnt
+            FROM trust_repayment_plan_records
+            WHERE trust_product_id = :pid
+              AND source_file_name = :file
+              AND source_sheet_name = :sheet
+        """),
+        {"pid": trust_product_id, "file": file_name, "sheet": sheet_name},
+    ).fetchone()
+    db_count = int(existing.cnt or 0)
+    result["db_row_count"] = db_count
+    result["exists"] = db_count > 0
+    result["importable"] = True
+    if db_count > 0:
+        result["action"] = "overwrite"
+        result["reason"] = f"将覆盖当前来源 {file_name} / {sheet_name} 的 {db_count} 行旧数据"
+    else:
+        result["action"] = "import"
+        result["reason"] = "可导入"
+    return result
+
+
+def _import_repayment_plan_sheet(
+    conn: Connection,
+    trust_product_id: int,
+    product_name: str,
+    file_name: str,
+    sheet_name: str,
+    df: pd.DataFrame,
+    synced_at: datetime,
+) -> tuple[int, int, str]:
+    if not trust_product_id:
+        raise HTTPException(status_code=400, detail="trust_product_id 缺失，无法导入回款计划")
+    rows, parse_errors = _parse_repayment_plan_rows(df)
+    if not rows:
+        return 0, 0, parse_errors[0] if parse_errors else "无有效行"
+
+    conn.execute(
+        text("""
+            DELETE FROM trust_repayment_plan_records
+            WHERE trust_product_id = :pid
+              AND source_file_name = :file
+              AND source_sheet_name = :sheet
+        """),
+        {"pid": trust_product_id, "file": file_name, "sheet": sheet_name},
+    )
+
+    upsert_count = 0
+    inserted = 0
+    for r in rows:
+        asset_id = _upsert_trust_asset(
+            conn,
+            trust_product_id,
+            r["asset_code"],
+            r.get("custody_asset_code"),
+            float(r["initial_transfer_amount"] or 0),
+            r.get("source_asset_code"),
+            distinct_custody=True,
+        )
+        upsert_count += 1
+        conn.execute(
+            text("""
+                INSERT INTO trust_repayment_plan_records (
+                    trust_product_id, trust_asset_id, asset_code,
+                    custody_asset_code, source_asset_code,
+                    asset_pool_code, renovation_vendor, data_date,
+                    initial_transfer_amount, repaid_amount, remaining_amount,
+                    community_name, city, current_bill_date, repayment_amount_detail,
+                    planned_monthly_repayment_amount, final_planned_repayment_amount,
+                    source_file_name, source_sheet_name, source_row_number, synced_at
+                ) VALUES (
+                    :pid, :aid, :ac, :custody, :source,
+                    :asset_pool_code, :renovation_vendor, :data_date,
+                    :initial_transfer_amount, :repaid_amount, :remaining_amount,
+                    :community_name, :city, :current_bill_date, :repayment_amount_detail,
+                    :planned_monthly_repayment_amount, :final_planned_repayment_amount,
+                    :file, :sheet, :source_row_number, :synced
+                )
+            """),
+            {
+                "pid": trust_product_id,
+                "aid": asset_id,
+                "ac": r["asset_code"],
+                "custody": r.get("custody_asset_code"),
+                "source": r.get("source_asset_code"),
+                "asset_pool_code": r.get("asset_pool_code"),
+                "renovation_vendor": r.get("renovation_vendor"),
+                "data_date": r.get("data_date"),
+                "initial_transfer_amount": r.get("initial_transfer_amount"),
+                "repaid_amount": r.get("repaid_amount"),
+                "remaining_amount": r.get("remaining_amount"),
+                "community_name": r.get("community_name"),
+                "city": r.get("city"),
+                "current_bill_date": r.get("current_bill_date"),
+                "repayment_amount_detail": r.get("repayment_amount_detail"),
+                "planned_monthly_repayment_amount": r.get("planned_monthly_repayment_amount"),
+                "final_planned_repayment_amount": r.get("final_planned_repayment_amount"),
+                "file": file_name,
+                "sheet": sheet_name,
+                "source_row_number": r.get("source_row_number"),
+                "synced": synced_at,
+            },
+        )
+        inserted += 1
+    msg = "imported"
+    if parse_errors:
+        msg = f"imported（{len(parse_errors)} 行解析警告）"
+    return inserted, upsert_count, msg
 
 
 async def save_batch_files(batch_uuid: str, files: list[UploadFile]) -> list[str]:
@@ -1908,8 +2218,6 @@ def run_preview(
             raise HTTPException(status_code=400, detail=f"文件不存在: {file_name}")
         xl = pd.ExcelFile(path)
         for sheet_name in xl.sheet_names:
-            if REPAYMENT_SKIP_SHEET in sheet_name:
-                continue
             df = _load_sheet(path, sheet_name)
             classification = classify_sheet(file_name, sheet_name, df)
             st = classification.sheet_type
@@ -1942,6 +2250,10 @@ def run_preview(
                 ))
             elif st == "asset_monitor":
                 sheets.append(precheck_monitor_sheet(
+                    conn, trust_product_id, product_name, file_name, sheet_name, df,
+                ))
+            elif st == "repayment_plan":
+                sheets.append(precheck_repayment_plan_sheet(
                     conn, trust_product_id, product_name, file_name, sheet_name, df,
                 ))
 
@@ -1985,6 +2297,7 @@ def run_import(
 
     inserted_monitor = 0
     inserted_repayment = 0
+    inserted_repayment_plan = 0
     upsert_assets = 0
     skipped = 0
     failed = 0
@@ -2034,6 +2347,18 @@ def run_import(
                     conn, trust_product_id, product_name, file_name, sheet_name, df, synced_at,
                 )
                 inserted_repayment += ins
+                upsert_assets += ups
+                replaced = action in ("overwrite", "needs_confirm") and sheet.get("db_row_count", 0) > 0
+                sheet_results.append({
+                    **sheet,
+                    "final_action": "overwritten" if replaced else "imported",
+                    "inserted": ins,
+                })
+            elif sheet["sheet_type"] == "repayment_plan":
+                ins, ups, msg = _import_repayment_plan_sheet(
+                    conn, trust_product_id, product_name, file_name, sheet_name, df, synced_at,
+                )
+                inserted_repayment_plan += ins
                 upsert_assets += ups
                 replaced = action in ("overwrite", "needs_confirm") and sheet.get("db_row_count", 0) > 0
                 sheet_results.append({
@@ -2120,6 +2445,7 @@ def run_import(
         "trust_product_name": product_name,
         "inserted_monitor_count": inserted_monitor,
         "inserted_repayment_count": inserted_repayment,
+        "inserted_repayment_plan_count": inserted_repayment_plan,
         "upsert_asset_count": upsert_assets,
         "skipped_sheet_count": skipped,
         "not_selected_sheet_count": not_selected,
@@ -2212,9 +2538,13 @@ def _append_monitor_issuance_filters(
 
     city_filter = filters.get("city")
     if city_filter == ISSUANCE_CITY_UNKNOWN:
-        where_parts.append("(iss.city IS NULL OR TRIM(iss.city) = '')")
+        where_parts.append(
+            "(COALESCE(NULLIF(TRIM(r.city), ''), NULLIF(TRIM(iss.city), '')) IS NULL)"
+        )
     elif city_filter:
-        where_parts.append("iss.city = :city")
+        where_parts.append(
+            "COALESCE(NULLIF(TRIM(r.city), ''), iss.city) = :city"
+        )
         params["city"] = city_filter
 
 
@@ -2259,7 +2589,10 @@ def _build_monitor_record_query(
         filters.get("sort_by"),
         filters.get("sort_dir"),
     )
-    select_extra = ", iss.asset_transfer_discount_rate, iss.city"
+    select_extra = (
+        ", iss.asset_transfer_discount_rate, "
+        "COALESCE(NULLIF(TRIM(r.city), ''), iss.city) AS city_resolved"
+    )
     return where_sql, params, snapshot_join, issuance_join, order_by_sql, select_extra
 
 
@@ -2270,11 +2603,20 @@ MONITOR_ROW_FLOAT_KEYS = frozenset({
     "asset_transfer_discount_rate",
     "overdue_days",
     "risk_score",
+    "withholding_ratio",
+    "actual_monthly_rent",
+    "collection_contract_years",
+    "planned_repayment_amount",
+    "initial_renovation_amount",
+    "cumulative_repaid_amount",
+    "remaining_balance",
 })
 
 
 def _normalize_monitor_row(row) -> dict[str, Any]:
     item = dict(row._mapping)
+    if item.get("city_resolved") is not None:
+        item["city"] = item.get("city_resolved") or item.get("city")
     for k, v in item.items():
         if hasattr(v, "isoformat"):
             item[k] = str(v)
@@ -2290,6 +2632,11 @@ def _format_monitor_export_cell(key: str, value) -> Any:
         return "—"
     if key == "asset_transfer_discount_rate":
         return format_rate(value)
+    if key == "withholding_ratio":
+        try:
+            return format_rate(value)
+        except (TypeError, ValueError):
+            return value
     if key in ("synced_at", "created_at") and isinstance(value, str):
         return value[:16].replace("T", " ") if len(value) >= 16 else value
     if key in (
@@ -2297,6 +2644,9 @@ def _format_monitor_export_cell(key: str, value) -> Any:
         "last_renovation_payment_date",
         "last_payment_date",
         "max_payment_date",
+        "custody_agreement_sign_date",
+        "current_bill_date",
+        "repayment_date",
     ) and isinstance(value, str):
         return value[:10]
     if key == "city":
@@ -2330,16 +2680,24 @@ def fetch_monitor_city_options(
     conn: Connection,
     trust_product_id: int | None = None,
 ) -> list[str]:
-    sql = """
-        SELECT DISTINCT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
-        FROM trust_product_issuance_asset_records
-        WHERE 1 = 1
-    """
+    """城市筛选项：监控表 city ∪ 发行表 city。"""
     params: dict[str, Any] = {"unknown": ISSUANCE_CITY_UNKNOWN}
+    product_filter = ""
     if trust_product_id is not None:
-        sql += " AND trust_product_id = :trust_product_id"
+        product_filter = " AND trust_product_id = :trust_product_id"
         params["trust_product_id"] = trust_product_id
-    sql += " ORDER BY city"
+    sql = f"""
+        SELECT DISTINCT city FROM (
+            SELECT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
+            FROM trust_product_issuance_asset_records
+            WHERE 1 = 1{product_filter}
+            UNION
+            SELECT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
+            FROM trust_asset_monitor_records
+            WHERE city IS NOT NULL{product_filter}
+        ) c
+        ORDER BY city
+    """
     rows = conn.execute(text(sql), params)
     cities = [str(row.city) for row in rows]
     if ISSUANCE_CITY_UNKNOWN not in cities:
@@ -2387,21 +2745,162 @@ def fetch_monitor_records_for_export(
 
 
 def build_monitor_export_xlsx(items: list[dict[str, Any]]) -> bytes:
-    columns = [
-        key for key in MONITOR_EXPORT_COLUMNS
-        if not items or key in items[0]
+    """按资产监控表模版列序导出."""
+    headers = templates.template_headers(templates.MONITOR_TEMPLATE_COLUMNS)
+    data_rows = [
+        templates.row_values_for_template(
+            item, templates.MONITOR_TEMPLATE_COLUMNS, format_cell=_format_monitor_export_cell,
+        )
+        for item in items
     ]
-    headers = [MONITOR_EXPORT_LABELS.get(key, key) for key in columns]
-    data_rows = []
-    for item in items:
-        data_rows.append([
-            _format_monitor_export_cell(key, item.get(key))
-            for key in columns
-        ])
     df = pd.DataFrame(data_rows, columns=headers)
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="资产监控数据")
+        df.to_excel(writer, index=False, sheet_name="资产监控表")
+    return buffer.getvalue()
+
+
+def fetch_repayment_records_for_export(
+    conn: Connection,
+    filters: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int]:
+    where_parts = ["1=1"]
+    params: dict[str, Any] = {}
+    for key in (
+        "trust_product_id", "data_date", "asset_code",
+        "custody_asset_code", "source_asset_code",
+        "source_file_name", "source_sheet_name",
+    ):
+        _append_assetinfo_record_filter(where_parts, params, key, filters.get(key))
+    where_sql = " AND ".join(where_parts)
+
+    count_row = conn.execute(
+        text(f"""
+            SELECT COUNT(*) AS cnt
+            FROM trust_repayment_detail_records r
+            JOIN trust_products tp ON tp.id = r.trust_product_id
+            WHERE {where_sql}
+        """),
+        params,
+    ).fetchone()
+    total = int(count_row.cnt)
+    if total > MONITOR_EXPORT_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"结果超过 {MONITOR_EXPORT_MAX} 条，请缩小筛选范围",
+        )
+
+    # 当期逾期天数：取同产品同托管号最新监控快照 overdue_days（不从还款 Excel 导入）
+    rows = conn.execute(
+        text(f"""
+            SELECT r.*, tp.name AS trust_product_name,
+                   mon.overdue_days AS overdue_days
+            FROM trust_repayment_detail_records r
+            JOIN trust_products tp ON tp.id = r.trust_product_id
+            LEFT JOIN LATERAL (
+                SELECT m.overdue_days
+                FROM trust_asset_monitor_records m
+                WHERE m.trust_product_id = r.trust_product_id
+                  AND (
+                      m.custody_asset_code = r.custody_asset_code
+                      OR (
+                          r.custody_asset_code IS NULL
+                          AND m.asset_code = r.asset_code
+                      )
+                  )
+                ORDER BY m.data_date DESC NULLS LAST, m.id DESC
+                LIMIT 1
+            ) mon ON TRUE
+            WHERE {where_sql}
+            ORDER BY r.repayment_date DESC NULLS LAST, r.id DESC
+        """),
+        params,
+    )
+    items = []
+    for row in rows:
+        item = dict(row._mapping)
+        for k, v in item.items():
+            if hasattr(v, "isoformat"):
+                item[k] = str(v)
+            elif isinstance(v, (int, float)) and v is not None and (
+                k.endswith("amount") or k in MONITOR_ROW_FLOAT_KEYS
+            ):
+                item[k] = float(v)
+        items.append(item)
+    return items, total
+
+
+def fetch_repayment_plan_records_for_export(
+    conn: Connection,
+    filters: dict[str, Any],
+) -> list[dict[str, Any]]:
+    where_parts = ["1=1"]
+    params: dict[str, Any] = {}
+    for key in (
+        "trust_product_id", "asset_code",
+        "custody_asset_code", "source_asset_code",
+        "source_file_name", "source_sheet_name",
+    ):
+        _append_assetinfo_record_filter(where_parts, params, key, filters.get(key))
+    if filters.get("data_date"):
+        where_parts.append("r.data_date = :data_date")
+        params["data_date"] = filters["data_date"]
+    where_sql = " AND ".join(where_parts)
+    rows = conn.execute(
+        text(f"""
+            SELECT r.*
+            FROM trust_repayment_plan_records r
+            WHERE {where_sql}
+            ORDER BY r.data_date DESC NULLS LAST, r.id ASC
+        """),
+        params,
+    )
+    items = []
+    for row in rows:
+        item = dict(row._mapping)
+        for k, v in item.items():
+            if hasattr(v, "isoformat"):
+                item[k] = str(v)
+            elif isinstance(v, (int, float)) and v is not None and (
+                k.endswith("amount") or k in MONITOR_ROW_FLOAT_KEYS
+            ):
+                item[k] = float(v)
+        # 模版「资产编号(房源)」优先 source，再 asset_code
+        if not item.get("source_asset_code"):
+            item["source_asset_code"] = item.get("asset_code")
+        items.append(item)
+    return items
+
+
+def build_repayment_disclosure_export_xlsx(
+    repayment_items: list[dict[str, Any]],
+    plan_items: list[dict[str, Any]],
+) -> bytes:
+    """按还款明细披露信息模版导出双 Sheet."""
+    detail_headers = templates.template_headers(templates.REPAYMENT_DETAIL_TEMPLATE_COLUMNS)
+    detail_rows = [
+        templates.row_values_for_template(
+            item, templates.REPAYMENT_DETAIL_TEMPLATE_COLUMNS,
+            format_cell=_format_monitor_export_cell,
+        )
+        for item in repayment_items
+    ]
+    plan_headers = templates.template_headers(templates.REPAYMENT_PLAN_TEMPLATE_COLUMNS)
+    plan_rows = [
+        templates.row_values_for_template(
+            item, templates.REPAYMENT_PLAN_TEMPLATE_COLUMNS,
+            format_cell=_format_monitor_export_cell,
+        )
+        for item in plan_items
+    ]
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        pd.DataFrame(detail_rows, columns=detail_headers).to_excel(
+            writer, index=False, sheet_name="还款明细",
+        )
+        pd.DataFrame(plan_rows, columns=plan_headers).to_excel(
+            writer, index=False, sheet_name="回款计划",
+        )
     return buffer.getvalue()
 
 
@@ -2464,6 +2963,7 @@ def fetch_paginated_records(
 ) -> dict[str, Any]:
     allowed = {
         "repayment": "trust_repayment_detail_records",
+        "repayment_plan": "trust_repayment_plan_records",
         "monitor": "trust_asset_monitor_records",
     }
     table_name = allowed.get(table)
@@ -2522,7 +3022,6 @@ def fetch_paginated_records(
 
     where_parts = ["1=1"]
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
-    transferred = None
 
     for key in (
         "trust_product_id", "data_date", "asset_code",
@@ -2538,18 +3037,16 @@ def fetch_paginated_records(
         )
 
     where_sql = " AND ".join(where_parts)
-    snapshot_join = ""
-    issuance_join = ""
-    order_by_sql = MONITOR_DEFAULT_ORDER_BY.strip()
-    select_extra = ""
+    if table == "repayment_plan":
+        order_by_sql = "r.data_date DESC NULLS LAST, r.id DESC"
+    else:
+        order_by_sql = MONITOR_DEFAULT_ORDER_BY.strip()
 
     count_row = conn.execute(
         text(f"""
             SELECT COUNT(*) AS cnt
             FROM {table_name} r
             JOIN trust_products tp ON tp.id = r.trust_product_id
-            {snapshot_join}
-            {issuance_join}
             WHERE {where_sql}
         """),
         params,
@@ -2558,11 +3055,9 @@ def fetch_paginated_records(
 
     rows = conn.execute(
         text(f"""
-            SELECT r.*, tp.name AS trust_product_name{select_extra}
+            SELECT r.*, tp.name AS trust_product_name
             FROM {table_name} r
             JOIN trust_products tp ON tp.id = r.trust_product_id
-            {snapshot_join}
-            {issuance_join}
             WHERE {where_sql}
             ORDER BY {order_by_sql}
             LIMIT :limit OFFSET :offset
