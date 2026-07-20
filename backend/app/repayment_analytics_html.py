@@ -529,7 +529,7 @@ def render_asset_stats_page(
             const snap = mon.monitor_snapshot_date || '—';
             document.getElementById('monitor-footnote').textContent =
                 '留存资产数 = 发行资产数 − 已转出资产数。转出 MIN/应收账款转让金额取自转入目标产品发行表。'
-                + '正常：未付天数 ≤ 35；未付款：未付天数 > 35（与 M2+ 口径一致）。'
+                + '正常：逾期天数 ≤ 0（M0）；逾期：逾期天数 > 0（M0+）。'
                 + '已还清/未还清/未付款细分截至监控快照日：' + snap
                 + '；不含已转出资产。周期表累计还款占比分母为初始受让金额。';
         }} else {{

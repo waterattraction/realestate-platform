@@ -18,7 +18,7 @@ from app.overdue.buckets import (
     DELINQUENCY_BUCKET_LABELS,
     RECONCILIATION_TOLERANCE_DEFAULT,
     calc_delinquency_bucket,
-    sql_m1_filter,
+    sql_m0_filter,
 )
 
 MEIRUN_PRODUCT_NAME = "美润1号"
@@ -30,8 +30,8 @@ MAX_REQUIRED_ASSETS = N_MAX
 POOL_CAP = 500
 SEARCH_POOL_CAP = 80
 RATE_EPS = 1e-6
-# 自动候选池未付天数上限（必选房源仍可超过，仅提示）
-SWAP_CANDIDATE_MAX_OVERDUE_DAYS = 25
+# 自动候选池：逾期天数上限（必选房源仍可超过，仅提示）
+SWAP_CANDIDATE_MAX_OVERDUE_DAYS = -7
 
 TOLERANCE = RECONCILIATION_TOLERANCE_DEFAULT
 
@@ -262,8 +262,8 @@ def fetch_candidates(
     where_parts = [
         "r.trust_product_id = :meirun_product_id",
         f"r.remaining_amount > {TOLERANCE}",
-        sql_m1_filter("r.overdue_days", "r.remaining_amount"),
-        f"COALESCE(r.overdue_days, 0) <= {SWAP_CANDIDATE_MAX_OVERDUE_DAYS}",
+        sql_m0_filter("r.overdue_days", "r.remaining_amount"),
+        f"r.overdue_days <= {SWAP_CANDIDATE_MAX_OVERDUE_DAYS}",
         "r.last_renovation_payment_date IS NOT NULL",
         "r.last_renovation_payment_date <= :renovation_deadline",
         "iss.asset_transfer_discount_rate IS NOT NULL",
@@ -310,7 +310,7 @@ def fetch_candidates(
             continue
         od = int(row.overdue_days or 0)
         bucket = calc_delinquency_bucket(od, remaining, tolerance=TOLERANCE)
-        if bucket != "M1":
+        if bucket != "M0":
             continue
         if od > SWAP_CANDIDATE_MAX_OVERDUE_DAYS:
             continue
@@ -398,14 +398,14 @@ def _required_asset_ineligibility_reason(
         return "已从美润1号转出"
     if remaining <= TOLERANCE:
         return "已结清或剩余还款为 0"
-    if delinquency_bucket != "M1":
+    if delinquency_bucket != "M0":
         label = DELINQUENCY_BUCKET_LABELS.get(
             delinquency_bucket,
             delinquency_bucket,
         )
         if delinquency_bucket == "ES":
-            return f"非 M1（{label}）"
-        return f"非 M1（{label}，未付 {overdue_days} 天，仅接受 M1）"
+            return f"非 M0（{label}）"
+        return f"非 M0（{label}，逾期 {overdue_days} 天，仅接受 M0）"
     if last_renovation_payment_date is None:
         return "缺少装修款截止日"
     if last_renovation_payment_date > renovation_deadline:
@@ -889,8 +889,8 @@ def fetch_swap_recommendations(
             ],
             "overdue_warnings": [
                 (
-                    f"{c.asset_code}：未付天数 {c.overdue_days} 天，"
-                    f"超过 {SWAP_CANDIDATE_MAX_OVERDUE_DAYS} 天"
+                    f"{c.asset_code}：逾期天数 {c.overdue_days} 天，"
+                    f"超过上限 {SWAP_CANDIDATE_MAX_OVERDUE_DAYS} 天"
                 )
                 for c in pinned
                 if c.overdue_days > SWAP_CANDIDATE_MAX_OVERDUE_DAYS

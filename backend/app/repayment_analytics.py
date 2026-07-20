@@ -9,12 +9,12 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from app import assetinfo_cleanse as cleanse
-from app.overdue.buckets import M1_MAX_DAYS
+from app.overdue.buckets import M0_MAX_DAYS
 
 PeriodKind = Literal["week", "month", "year"]
 
 RECONCILIATION_TOLERANCE = cleanse.RECONCILIATION_TOLERANCE
-STATS_OVERDUE_THRESHOLD_DAYS = M1_MAX_DAYS  # 正常: overdue_days <= 35; 未付款: > 35 (M2+)
+STATS_OVERDUE_THRESHOLD_DAYS = M0_MAX_DAYS  # 正常: overdue_days <= 0; 逾期: > 0 (M0+)
 
 PRIMARY_FROM_CUSTODY_SQL = """
     CASE

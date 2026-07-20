@@ -38,8 +38,8 @@ class TestComboSort(unittest.TestCase):
             last_renovation_payment_date=date(2028, 1, 1),
             data_date=date(2026, 7, 3),
             city="北京",
-            delinquency_bucket="M1",
-            overdue_days=0,
+            delinquency_bucket="M0",
+            overdue_days=-10,
         )
 
     def test_scheme_a_prefers_min_count(self):
@@ -134,24 +134,24 @@ class TestComboSort(unittest.TestCase):
         self.assertEqual(combos[0]["asset_count"], 1)
         self.assertEqual(combos[0]["assets"][0]["asset_code"], "pin")
 
-    def test_required_ineligibility_m2(self):
+    def test_required_ineligibility_m0_5(self):
         reason = asset_swap._required_asset_ineligibility_reason(
             remaining=10000,
-            overdue_days=45,
-            delinquency_bucket="M2",
+            overdue_days=8,
+            delinquency_bucket="M0_5",
             last_renovation_payment_date=date(2027, 1, 1),
             discount_rate=0.9,
             transferred=False,
             renovation_deadline=date(2028, 9, 25),
         )
-        self.assertIn("M2", reason or "")
-        self.assertIn("45", reason or "")
+        self.assertIn("M0.5", reason or "")
+        self.assertIn("8", reason or "")
 
     def test_required_ineligibility_low_rate_allowed(self):
         reason = asset_swap._required_asset_ineligibility_reason(
             remaining=10000,
-            overdue_days=10,
-            delinquency_bucket="M1",
+            overdue_days=-10,
+            delinquency_bucket="M0",
             last_renovation_payment_date=date(2027, 1, 1),
             discount_rate=0.86,
             transferred=False,
@@ -162,8 +162,8 @@ class TestComboSort(unittest.TestCase):
     def test_required_ineligibility_renovation_deadline(self):
         reason = asset_swap._required_asset_ineligibility_reason(
             remaining=10000,
-            overdue_days=10,
-            delinquency_bucket="M1",
+            overdue_days=-10,
+            delinquency_bucket="M0",
             last_renovation_payment_date=date(2029, 1, 1),
             discount_rate=0.9,
             transferred=False,
@@ -174,8 +174,8 @@ class TestComboSort(unittest.TestCase):
     def test_required_ineligibility_ok(self):
         reason = asset_swap._required_asset_ineligibility_reason(
             remaining=10000,
-            overdue_days=10,
-            delinquency_bucket="M1",
+            overdue_days=-10,
+            delinquency_bucket="M0",
             last_renovation_payment_date=date(2027, 1, 1),
             discount_rate=0.9,
             transferred=False,
@@ -184,7 +184,7 @@ class TestComboSort(unittest.TestCase):
         self.assertIsNone(reason)
 
     def test_candidate_max_overdue_constant(self):
-        self.assertEqual(asset_swap.SWAP_CANDIDATE_MAX_OVERDUE_DAYS, 25)
+        self.assertEqual(asset_swap.SWAP_CANDIDATE_MAX_OVERDUE_DAYS, -7)
 
 
 @unittest.skipUnless(os.getenv("DATABASE_URL"), "DATABASE_URL not set")

@@ -38,18 +38,19 @@ from app.overdue import buckets as overdue_buckets
 from app.overdue.buckets import (
     DELINQUENCY_BUCKET_COLORS,
     DELINQUENCY_BUCKET_LABELS,
-    M1_MAX_DAYS as PERFORMING_MAX_DAYS,
+    M0_MAX_DAYS as PERFORMING_MAX_DAYS,
     OVERDUE_ASSET_MIN_DAYS,
     RECONCILIATION_TOLERANCE_DEFAULT,
     calc_delinquency_bucket as calc_risk_level,
     delinquency_bucket,
     is_overdue_asset,
+    normalize_delinquency_bucket_filters,
     sql_es_filter as sql_es_asset_filter,
     sql_exposure_asset_filter,
+    sql_m0_filter as sql_m0_asset_filter,
+    sql_m0_5_filter as sql_m0_5_asset_filter,
     sql_m1_filter as sql_m1_asset_filter,
-    sql_m2_filter as sql_m2_asset_filter,
-    sql_m3_filter as sql_m3_asset_filter,
-    sql_m3_plus_filter as sql_m3_plus_asset_filter,
+    sql_m1_plus_filter as sql_m1_plus_asset_filter,
     sql_overdue_asset_filter,
 )
 from app.ui_css import BTN_CSS, DASHBOARD_BODY_CSS, PAGE_CHROME_CSS, STANDARD_HEADER_CSS, TABLE_SCROLL_CSS
@@ -132,7 +133,7 @@ PORTFOLIO_LIST_COLUMNS: list[tuple[str | None, str, str | None]] = [
     ("trust_product_name", "信托产品", "text"),
     ("city", "城市", "text"),
     ("delinquency_bucket", "等级", "text"),
-    ("overdue_sort", "未付天数", "text"),
+    ("overdue_sort", "逾期天数", "text"),
     ("last_payment_date", "最后回款日", "text"),
     ("trust_marker", "信托标记", "text"),
     ("internal_status", "内部状态", "text"),
@@ -183,24 +184,24 @@ def fmt_status(status: str) -> str:
 
 def build_overdue_kpi_metrics(
     es: int,
+    m0: int,
+    m0_5: int,
     m1: int,
-    m2: int,
-    m3: int,
-    m3_plus: int,
+    m1_plus: int,
 ) -> dict:
-    """exposure_total = ES+M1+M2+M3+M3+（全量监控）；overdue_total = M2+M3+M3+。"""
-    exposure_total = es + m1 + m2 + m3 + m3_plus
-    overdue_total = m2 + m3 + m3_plus
+    """exposure_total = ES+M0+M0.5+M1+M1+；overdue_total = M0+ (= M0.5+M1+M1+)。"""
+    exposure_total = es + m0 + m0_5 + m1 + m1_plus
+    overdue_total = m0_5 + m1 + m1_plus
     return {
         "exposure_total": exposure_total,
         "overdue_total": overdue_total,
         "es_count": es,
         "breakdown": {
             "ES": es,
+            "M0": m0,
+            "M0.5": m0_5,
             "M1": m1,
-            "M2": m2,
-            "M3": m3,
-            "M3+": m3_plus,
+            "M1+": m1_plus,
         },
     }
 
@@ -210,11 +211,11 @@ def _zero_overdue_kpi_amounts() -> dict:
     return {
         "exposure": dict(pair),
         "ES": {"repaid_amount": 0.0, "initial_transfer_amount": 0.0},
-        "M1": dict(pair),
+        "M0": dict(pair),
         "overdue": dict(pair),
-        "M2": dict(pair),
-        "M3": dict(pair),
-        "M3_PLUS": dict(pair),
+        "M0_5": dict(pair),
+        "M1": dict(pair),
+        "M1_PLUS": dict(pair),
     }
 
 
@@ -231,25 +232,25 @@ def _overdue_kpi_amounts_from_row(row) -> dict:
             "repaid_amount": _f("es_repaid_sum"),
             "initial_transfer_amount": _f("es_initial_sum"),
         },
-        "M1": {
-            "remaining_amount": _f("m1_remaining_sum"),
-            "initial_transfer_amount": _f("m1_initial_sum"),
+        "M0": {
+            "remaining_amount": _f("m0_remaining_sum"),
+            "initial_transfer_amount": _f("m0_initial_sum"),
         },
         "overdue": {
             "remaining_amount": _f("overdue_remaining_sum"),
             "initial_transfer_amount": _f("overdue_initial_sum"),
         },
-        "M2": {
-            "remaining_amount": _f("m2_remaining_sum"),
-            "initial_transfer_amount": _f("m2_initial_sum"),
+        "M0_5": {
+            "remaining_amount": _f("m0_5_remaining_sum"),
+            "initial_transfer_amount": _f("m0_5_initial_sum"),
         },
-        "M3": {
-            "remaining_amount": _f("m3_remaining_sum"),
-            "initial_transfer_amount": _f("m3_initial_sum"),
+        "M1": {
+            "remaining_amount": _f("m1_remaining_sum"),
+            "initial_transfer_amount": _f("m1_initial_sum"),
         },
-        "M3_PLUS": {
-            "remaining_amount": _f("m3_plus_remaining_sum"),
-            "initial_transfer_amount": _f("m3_plus_initial_sum"),
+        "M1_PLUS": {
+            "remaining_amount": _f("m1_plus_remaining_sum"),
+            "initial_transfer_amount": _f("m1_plus_initial_sum"),
         },
     }
 
@@ -287,7 +288,7 @@ def _render_overdue_bucket_kpi_card(
 
 def fmt_delinquency_badge(bucket: str | None) -> str:
     if bucket is None:
-        return '<span class="badge">正常</span>'
+        return '<span class="badge">—</span>'
     label = DELINQUENCY_BUCKET_LABELS.get(bucket, bucket)
     color = DELINQUENCY_BUCKET_COLORS.get(bucket, "#94a3b8")
     return (
@@ -319,9 +320,9 @@ def _render_overdue_header_meta(overview: dict) -> str:
     as_of = overview.get("overdue_days_as_of")
     last_recalc = _format_display_timestamp(overview.get("last_recalculated_at"))
     as_of_html = (
-        f'<strong>未付天数截至：{escape(as_of)}</strong>'
+        f'<strong>逾期天数截至：{escape(as_of)}</strong>'
         if as_of
-        else '<span class="meta-warn">未付天数截至：—（请先点击「重新计算未付天数」）</span>'
+        else '<span class="meta-warn">逾期天数截至：—（请先点击「重新计算逾期天数」）</span>'
     )
     stale_note = ""
     if overview.get("overdue_recalc_stale") and as_of:
@@ -331,21 +332,22 @@ def _render_overdue_header_meta(overview: dict) -> str:
         )
     elif overview.get("overdue_recalc_stale") and not as_of:
         stale_note = (
-            '<br><span class="meta-hint">提示：当前未付天数可能仍按监控快照日导入时计算，'
-            "与快照日不同，请以重算后「未付天数截至」为准。</span>"
+            '<br><span class="meta-hint">提示：当前逾期天数可能仍按监控快照日导入时计算，'
+            "与快照日不同，请以重算后「逾期天数截至」为准。</span>"
         )
     multi_product_note = ""
     selected_ids = overview.get("trust_product_ids")
     if selected_ids and len(selected_ids) > 1:
         multi_product_note = (
-            '<br><span class="meta-hint">已选多个信托产品，各产品监控快照日可能不一致。</span>'
+            '<br><span class="meta-hint">已选多个信托产品，各产品监控快照日可能不一致；'
+            "重算时按各产品最新快照日分别更新。</span>"
         )
     return f"""
         <p>
             监控快照日期：<strong>{snapshot}</strong>
             · {as_of_html}
             · 最近重算：{escape(last_recalc)}
-            <br><span class="meta-hint">监控快照日期为资产表数据截止日；未付天数 = 重算基准日 − 最后回款日。</span>
+            <br><span class="meta-hint">监控快照日期为资产表数据截止日；逾期天数 = 重算日 −（最后付款日或最早发行日的下月同日）。</span>
             {stale_note}
             {multi_product_note}
             · <a href="/overdue/workbench">逾期工作台 →</a>
@@ -638,9 +640,18 @@ def _custody_item_from_row(row) -> dict:
             "overdue_sort": settlement or "",
         }
     raw_od = row.overdue_days
-    overdue_days = int(raw_od) if raw_od is not None else 0
+    overdue_days = int(raw_od) if raw_od is not None else None
     bucket = calc_risk_level(overdue_days, remaining)
-    status = "performing" if bucket == "M1" else "overdue"
+    if bucket == "M0":
+        status = "performing"
+    elif bucket is None:
+        status = "unknown"
+    else:
+        status = "overdue"
+    if overdue_days is None:
+        overdue_sort = ""
+    else:
+        overdue_sort = f"{overdue_days:+07d}"
     return {
         **base,
         "risk_level": bucket,
@@ -649,7 +660,7 @@ def _custody_item_from_row(row) -> dict:
         "overdue_days": overdue_days,
         "last_payment_date": raw_last_payment,
         "settlement_date": None,
-        "overdue_sort": f"{overdue_days:06d}",
+        "overdue_sort": overdue_sort,
     }
 
 
@@ -1002,17 +1013,17 @@ def fetch_overdue_overview(
                     WHERE {sql_es_asset_filter("mc.remaining_amount")}
                 ) AS es_count,
                 COUNT(*) FILTER (
+                    WHERE {sql_m0_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m0_count,
+                COUNT(*) FILTER (
+                    WHERE {sql_m0_5_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m0_5_count,
+                COUNT(*) FILTER (
                     WHERE {sql_m1_asset_filter("mc.overdue_days", "mc.remaining_amount")}
                 ) AS m1_count,
                 COUNT(*) FILTER (
-                    WHERE {sql_m2_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m2_count,
-                COUNT(*) FILTER (
-                    WHERE {sql_m3_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m3_count,
-                COUNT(*) FILTER (
-                    WHERE {sql_m3_plus_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m3_plus_count,
+                    WHERE {sql_m1_plus_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m1_plus_count,
                 SUM(mc.remaining_amount) FILTER (
                     WHERE {sql_exposure_asset_filter("mc.overdue_days", "mc.remaining_amount")}
                 ) AS exposure_remaining_sum,
@@ -1026,11 +1037,11 @@ def fetch_overdue_overview(
                     WHERE {sql_es_asset_filter("mc.remaining_amount")}
                 ) AS es_initial_sum,
                 SUM(mc.remaining_amount) FILTER (
-                    WHERE {sql_m1_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m1_remaining_sum,
+                    WHERE {sql_m0_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m0_remaining_sum,
                 SUM(mc.initial_transfer_amount) FILTER (
-                    WHERE {sql_m1_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m1_initial_sum,
+                    WHERE {sql_m0_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m0_initial_sum,
                 SUM(mc.remaining_amount) FILTER (
                     WHERE {sql_overdue_asset_filter("mc.overdue_days", "mc.remaining_amount")}
                 ) AS overdue_remaining_sum,
@@ -1038,23 +1049,23 @@ def fetch_overdue_overview(
                     WHERE {sql_overdue_asset_filter("mc.overdue_days", "mc.remaining_amount")}
                 ) AS overdue_initial_sum,
                 SUM(mc.remaining_amount) FILTER (
-                    WHERE {sql_m2_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m2_remaining_sum,
+                    WHERE {sql_m0_5_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m0_5_remaining_sum,
                 SUM(mc.initial_transfer_amount) FILTER (
-                    WHERE {sql_m2_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m2_initial_sum,
+                    WHERE {sql_m0_5_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m0_5_initial_sum,
                 SUM(mc.remaining_amount) FILTER (
-                    WHERE {sql_m3_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m3_remaining_sum,
+                    WHERE {sql_m1_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m1_remaining_sum,
                 SUM(mc.initial_transfer_amount) FILTER (
-                    WHERE {sql_m3_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m3_initial_sum,
+                    WHERE {sql_m1_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m1_initial_sum,
                 SUM(mc.remaining_amount) FILTER (
-                    WHERE {sql_m3_plus_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m3_plus_remaining_sum,
+                    WHERE {sql_m1_plus_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m1_plus_remaining_sum,
                 SUM(mc.initial_transfer_amount) FILTER (
-                    WHERE {sql_m3_plus_asset_filter("mc.overdue_days", "mc.remaining_amount")}
-                ) AS m3_plus_initial_sum,
+                    WHERE {sql_m1_plus_asset_filter("mc.overdue_days", "mc.remaining_amount")}
+                ) AS m1_plus_initial_sum,
                 COUNT(*) AS total_asset_count,
                 COUNT(DISTINCT mc.asset_code) AS total_asset_code_count
             FROM monitor_custody mc
@@ -1062,7 +1073,7 @@ def fetch_overdue_overview(
         query_params,
     ).fetchone()
 
-    empty_buckets = {"ES": [], "M1": [], "M2": [], "M3": [], "M3_PLUS": []}
+    empty_buckets = {"ES": [], "M0": [], "M0_5": [], "M1": [], "M1_PLUS": []}
 
     if row is None:
         kpi = build_overdue_kpi_metrics(0, 0, 0, 0, 0)
@@ -1072,10 +1083,10 @@ def fetch_overdue_overview(
             "overdue_count": 0,
             "overdue_count_deprecated": True,
             "es_count": 0,
+            "m0_count": 0,
+            "m0_5_count": 0,
             "m1_count": 0,
-            "m2_count": 0,
-            "m3_count": 0,
-            "m3_plus_count": 0,
+            "m1_plus_count": 0,
             **kpi,
             "amounts": _zero_overdue_kpi_amounts(),
             "total_asset_count": 0,
@@ -1179,11 +1190,11 @@ def fetch_overdue_overview(
     }
 
     es = int(row.es_count)
+    m0 = int(row.m0_count)
+    m0_5 = int(row.m0_5_count)
     m1 = int(row.m1_count)
-    m2 = int(row.m2_count)
-    m3 = int(row.m3_count)
-    m3_plus = int(row.m3_plus_count)
-    kpi = build_overdue_kpi_metrics(es, m1, m2, m3, m3_plus)
+    m1_plus = int(row.m1_plus_count)
+    kpi = build_overdue_kpi_metrics(es, m0, m0_5, m1, m1_plus)
 
     return {
         "data_date": resolved_data_date,
@@ -1191,10 +1202,10 @@ def fetch_overdue_overview(
         "overdue_count": kpi["exposure_total"],
         "overdue_count_deprecated": True,
         "es_count": es,
+        "m0_count": m0,
+        "m0_5_count": m0_5,
         "m1_count": m1,
-        "m2_count": m2,
-        "m3_count": m3,
-        "m3_plus_count": m3_plus,
+        "m1_plus_count": m1_plus,
         **kpi,
         "amounts": _overdue_kpi_amounts_from_row(row),
         "total_asset_count": int(row.total_asset_count),
@@ -1505,182 +1516,252 @@ def recalculate_overdue_days(
     trust_product_id: int | None = None,
     data_date: str | None = None,
     as_of: date | None = None,
+    trust_product_ids: list[int] | None = None,
 ) -> dict:
-    """按当前系统日期重算监控快照的 overdue_days / last_payment_date。"""
-    resolved_dd = _resolve_monitor_data_date(conn, trust_product_id, data_date)
-    if resolved_dd is None:
+    """按重算日重算各产品最新监控快照层的 overdue_days。
+
+    - as_of 默认当天，全产品统一
+    - 多产品：每个产品取各自 MAX(data_date) 再 UPDATE
+    - 公式：as_of − (锚点日 + 1 calendar month)；锚点=最后付款日或最早发行日
+    """
+    today = as_of or date.today()
+    product_ids: list[int] | None
+    if trust_product_ids is not None:
+        product_ids = [int(x) for x in trust_product_ids]
+    elif trust_product_id is not None:
+        product_ids = [int(trust_product_id)]
+    else:
+        product_ids = None  # all products
+
+    # Single-product + explicit data_date override (legacy)
+    if (
+        product_ids is not None
+        and len(product_ids) == 1
+        and data_date
+    ):
+        scopes = [(product_ids[0], date.fromisoformat(str(data_date)))]
+    else:
+        scope_sql = """
+            SELECT trust_product_id, MAX(data_date) AS data_date
+            FROM trust_asset_monitor_records
+            WHERE 1=1
+        """
+        params: dict = {}
+        if product_ids is not None:
+            if not product_ids:
+                raise HTTPException(status_code=400, detail="trust_product_ids 为空")
+            scope_sql += " AND trust_product_id = ANY(:pids)"
+            params["pids"] = product_ids
+        scope_sql += " GROUP BY trust_product_id ORDER BY trust_product_id"
+        rows = conn.execute(text(scope_sql), params).fetchall()
+        scopes = [(int(r.trust_product_id), r.data_date) for r in rows if r.data_date]
+
+    if not scopes:
         raise HTTPException(status_code=400, detail="无可用监控快照 data_date")
 
-    today = as_of or date.today()
-    scope_parts = ["m.data_date = :data_date"]
-    params: dict = {
-        "data_date": resolved_dd,
-        "today": today,
-        "tolerance": RECONCILIATION_TOLERANCE,
-    }
-    if trust_product_id is not None:
-        scope_parts.append("m.trust_product_id = :trust_product_id")
-        params["trust_product_id"] = trust_product_id
-    scope_sql = " AND ".join(scope_parts)
+    total_updated = 0
+    total_with_repay = 0
+    total_from_issue = 0
+    total_missing = 0
+    per_product: list[dict] = []
+    warnings: list[str] = []
 
-    with_repayment = conn.execute(
-        text(f"""
-            UPDATE trust_asset_monitor_records m
-            SET
-                last_payment_date = rp.max_rd,
-                max_payment_date = rp.max_rd,
-                overdue_days = CASE
-                    WHEN m.remaining_amount <= :tolerance THEN NULL
-                    ELSE GREATEST(0, :today - rp.max_rd)
-                END,
-                overdue_days_as_of = :today,
-                updated_at = NOW()
-            FROM (
-                SELECT r.trust_product_id, ta.asset_code, MAX(r.repayment_date) AS max_rd
-                FROM trust_repayment_detail_records r
-                INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
-                GROUP BY r.trust_product_id, ta.asset_code
-            ) rp
-            WHERE m.trust_product_id = rp.trust_product_id
-              AND m.asset_code = rp.asset_code
-              AND {scope_sql}
-        """),
-        params,
-    )
+    for pid, resolved_dd in scopes:
+        scope_parts = [
+            "m.trust_product_id = :trust_product_id",
+            "m.data_date = :data_date",
+        ]
+        params = {
+            "trust_product_id": pid,
+            "data_date": resolved_dd,
+            "as_of": today,
+            "tolerance": RECONCILIATION_TOLERANCE,
+        }
+        scope_sql = " AND ".join(scope_parts)
 
-    without_repayment_from_issue = conn.execute(
-        text(f"""
-            UPDATE trust_asset_monitor_records m
-            SET
-                last_payment_date = NULL,
-                max_payment_date = NULL,
-                overdue_days = CASE
-                    WHEN m.remaining_amount <= :tolerance THEN NULL
-                    ELSE GREATEST(0, :today - iss.min_issue_date)
-                END,
-                overdue_days_as_of = :today,
-                updated_at = NOW()
-            FROM (
-                SELECT
-                    m2.id AS monitor_id,
-                    COALESCE(ip.min_issue_date, ia.min_issue_date) AS min_issue_date
-                FROM trust_asset_monitor_records m2
-                LEFT JOIN (
+        with_repayment = conn.execute(
+            text(f"""
+                UPDATE trust_asset_monitor_records m
+                SET
+                    last_payment_date = rp.max_rd,
+                    max_payment_date = rp.max_rd,
+                    overdue_days = CASE
+                        WHEN m.remaining_amount <= :tolerance THEN NULL
+                        ELSE (CAST(:as_of AS date) - (rp.max_rd + INTERVAL '1 month')::date)
+                    END,
+                    overdue_days_as_of = :as_of,
+                    updated_at = NOW()
+                FROM (
+                    SELECT r.trust_product_id, ta.asset_code, MAX(r.repayment_date) AS max_rd
+                    FROM trust_repayment_detail_records r
+                    INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                    WHERE r.trust_product_id = :trust_product_id
+                    GROUP BY r.trust_product_id, ta.asset_code
+                ) rp
+                WHERE m.trust_product_id = rp.trust_product_id
+                  AND m.asset_code = rp.asset_code
+                  AND {scope_sql}
+            """),
+            params,
+        )
+
+        without_repayment_from_issue = conn.execute(
+            text(f"""
+                UPDATE trust_asset_monitor_records m
+                SET
+                    last_payment_date = NULL,
+                    max_payment_date = NULL,
+                    overdue_days = CASE
+                        WHEN m.remaining_amount <= :tolerance THEN NULL
+                        ELSE (CAST(:as_of AS date) - (iss.min_issue_date + INTERVAL '1 month')::date)
+                    END,
+                    overdue_days_as_of = :as_of,
+                    updated_at = NOW()
+                FROM (
                     SELECT
-                        i.trust_product_id,
-                        regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '') AS custody_norm,
-                        MIN(i.issue_date) AS min_issue_date
-                    FROM trust_product_issuance_asset_records i
-                    GROUP BY i.trust_product_id, custody_norm
-                ) ip
-                  ON ip.trust_product_id = m2.trust_product_id
-                 AND ip.custody_norm = regexp_replace(
-                     COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\\.0$', ''
-                 )
-                LEFT JOIN (
-                    SELECT
-                        regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '') AS custody_norm,
-                        MIN(i.issue_date) AS min_issue_date
-                    FROM trust_product_issuance_asset_records i
-                    GROUP BY custody_norm
-                ) ia
-                  ON ia.custody_norm = regexp_replace(
-                      COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\\.0$', ''
-                  )
-                WHERE {scope_sql.replace('m.', 'm2.')}
-                  AND COALESCE(ip.min_issue_date, ia.min_issue_date) IS NOT NULL
+                        m2.id AS monitor_id,
+                        COALESCE(ip.min_issue_date, ia.min_issue_date) AS min_issue_date
+                    FROM trust_asset_monitor_records m2
+                    LEFT JOIN (
+                        SELECT
+                            i.trust_product_id,
+                            regexp_replace(COALESCE(i.custody_asset_code, ''), '\.0$', '') AS custody_norm,
+                            MIN(i.issue_date) AS min_issue_date
+                        FROM trust_product_issuance_asset_records i
+                        WHERE i.trust_product_id = :trust_product_id
+                        GROUP BY i.trust_product_id, custody_norm
+                    ) ip
+                      ON ip.trust_product_id = m2.trust_product_id
+                     AND ip.custody_norm = regexp_replace(
+                         COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\.0$', ''
+                     )
+                    LEFT JOIN (
+                        SELECT
+                            regexp_replace(COALESCE(i.custody_asset_code, ''), '\.0$', '') AS custody_norm,
+                            MIN(i.issue_date) AS min_issue_date
+                        FROM trust_product_issuance_asset_records i
+                        GROUP BY custody_norm
+                    ) ia
+                      ON ia.custody_norm = regexp_replace(
+                          COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\.0$', ''
+                      )
+                    WHERE m2.trust_product_id = :trust_product_id
+                      AND m2.data_date = :data_date
+                      AND COALESCE(ip.min_issue_date, ia.min_issue_date) IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM trust_repayment_detail_records r
+                          INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
+                          WHERE r.trust_product_id = m2.trust_product_id
+                            AND ta.asset_code = m2.asset_code
+                      )
+                ) iss
+                WHERE m.id = iss.monitor_id
+            """),
+            params,
+        )
+
+        missing_issuance = conn.execute(
+            text(f"""
+                UPDATE trust_asset_monitor_records m
+                SET
+                    last_payment_date = NULL,
+                    max_payment_date = NULL,
+                    overdue_days = NULL,
+                    overdue_days_as_of = :as_of,
+                    updated_at = NOW()
+                WHERE {scope_sql}
                   AND NOT EXISTS (
                       SELECT 1
                       FROM trust_repayment_detail_records r
                       INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
-                      WHERE r.trust_product_id = m2.trust_product_id
-                        AND ta.asset_code = m2.asset_code
+                      WHERE r.trust_product_id = m.trust_product_id
+                        AND ta.asset_code = m.asset_code
                   )
-            ) iss
-            WHERE m.id = iss.monitor_id
-        """),
-        params,
-    )
-
-    missing_issuance = conn.execute(
-        text(f"""
-            UPDATE trust_asset_monitor_records m
-            SET
-                last_payment_date = NULL,
-                max_payment_date = NULL,
-                overdue_days = NULL,
-                overdue_days_as_of = :today,
-                updated_at = NOW()
-            WHERE {scope_sql}
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM trust_repayment_detail_records r
-                  INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
-                  WHERE r.trust_product_id = m.trust_product_id
-                    AND ta.asset_code = m.asset_code
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM trust_product_issuance_asset_records i
-                  WHERE regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '')
-                      = regexp_replace(
-                          COALESCE(m.custody_asset_code, m.asset_code, ''), '\\.0$', ''
-                      )
-              )
-        """),
-        params,
-    )
-
-    conn.execute(
-        text(f"""
-            UPDATE trust_asset_monitor_records m
-            SET
-                overdue_days = NULL,
-                overdue_days_as_of = :today,
-                updated_at = NOW()
-            WHERE {scope_sql}
-              AND m.remaining_amount <= :tolerance
-              AND m.overdue_days IS NOT NULL
-        """),
-        params,
-    )
-
-    total_row = conn.execute(
-        text(f"SELECT COUNT(*) AS cnt FROM trust_asset_monitor_records m WHERE {scope_sql}"),
-        params,
-    ).fetchone()
-    updated_count = int(total_row.cnt) if total_row else 0
-    no_repayment_from_issue_count = int(without_repayment_from_issue.rowcount or 0)
-    missing_issuance_count = int(missing_issuance.rowcount or 0)
-
-    warnings: list[str] = []
-    if missing_issuance_count > 0:
-        warnings.append(
-            f"部分资产无还款明细且无发行日，未付天数置空（{missing_issuance_count} 条）"
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM trust_product_issuance_asset_records i
+                      WHERE regexp_replace(COALESCE(i.custody_asset_code, ''), '\.0$', '')
+                          = regexp_replace(
+                              COALESCE(m.custody_asset_code, m.asset_code, ''), '\.0$', ''
+                          )
+                  )
+            """),
+            params,
         )
 
+        conn.execute(
+            text(f"""
+                UPDATE trust_asset_monitor_records m
+                SET
+                    overdue_days = NULL,
+                    overdue_days_as_of = :as_of,
+                    updated_at = NOW()
+                WHERE {scope_sql}
+                  AND m.remaining_amount <= :tolerance
+                  AND m.overdue_days IS NOT NULL
+            """),
+            params,
+        )
+
+        total_row = conn.execute(
+            text(f"SELECT COUNT(*) AS cnt FROM trust_asset_monitor_records m WHERE {scope_sql}"),
+            params,
+        ).fetchone()
+        updated_count = int(total_row.cnt) if total_row else 0
+        from_issue = int(without_repayment_from_issue.rowcount or 0)
+        missing = int(missing_issuance.rowcount or 0)
+        with_repay = int(with_repayment.rowcount or 0)
+
+        total_updated += updated_count
+        total_with_repay += with_repay
+        total_from_issue += from_issue
+        total_missing += missing
+        per_product.append({
+            "trust_product_id": pid,
+            "data_date": str(resolved_dd),
+            "updated_count": updated_count,
+            "with_repayment_updated": with_repay,
+            "no_repayment_from_issue_count": from_issue,
+            "missing_issuance_count": missing,
+        })
+
+    if total_missing > 0:
+        warnings.append(
+            f"部分资产无还款明细且无发行日，逾期天数置空（{total_missing} 条）"
+        )
+
+    product_count = len(scopes)
+    data_dates = sorted({p["data_date"] for p in per_product})
+    single_dd = data_dates[0] if len(data_dates) == 1 else None
+
     return {
-        "data_date": str(resolved_dd),
-        "trust_product_id": trust_product_id,
+        "data_date": single_dd,
+        "data_dates": data_dates,
+        "products": per_product,
+        "product_count": product_count,
+        "trust_product_id": product_ids[0] if product_ids and len(product_ids) == 1 else None,
+        "trust_product_ids": [p["trust_product_id"] for p in per_product],
         "as_of_date": str(today),
         "overdue_days_as_of": str(today),
-        "updated_count": updated_count,
-        "no_repayment_from_issue_count": no_repayment_from_issue_count,
-        "missing_issuance_count": missing_issuance_count,
-        "missing_repayment_count": no_repayment_from_issue_count + missing_issuance_count,
-        "with_repayment_updated": int(with_repayment.rowcount or 0),
+        "updated_count": total_updated,
+        "no_repayment_from_issue_count": total_from_issue,
+        "missing_issuance_count": total_missing,
+        "missing_repayment_count": total_from_issue + total_missing,
+        "with_repayment_updated": total_with_repay,
         "warnings": warnings,
         "message": (
-            f"已重新计算 {updated_count} 条监控记录"
+            f"已按重算日 {today} 重新计算 {product_count} 个产品共 {total_updated} 条监控记录"
             + (
-                f"，无还款按发行日计算 {no_repayment_from_issue_count} 条"
-                if no_repayment_from_issue_count
+                f"，无还款按发行日+1月计算 {total_from_issue} 条"
+                if total_from_issue
                 else ""
             )
-            + (f"，无发行日置空 {missing_issuance_count} 条" if missing_issuance_count else "")
+            + (f"，无发行日置空 {total_missing} 条" if total_missing else "")
         ),
-        "risk_hint": "未付天数已更新，如需同步风险评分，请单独执行风险评分重算。",
+        "risk_hint": "逾期天数已更新，如需同步风险评分，请单独执行风险评分重算。",
     }
+
 
 
 def fetch_overdue_followups(
@@ -2225,10 +2306,10 @@ def render_overdue_html(
     bucket_totals = overview.get("bucket_totals") or {}
     city_options_list = overview.get("issuance_city_options") or []
     tab_defs = [
-        ("M3_PLUS", "M3+", buckets.get("M3_PLUS", [])),
-        ("M3", "M3", buckets.get("M3", [])),
-        ("M2", "M2", buckets.get("M2", [])),
+        ("M1_PLUS", "M1+", buckets.get("M1_PLUS", [])),
         ("M1", "M1", buckets.get("M1", [])),
+        ("M0_5", "M0.5", buckets.get("M0_5", [])),
+        ("M0", "M0", buckets.get("M0", [])),
         ("ES", "ES（提前结清）", buckets.get("ES", [])),
     ]
     f = filters or {}
@@ -2301,10 +2382,11 @@ def render_overdue_html(
         label="等级",
         options=[
             ("ES", "ES（提前结清）"),
+            ("M0", "M0"),
+            ("M0_5", "M0.5"),
             ("M1", "M1"),
-            ("M2", "M2"),
-            ("M3", "M3"),
-            ("M3_PLUS", "M3+"),
+            ("M1_PLUS", "M1+"),
+            ("M0_PLUS", "M0+"),
         ],
         selected=buckets_sel,
         all_label="全部等级",
@@ -2364,14 +2446,17 @@ def render_overdue_html(
     code_mismatch_banner = _render_code_mismatch_alert_banner(code_mismatch_alerts)
     data_date = overview.get("data_date") or "—"
     selected_ids = overview.get("trust_product_ids")
+    # 金额核对仍要求单产品；逾期天数重算支持多产品
     recalc_single_pid = selected_ids[0] if selected_ids and len(selected_ids) == 1 else None
-    recalc_disabled = "" if recalc_single_pid is not None else " disabled"
-    recalc_title = (
+    recon_disabled = "" if recalc_single_pid is not None else " disabled"
+    recon_title = (
         ""
         if recalc_single_pid is not None
         else ' title="请先单选一个信托产品"'
     )
-    recalc_hint_style = ' style="display:none;"' if recalc_single_pid is not None else ""
+    recalc_disabled = ""
+    recalc_title = ""
+    recalc_hint_style = ' style="display:none;"'
     recon_data_date = data_date
     recon_recalc_payload = {"data_date": recon_data_date if recon_data_date != "—" else None}
     if recalc_single_pid is not None:
@@ -2398,10 +2483,12 @@ def render_overdue_html(
         followup_rows = '<tr><td colspan="6" class="empty">暂无跟进事项</td></tr>'
 
     header_meta = _render_overdue_header_meta(overview)
-    recalc_payload = {"data_date": data_date if data_date != "—" else None}
-    if recalc_single_pid is not None:
-        recalc_payload["trust_product_id"] = recalc_single_pid
+    recalc_payload = {}
+    if selected_ids:
+        recalc_payload["trust_product_ids"] = list(selected_ids)
     recalc_payload_json = json.dumps(recalc_payload, ensure_ascii=False)
+    today_str = date.today().isoformat()
+    product_count_for_confirm = len(selected_ids) if selected_ids else "全部"
 
     amounts = overview.get("amounts") or _zero_overdue_kpi_amounts()
     bd = overview.get("breakdown") or {}
@@ -2410,50 +2497,50 @@ def render_overdue_html(
             "资产规模（Exposure）",
             overview["exposure_total"],
             amounts["exposure"],
-            hint=f"ES+M1+M2+M3+M3+ 总风险暴露 · 资产 {overview['total_asset_code_count']} 个",
+            hint=f"ES+M0+M0.5+M1+M1+ 总风险暴露 · 资产 {overview['total_asset_code_count']} 个",
         )
         + _render_overdue_bucket_kpi_card(
             "提前结清（ES）",
             bd.get("ES", 0),
             amounts["ES"],
             value_css="ok",
-            hint="应还款为 0，非未付款",
+            hint="应还款为 0，非逾期",
             use_repaid=True,
         )
         + _render_overdue_bucket_kpi_card(
-            "正常还款（M1）",
-            bd.get("M1", 0),
-            amounts["M1"],
+            "正常（M0）",
+            bd.get("M0", 0),
+            amounts["M0"],
             value_css="ok",
-            hint="M1=正常在贷（含0天）",
+            hint="逾期天数 ≤0",
         )
         + _render_overdue_bucket_kpi_card(
-            "未付款资产（Overdue）",
+            "逾期资产（M0+）",
             overview["overdue_total"],
             amounts["overdue"],
             value_css="warn",
-            hint="M2+M3+M3+，不含 ES / M1",
+            hint="M0.5+M1+M1+，不含 ES / M0",
         )
         + _render_overdue_bucket_kpi_card(
-            "M2",
-            bd.get("M2", 0),
-            amounts["M2"],
-            value_css="m2",
-            hint="未付 36–63 天",
+            "M0.5",
+            bd.get("M0.5", 0),
+            amounts["M0_5"],
+            value_css="m0_5",
+            hint="逾期 1–15 天",
         )
         + _render_overdue_bucket_kpi_card(
-            "M3",
-            bd.get("M3", 0),
-            amounts["M3"],
-            value_css="m2",
-            hint="未付 64–91 天",
+            "M1",
+            bd.get("M1", 0),
+            amounts["M1"],
+            value_css="m1",
+            hint="逾期 16–30 天",
         )
         + _render_overdue_bucket_kpi_card(
-            "M3+",
-            bd.get("M3+", 0),
-            amounts["M3_PLUS"],
+            "M1+",
+            bd.get("M1+", 0),
+            amounts["M1_PLUS"],
             value_css="warn",
-            hint="未付 ≥92 天",
+            hint="逾期 >30 天",
         )
         + f"""
             <div class="card">
@@ -2469,7 +2556,8 @@ def render_overdue_html(
         """
     )
 
-    m2_bucket_color = DELINQUENCY_BUCKET_COLORS["M2"]
+    m0_5_bucket_color = DELINQUENCY_BUCKET_COLORS["M0_5"]
+    m1_bucket_color = DELINQUENCY_BUCKET_COLORS["M1"]
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -2500,7 +2588,8 @@ def render_overdue_html(
         .card-value {{ font-size: 1.35rem; font-weight: 700; color: #f8fafc; }}
         .card-value.warn {{ color: #f87171; }}
         .card-value.ok {{ color: #34d399; }}
-        .card-value.m2 {{ color: {m2_bucket_color}; }}
+        .card-value.m0_5 {{ color: {m0_5_bucket_color}; }}
+        .card-value.m1 {{ color: {m1_bucket_color}; }}
         .card-amounts {{
             font-size: 0.68rem; color: #94a3b8; margin-top: 0.35rem;
             line-height: 1.35; word-break: break-all;
@@ -2811,9 +2900,13 @@ def render_overdue_html(
                     <h1>信托资产逾期管理</h1>
                     {header_meta}
                 </div>
-                <button type="button" class="btn-recalc" id="btn-recalc-overdue"{recalc_disabled}{recalc_title}>重新计算未付天数</button>
+                <label class="recalc-asof" style="display:inline-flex;align-items:center;gap:0.4rem;margin-right:0.75rem;font-size:0.85rem;color:#94a3b8;">
+                    重算日
+                    <input type="date" id="recalc-as-of" value="{today_str}" style="background:#0f172a;border:1px solid rgba(255,255,255,0.15);color:#e2e8f0;border-radius:6px;padding:0.35rem 0.5rem;">
+                </label>
+                <button type="button" class="btn-recalc" id="btn-recalc-overdue"{recalc_disabled}{recalc_title}>重新计算逾期天数</button>
             </div>
-            <p class="card-hint" id="recalc-hint"{recalc_hint_style}>多选信托产品时无法重算未付天数或金额核对，请先单选一个产品。</p>
+            <p class="card-hint" id="recalc-hint"{recalc_hint_style}>金额核对仍需单选产品；逾期天数支持多产品，按各产品最新快照日分别重算。</p>
             <div id="recalc-message" class="recalc-msg" style="display:none;"></div>
         </header>
 
@@ -2839,7 +2932,7 @@ def render_overdue_html(
                     金额核对
                     <a class="api-link" href="/overdue/reconciliation">JSON → /overdue/reconciliation</a>
                 </h2>
-                <button type="button" class="btn-recalc" id="btn-recalc-reconciliation"{recalc_disabled}{recalc_title}>重新计算金额核对</button>
+                <button type="button" class="btn-recalc" id="btn-recalc-reconciliation"{recon_disabled}{recon_title}>重新计算金额核对</button>
             </div>
             <p class="recon-meta">
                 金额核对数据日期：<strong>{escape(recon_data_date)}</strong>
@@ -3098,17 +3191,28 @@ def render_overdue_html(
     (function() {{
         var btn = document.getElementById('btn-recalc-overdue');
         var msgEl = document.getElementById('recalc-message');
+        var asOfEl = document.getElementById('recalc-as-of');
         var recalcPayload = {recalc_payload_json};
+        var productCountLabel = {json.dumps(str(product_count_for_confirm), ensure_ascii=False)};
         if (!btn) return;
         btn.addEventListener('click', function() {{
-            if (!confirm('将按当前日期重新计算未付天数，是否继续？')) return;
+            var asOf = (asOfEl && asOfEl.value) ? asOfEl.value : '{today_str}';
+            var ids = recalcPayload.trust_product_ids || [];
+            var isAll = !ids.length;
+            var countText = isAll ? '全部有监控快照的产品' : (ids.length + ' 个产品');
+            if (isAll || ids.length > 1) {{
+                if (!confirm('将按重算日 ' + asOf + ' 重算逾期天数\\n范围：' + countText + '\\n按各产品最新监控快照日分别更新，是否继续？')) return;
+            }} else {{
+                if (!confirm('将按重算日 ' + asOf + ' 重新计算逾期天数，是否继续？')) return;
+            }}
+            var body = Object.assign({{}}, recalcPayload, {{ as_of: asOf }});
             btn.disabled = true;
             if (msgEl) {{ msgEl.style.display = 'none'; msgEl.classList.remove('err'); }}
             fetch('/overdue/recalculate', {{
                 method: 'POST',
                 credentials: 'same-origin',
                 headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify(recalcPayload)
+                body: JSON.stringify(body)
             }}).then(function(res) {{
                 return res.json().then(function(data) {{
                     if (!res.ok) throw new Error(data.detail || '重算失败');
@@ -3117,7 +3221,7 @@ def render_overdue_html(
                         text += '，缺少还款日期 ' + data.missing_repayment_count + ' 条';
                     }}
                     if (data.overdue_days_as_of) {{
-                        text += '（未付天数截至 ' + data.overdue_days_as_of + '）';
+                        text += '（逾期天数截至 ' + data.overdue_days_as_of + '）';
                     }}
                     if (data.risk_hint) text += '。' + data.risk_hint;
                     if (msgEl) {{
@@ -3349,8 +3453,8 @@ def _fmt_risk_day_meta(item: dict) -> str:
         return f'<span>提前结清 {escape(str(settlement))}</span>'
     od = item.get("overdue_days")
     if od is None:
-        return "<span>未付 —</span>"
-    return f"<span>未付 {od}天</span>"
+        return "<span>逾期 —</span>"
+    return f"<span>逾期 {od}天</span>"
 
 
 def fmt_sla_badge(status: str | None) -> str:
@@ -3427,12 +3531,12 @@ def render_risk_workbench_html(data: dict):
             """
 
         if detail.get("is_es"):
-            breakdown_line = "已结清（ES），不参与未付款评分与告警"
+            breakdown_line = "已结清（ES），不参与逾期评分与告警"
             settlement = detail.get("settlement_date") or detail.get("last_payment_date") or "—"
             lifecycle_line = f'<p class="muted">提前结清日期：{escape(str(settlement))}</p>'
         else:
             breakdown_line = (
-                f"未付款权重 {bd['overdue_weight']} + "
+                f"逾期权重 {bd['overdue_weight']} + "
                 f"金额异常 {bd['reconciliation_weight']} + "
                 f"回款波动 {bd['volatility_weight']}"
             )
@@ -3553,7 +3657,7 @@ def render_risk_workbench_html(data: dict):
         <nav class="breadcrumb"><a href="/">首页</a> / 信托资产风险中台 / 工作台</nav>
         <header>
             <h1>信托资产风险中台 · Risk Control Hub</h1>
-            <p>数据日期 {escape(data_date)} · <a href="/risk/workbench/data">JSON</a> · <a href="/overdue">V1 未付款视图</a></p>
+            <p>数据日期 {escape(data_date)} · <a href="/risk/workbench/data">JSON</a> · <a href="/overdue">V1 逾期视图</a></p>
         </header>
         <div class="kpi-grid">
             <div class="kpi"><div class="lbl">A 高风险</div><div class="val warn">{summary['level_a_count']}</div></div>
@@ -3561,7 +3665,7 @@ def render_risk_workbench_html(data: dict):
             <div class="kpi"><div class="lbl">平均风险分</div><div class="val">{summary['avg_risk_score']}</div></div>
             <div class="kpi"><div class="lbl">开放预警</div><div class="val warn">{summary['open_alert_count']}</div></div>
             <div class="kpi"><div class="lbl">SLA 异常案件</div><div class="val warn">{summary['sla_breached_count']}</div></div>
-            <div class="kpi"><div class="lbl">未付款资产（M2+）</div><div class="val warn">{summary.get('overdue_total', summary.get('overdue_count', 0))}</div></div>
+            <div class="kpi"><div class="lbl">逾期资产（M0+）</div><div class="val warn">{summary.get('overdue_total', summary.get('overdue_count', 0))}</div></div>
             <div class="kpi"><div class="lbl">风险暴露（Exposure）</div><div class="val">{summary.get('exposure_total', 0)}</div></div>
             <div class="kpi"><div class="lbl">提前结清（ES）</div><div class="val">{summary.get('breakdown', {}).get('ES', summary.get('es_count', 0))}</div></div>
         </div>
@@ -4319,7 +4423,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                 <span class="kpi-value">{dash_count(trust_product_count)}</span>
             </div>
             <div class="kpi-item">
-                <span class="kpi-label">未付款 M2+</span>
+                <span class="kpi-label">逾期 M0+</span>
                 <span class="kpi-value overdue">{dash_count(overdue_total)}</span>
             </div>
             <div class="kpi-item">
@@ -4426,7 +4530,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                 </a>
                 <a href="/overdue" class="risk-card">
                     <div class="risk-card-head">
-                        <span class="risk-card-label">未付款资产（M2+）</span>
+                        <span class="risk-card-label">逾期资产（M0+）</span>
                         <span class="risk-card-icon risk-icon-overdue" aria-hidden="true">
                             <svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67V7z"/></svg>
                         </span>
@@ -4724,8 +4828,24 @@ def overdue_recalculate(
     dd = payload.get("data_date", query_utils.parse_optional_date(data_date))
     if pid is not None:
         pid = int(pid)
+    raw_ids = payload.get("trust_product_ids")
+    pids: list[int] | None = None
+    if isinstance(raw_ids, list):
+        pids = [int(x) for x in raw_ids]
+    elif pid is not None:
+        pids = [pid]
+    as_of_raw = payload.get("as_of") or payload.get("as_of_date")
+    as_of_date = None
+    if as_of_raw:
+        as_of_date = date.fromisoformat(str(as_of_raw)[:10])
     with engine.begin() as conn:
-        result = recalculate_overdue_days(conn, pid, dd)
+        result = recalculate_overdue_days(
+            conn,
+            trust_product_id=pid,
+            data_date=dd,
+            as_of=as_of_date,
+            trust_product_ids=pids,
+        )
     return result
 
 
@@ -4784,8 +4904,10 @@ def overdue_dashboard(
     portfolio_tab: str | None = None,
 ):
     pids = query_utils.parse_trust_product_ids(trust_product_id, trust_product_ids)
-    parsed_buckets = query_utils.parse_optional_str_list(
-        delinquency_bucket, delinquency_buckets
+    parsed_buckets = normalize_delinquency_bucket_filters(
+        query_utils.parse_optional_str_list(
+            delinquency_bucket, delinquency_buckets
+        )
     )
     parsed_markers = query_utils.parse_optional_str_list(trust_marker, trust_markers)
     parsed_statuses = query_utils.parse_optional_str_list(
@@ -4892,9 +5014,11 @@ def overdue_workbench_page(
     parsed_list_ids = query_utils.parse_trust_product_ids(list_product_id, list_product_ids)
     ac = query_utils.clean_optional_str(asset_code)
     custody = query_utils.clean_optional_str(custody_asset_code)
-    # 与资产组合管理一致：未显式传等级时默认全部（不限 M2+）
-    parsed_buckets = query_utils.parse_optional_str_list(
-        delinquency_bucket, delinquency_buckets
+    # 与资产组合管理一致：未显式传等级时默认全部（不限 M0+）
+    parsed_buckets = normalize_delinquency_bucket_filters(
+        query_utils.parse_optional_str_list(
+            delinquency_bucket, delinquency_buckets
+        )
     )
     parsed_markers = query_utils.parse_optional_str_list(trust_marker, trust_markers)
     parsed_statuses = query_utils.parse_optional_str_list(

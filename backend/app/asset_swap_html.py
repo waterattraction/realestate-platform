@@ -52,7 +52,7 @@ def render_swap_page(
             <div class="swap-input-row">
                 <div class="swap-field">
                     <label for="required_asset_codes">手工指定房源（可选）</label>
-                    <p class="swap-field-hint">填写后必须进入推荐方案；未付超过 25 天仍可指定，查询结果会提示</p>
+                    <p class="swap-field-hint">填写后必须进入推荐方案；逾期天数超过 −7 天仍可指定，查询结果会提示</p>
                     <textarea class="swap-textarea swap-textarea-compact" id="required_asset_codes" rows="2"
                         placeholder="必须纳入方案的主编号"></textarea>
                 </div>
@@ -325,7 +325,7 @@ def render_swap_page(
                     <th class="col-rate">折扣率</th>
                     <th class="col-date">装修款截止日</th>
                     <th class="col-bucket">M级</th>
-                    <th class="col-overdue">未付天数</th>
+                    <th class="col-overdue">逾期天数</th>
                 </tr></thead><tbody>${{rows}}</tbody></table>
                 <label class="combo-select-row" for="${{selectId}}">
                     <input type="radio" name="swap-scheme-select" id="${{selectId}}" value="${{escHtml(selectCtx.comboKey)}}"${{selected ? ' checked' : ''}} />
@@ -435,9 +435,9 @@ def render_swap_page(
         renderSource(data.source);
         const m = data.meta;
         const req = data.required;
-        const maxOd = m?.candidate_max_overdue_days ?? 25;
+        const maxOd = m?.candidate_max_overdue_days ?? -7;
         let meta = `候选池 <strong>${{m?.candidate_pool_size ?? 0}}</strong> 户 · 目标产品 <strong>${{escHtml(m?.target_product_name ?? '')}}</strong>`;
-        meta += ` · 自动候选未付 ≤ <strong>${{maxOd}}</strong> 天`;
+        meta += ` · 自动候选逾期 ≤ <strong>${{maxOd}}</strong> 天`;
         if (req?.asset_count) {{
             meta += ` · 指定 <strong>${{req.asset_count}}</strong> 户（${{fmtNum(req.total_remaining)}}）`;
         }}
@@ -447,7 +447,7 @@ def render_swap_page(
         if (warnEl) {{
             if (warns.length) {{
                 warnEl.style.display = 'block';
-                warnEl.textContent = '提示：必选房源未付天数超过 ' + maxOd + ' 天\\n' + warns.join('\\n');
+                warnEl.textContent = '提示：必选房源逾期天数超过 ' + maxOd + ' 天\\n' + warns.join('\\n');
             }} else {{
                 warnEl.style.display = 'none';
                 warnEl.textContent = '';
@@ -475,7 +475,7 @@ def render_swap_page(
         {{ key: 'asset_transfer_discount_rate_display', label: '折扣率', cls: 'col-rate' }},
         {{ key: 'last_renovation_payment_date', label: '装修款截止日', cls: 'col-date' }},
         {{ key: 'monitor_data_date', label: '监控统计日', cls: 'col-date' }},
-        {{ key: 'delinquency_bucket_display', label: 'M级/未付', cls: 'col-bucket' }},
+        {{ key: 'delinquency_bucket_display', label: 'M级/逾期', cls: 'col-bucket' }},
         {{ key: 'asset_status', label: '资产状态', cls: 'col-status' }},
         {{ key: 'community_name', label: '小区名称', cls: 'col-community' }},
     ];
@@ -502,7 +502,7 @@ def render_swap_page(
         {{ key: 'owner_code', label: '业主代码' }},
         {{ key: 'withholding_ratio', label: '代扣比例' }},
         {{ key: 'actual_monthly_rent', label: '实际出房月租金', num: true }},
-        {{ key: 'overdue_days', label: '未付天数' }},
+        {{ key: 'overdue_days', label: '逾期天数' }},
     ];
 
     function roleLabel(role) {{

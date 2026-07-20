@@ -1,43 +1,99 @@
-"""Single source of truth for M-level delinquency buckets and related SQL helpers."""
+"""Single source of truth for M-level delinquency buckets and related SQL helpers.
 
-M1_MAX_DAYS = 35
-M2_MIN_DAYS = 36
-M2_MAX_DAYS = 63
-M3_MIN_DAYS = 64
-M3_MAX_DAYS = 91
-M3_PLUS_MIN_DAYS = 92
-OVERDUE_ASSET_MIN_DAYS = 36
+Buckets (remaining > tolerance):
+  M0    overdue_days <= 0          (green; includes negative days)
+  M0_5  0 < overdue_days <= 15     (light green)
+  M1    15 < overdue_days <= 30    (orange)
+  M1_PLUS overdue_days > 30        (red)
+  M0_PLUS = M0_5 ∪ M1 ∪ M1_PLUS
 
-# Backward-compatible alias
-PERFORMING_MAX_DAYS = M1_MAX_DAYS
+ES when remaining <= tolerance. overdue_days IS NULL ≠ M0.
+"""
 
-# Risk score / sort tier thresholds (> N means bucket starts at N+1)
+from __future__ import annotations
+
+M0_MAX_DAYS = 0
+M0_5_MIN_DAYS = 1
+M0_5_MAX_DAYS = 15
+M1_MIN_DAYS = 16
+M1_MAX_DAYS = 30
+M1_PLUS_MIN_DAYS = 31
+
+# M0+ / 「逾期资产」：逾期天数 > 0
+OVERDUE_ASSET_MIN_DAYS = 1
+
+# Performing / 正常在贷上限（M0）
+PERFORMING_MAX_DAYS = M0_MAX_DAYS
+
+# Risk score thresholds (aligned with buckets)
+RISK_SCORE_M0_MAX_DAYS = M0_MAX_DAYS
+RISK_SCORE_M0_5_MAX_DAYS = M0_5_MAX_DAYS
 RISK_SCORE_M1_MAX_DAYS = M1_MAX_DAYS
-RISK_SCORE_M2_MAX_DAYS = M2_MAX_DAYS
-RISK_SCORE_M3_MAX_DAYS = M3_MAX_DAYS
-RISK_SCORE_M3_PLUS_MIN_DAYS = M3_PLUS_MIN_DAYS
+RISK_SCORE_M1_PLUS_MIN_DAYS = M1_PLUS_MIN_DAYS
+
+# Legacy name aliases (imports / risk sync during transition)
+M3_PLUS_MIN_DAYS = M1_PLUS_MIN_DAYS
+RISK_SCORE_M3_PLUS_MIN_DAYS = M1_PLUS_MIN_DAYS
 
 RECONCILIATION_TOLERANCE_DEFAULT = 0.01
 
 DELINQUENCY_BUCKET_LABELS = {
     "ES": "ES（提前结清）",
+    "M0": "M0",
+    "M0_5": "M0.5",
     "M1": "M1",
-    "M2": "M2",
-    "M3": "M3",
-    "M3_PLUS": "M3+",
+    "M1_PLUS": "M1+",
 }
 
 DELINQUENCY_BUCKET_COLORS = {
     "ES": "#38bdf8",
-    "M1": "#34d399",
-    "M2": "#fbbf24",
-    "M3": "#fbbf24",
-    "M3_PLUS": "#f87171",
+    "M0": "#34d399",
+    "M0_5": "#86efac",
+    "M1": "#fb923c",
+    "M1_PLUS": "#f87171",
 }
 
+# Unambiguous legacy filter codes only (bare M1 collides with new M1 — do not remap).
+LEGACY_BUCKET_FILTER_ALIASES = {
+    "M2": "M0_5",
+    "M3": "M1",
+    "M2_PLUS": "M0_PLUS",
+    "M3_PLUS": "M1_PLUS",
+}
 
-def _coalesce_overdue_days(overdue_days_expr: str) -> str:
-    return f"COALESCE({overdue_days_expr}, 0)"
+CANONICAL_BUCKET_CODES = frozenset(
+    {"ES", "M0", "M0_5", "M1", "M1_PLUS", "M0_PLUS"}
+)
+
+
+def normalize_delinquency_bucket_filter(code: str | None) -> str | None:
+    """Map legacy filter codes to current codes; pass through canonical codes."""
+    if code is None:
+        return None
+    raw = str(code).strip()
+    if not raw:
+        return None
+    mapped = LEGACY_BUCKET_FILTER_ALIASES.get(raw, raw)
+    return mapped
+
+
+def normalize_delinquency_bucket_filters(
+    codes: list[str] | None,
+) -> list[str] | None:
+    if not codes:
+        return codes
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in codes:
+        n = normalize_delinquency_bucket_filter(c)
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def sql_days_not_null(overdue_days_expr: str) -> str:
+    return f"({overdue_days_expr} IS NOT NULL)"
 
 
 def sql_es_filter(
@@ -48,56 +104,64 @@ def sql_es_filter(
     return f"({remaining_amount_expr} <= {tolerance_param})"
 
 
+def sql_m0_filter(
+    overdue_days_expr: str,
+    remaining_amount_expr: str,
+    *,
+    tolerance_param: str = ":tolerance",
+) -> str:
+    return (
+        f"({remaining_amount_expr} > {tolerance_param} "
+        f"AND {sql_days_not_null(overdue_days_expr)} "
+        f"AND {overdue_days_expr} <= {M0_MAX_DAYS})"
+    )
+
+
+def sql_m0_5_filter(
+    overdue_days_expr: str,
+    remaining_amount_expr: str,
+    *,
+    tolerance_param: str = ":tolerance",
+) -> str:
+    return (
+        f"({remaining_amount_expr} > {tolerance_param} "
+        f"AND {sql_days_not_null(overdue_days_expr)} "
+        f"AND {overdue_days_expr} > {M0_MAX_DAYS} "
+        f"AND {overdue_days_expr} <= {M0_5_MAX_DAYS})"
+    )
+
+
 def sql_m1_filter(
     overdue_days_expr: str,
     remaining_amount_expr: str,
     *,
     tolerance_param: str = ":tolerance",
 ) -> str:
-    od = _coalesce_overdue_days(overdue_days_expr)
     return (
         f"({remaining_amount_expr} > {tolerance_param} "
-        f"AND {od} <= {M1_MAX_DAYS})"
+        f"AND {sql_days_not_null(overdue_days_expr)} "
+        f"AND {overdue_days_expr} > {M0_5_MAX_DAYS} "
+        f"AND {overdue_days_expr} <= {M1_MAX_DAYS})"
     )
 
 
-def sql_m2_filter(
+def sql_m1_plus_filter(
     overdue_days_expr: str,
     remaining_amount_expr: str,
     *,
     tolerance_param: str = ":tolerance",
 ) -> str:
-    od = _coalesce_overdue_days(overdue_days_expr)
     return (
         f"({remaining_amount_expr} > {tolerance_param} "
-        f"AND {od} BETWEEN {M2_MIN_DAYS} AND {M2_MAX_DAYS})"
+        f"AND {sql_days_not_null(overdue_days_expr)} "
+        f"AND {overdue_days_expr} > {M1_MAX_DAYS})"
     )
 
 
-def sql_m3_filter(
-    overdue_days_expr: str,
-    remaining_amount_expr: str,
-    *,
-    tolerance_param: str = ":tolerance",
-) -> str:
-    od = _coalesce_overdue_days(overdue_days_expr)
-    return (
-        f"({remaining_amount_expr} > {tolerance_param} "
-        f"AND {od} BETWEEN {M3_MIN_DAYS} AND {M3_MAX_DAYS})"
-    )
-
-
-def sql_m3_plus_filter(
-    overdue_days_expr: str,
-    remaining_amount_expr: str,
-    *,
-    tolerance_param: str = ":tolerance",
-) -> str:
-    od = _coalesce_overdue_days(overdue_days_expr)
-    return (
-        f"({remaining_amount_expr} > {tolerance_param} "
-        f"AND {od} >= {M3_PLUS_MIN_DAYS})"
-    )
+# Transition aliases
+sql_m3_plus_filter = sql_m1_plus_filter
+sql_m2_filter = sql_m0_5_filter
+sql_m3_filter = sql_m1_filter
 
 
 def sql_overdue_asset_filter(
@@ -106,11 +170,22 @@ def sql_overdue_asset_filter(
     *,
     tolerance_param: str = ":tolerance",
 ) -> str:
-    """SQL fragment: M2/M3/M3+ only (excludes ES, M1)."""
-    od = _coalesce_overdue_days(overdue_days_expr)
+    """SQL fragment: M0+ only (excludes ES, M0)."""
     return (
         f"({remaining_amount_expr} > {tolerance_param} "
-        f"AND {od} >= {OVERDUE_ASSET_MIN_DAYS})"
+        f"AND {sql_days_not_null(overdue_days_expr)} "
+        f"AND {overdue_days_expr} > {M0_MAX_DAYS})"
+    )
+
+
+def sql_m0_plus_filter(
+    overdue_days_expr: str,
+    remaining_amount_expr: str,
+    *,
+    tolerance_param: str = ":tolerance",
+) -> str:
+    return sql_overdue_asset_filter(
+        overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
     )
 
 
@@ -122,10 +197,10 @@ def sql_exposure_asset_filter(
 ) -> str:
     return (
         f"({sql_es_filter(remaining_amount_expr, tolerance_param=tolerance_param)} "
+        f"OR {sql_m0_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)} "
+        f"OR {sql_m0_5_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)} "
         f"OR {sql_m1_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)} "
-        f"OR {sql_m2_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)} "
-        f"OR {sql_m3_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)} "
-        f"OR {sql_m3_plus_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)})"
+        f"OR {sql_m1_plus_filter(overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)})"
     )
 
 
@@ -135,42 +210,44 @@ def sql_custody_list_sort_priority(
     *,
     tolerance_param: str = ":tolerance",
 ) -> str:
-    """ORDER BY priority: M3+ first, then M3, M2, M1, ES."""
-    od = _coalesce_overdue_days(overdue_days_expr)
+    """ORDER BY priority: M1+ first, then M1, M0.5, M0, ES, unknown."""
+    od = overdue_days_expr
     return f"""CASE
                     WHEN {remaining_amount_expr} <= {tolerance_param} THEN 4
-                    WHEN {od} >= {M3_PLUS_MIN_DAYS} THEN 0
-                    WHEN {od} > {M2_MAX_DAYS} THEN 1
-                    WHEN {od} > {M1_MAX_DAYS} THEN 2
+                    WHEN {od} IS NULL THEN 5
+                    WHEN {od} > {M1_MAX_DAYS} THEN 0
+                    WHEN {od} > {M0_5_MAX_DAYS} THEN 1
+                    WHEN {od} > {M0_MAX_DAYS} THEN 2
                     WHEN {remaining_amount_expr} > {tolerance_param} THEN 3
                     ELSE 5
                 END"""
 
 
 def sql_risk_score_overdue_component(
-    overdue_days_expr: str = "COALESCE(m.overdue_days, 0)",
+    overdue_days_expr: str = "m.overdue_days",
     *,
     remaining_expr: str = "m.remaining_amount",
     tolerance_param: str = ":tolerance",
 ) -> str:
     return f"""CASE
                 WHEN {remaining_expr} <= {tolerance_param} THEN 0
-                WHEN {overdue_days_expr} >= {M3_PLUS_MIN_DAYS} THEN 50
-                WHEN {overdue_days_expr} > {M2_MAX_DAYS} THEN 35
-                WHEN {overdue_days_expr} > {M1_MAX_DAYS} THEN 20
+                WHEN {overdue_days_expr} IS NULL THEN 5
+                WHEN {overdue_days_expr} > {M1_MAX_DAYS} THEN 50
+                WHEN {overdue_days_expr} > {M0_5_MAX_DAYS} THEN 35
+                WHEN {overdue_days_expr} > {M0_MAX_DAYS} THEN 20
                 ELSE 5
             END"""
 
 
 def sql_risk_payment_gap_component(
-    overdue_days_expr: str = "COALESCE(m.overdue_days, 0)",
+    overdue_days_expr: str = "m.overdue_days",
     *,
     remaining_expr: str = "m.remaining_amount",
     tolerance_param: str = ":tolerance",
 ) -> str:
     return f"""CASE
                 WHEN {remaining_expr} <= {tolerance_param} THEN 0
-                WHEN {overdue_days_expr} > {M1_MAX_DAYS} AND (
+                WHEN {overdue_days_expr} > {M0_MAX_DAYS} AND (
                     m.last_payment_date IS NULL
                     OR (m.data_date - m.last_payment_date) > 45
                 ) THEN 20
@@ -179,63 +256,69 @@ def sql_risk_payment_gap_component(
 
 
 def calc_delinquency_bucket(
-    overdue_days: int,
+    overdue_days: int | None,
     remaining_amount: float,
     *,
     tolerance: float = RECONCILIATION_TOLERANCE_DEFAULT,
-) -> str:
-    """ES / M1 / M2 / M3 / M3_PLUS; M1 includes overdue_days=0 when balance > 0."""
+) -> str | None:
+    """ES / M0 / M0_5 / M1 / M1_PLUS; None when days unknown (not ES)."""
     if remaining_amount <= tolerance:
         return "ES"
-    od = max(0, int(overdue_days))
+    if overdue_days is None:
+        return None
+    od = int(overdue_days)
+    if od <= M0_MAX_DAYS:
+        return "M0"
+    if od <= M0_5_MAX_DAYS:
+        return "M0_5"
     if od <= M1_MAX_DAYS:
         return "M1"
-    if od <= M2_MAX_DAYS:
-        return "M2"
-    if od <= M3_MAX_DAYS:
-        return "M3"
-    return "M3_PLUS"
+    return "M1_PLUS"
 
 
 def calc_risk_level(
-    overdue_days: int,
+    overdue_days: int | None,
     remaining_amount: float,
     *,
     tolerance: float = RECONCILIATION_TOLERANCE_DEFAULT,
-) -> str:
+) -> str | None:
     return calc_delinquency_bucket(overdue_days, remaining_amount, tolerance=tolerance)
 
 
 def delinquency_bucket(
-    overdue_days: int,
+    overdue_days: int | None,
     remaining_amount: float | None = None,
     *,
     tolerance: float = RECONCILIATION_TOLERANCE_DEFAULT,
 ) -> str | None:
     if remaining_amount is not None:
-        return calc_delinquency_bucket(overdue_days, remaining_amount, tolerance=tolerance)
-    od = max(0, int(overdue_days))
-    if od <= M1_MAX_DAYS:
-        return "M1"
-    if od <= M2_MAX_DAYS:
-        return "M2"
-    if od <= M3_MAX_DAYS:
-        return "M3"
-    return "M3_PLUS"
-
-
-def stage_from_overdue_days(overdue_days: int) -> str | None:
-    """Ops stage from overdue_days; None when not yet overdue (<=0)."""
-    if overdue_days <= 0:
+        return calc_delinquency_bucket(
+            overdue_days, remaining_amount, tolerance=tolerance
+        )
+    if overdue_days is None:
         return None
     od = int(overdue_days)
+    if od <= M0_MAX_DAYS:
+        return "M0"
+    if od <= M0_5_MAX_DAYS:
+        return "M0_5"
     if od <= M1_MAX_DAYS:
         return "M1"
-    if od <= M2_MAX_DAYS:
-        return "M2"
-    if od <= M3_MAX_DAYS:
-        return "M3"
-    return "M3+"
+    return "M1_PLUS"
+
+
+def stage_from_overdue_days(overdue_days: int | None) -> str | None:
+    """Ops stage from overdue_days; None when not overdue (days <= 0 or unknown)."""
+    if overdue_days is None:
+        return None
+    od = int(overdue_days)
+    if od <= M0_MAX_DAYS:
+        return None
+    if od <= M0_5_MAX_DAYS:
+        return "M0.5"
+    if od <= M1_MAX_DAYS:
+        return "M1"
+    return "M1+"
 
 
 def is_overdue_asset(
@@ -246,27 +329,35 @@ def is_overdue_asset(
 ) -> bool:
     if remaining_amount <= tolerance:
         return False
-    od = 0 if overdue_days is None else int(overdue_days)
-    return od >= OVERDUE_ASSET_MIN_DAYS
+    if overdue_days is None:
+        return False
+    return int(overdue_days) > M0_MAX_DAYS
 
 
-def is_m3_plus_alert(overdue_days: int | None) -> bool:
-    od = 0 if overdue_days is None else int(overdue_days)
-    return od >= M3_PLUS_MIN_DAYS
+def is_m1_plus_alert(overdue_days: int | None) -> bool:
+    if overdue_days is None:
+        return False
+    return int(overdue_days) > M1_MAX_DAYS
+
+
+# Transition alias
+is_m3_plus_alert = is_m1_plus_alert
 
 
 def is_payment_gap_risk(overdue_days: int | None) -> bool:
-    od = 0 if overdue_days is None else int(overdue_days)
-    return od > M1_MAX_DAYS
+    if overdue_days is None:
+        return False
+    return int(overdue_days) > M0_MAX_DAYS
 
 
-def matches_delinquency_bucket_filter(item_bucket: str, filter_bucket: str) -> bool:
-    """Whether an asset's computed bucket matches a UI filter (incl. composite M2_PLUS)."""
+def matches_delinquency_bucket_filter(item_bucket: str | None, filter_bucket: str) -> bool:
+    """Whether an asset's computed bucket matches a UI filter (incl. composite M0_PLUS)."""
     if not filter_bucket:
         return True
-    if filter_bucket == "M2_PLUS":
-        return item_bucket in ("M2", "M3", "M3_PLUS")
-    return item_bucket == filter_bucket
+    fb = normalize_delinquency_bucket_filter(filter_bucket) or filter_bucket
+    if fb == "M0_PLUS":
+        return item_bucket in ("M0_5", "M1", "M1_PLUS")
+    return item_bucket == fb
 
 
 def sql_agg_delinquency_filter(
@@ -277,26 +368,27 @@ def sql_agg_delinquency_filter(
     tolerance_param: str = ":tolerance",
 ) -> str:
     """HAVING fragment for asset_code-aggregated monitor rows."""
-    if filter_bucket == "M2_PLUS":
+    fb = normalize_delinquency_bucket_filter(filter_bucket) or filter_bucket
+    if fb == "M0_PLUS":
         return sql_overdue_asset_filter(
             overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
         )
-    if filter_bucket == "ES":
+    if fb == "ES":
         return sql_es_filter(remaining_amount_expr, tolerance_param=tolerance_param)
-    if filter_bucket == "M1":
+    if fb == "M0":
+        return sql_m0_filter(
+            overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
+        )
+    if fb == "M0_5":
+        return sql_m0_5_filter(
+            overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
+        )
+    if fb == "M1":
         return sql_m1_filter(
             overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
         )
-    if filter_bucket == "M2":
-        return sql_m2_filter(
-            overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
-        )
-    if filter_bucket == "M3":
-        return sql_m3_filter(
-            overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
-        )
-    if filter_bucket == "M3_PLUS":
-        return sql_m3_plus_filter(
+    if fb == "M1_PLUS":
+        return sql_m1_plus_filter(
             overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param
         )
     return sql_overdue_asset_filter(
@@ -312,27 +404,29 @@ def sql_agg_delinquency_filter_any(
     tolerance_param: str = ":tolerance",
 ) -> str:
     """HAVING：None/空=不过滤；多值=任一等级命中。"""
-    if not filter_buckets:
+    normalized = normalize_delinquency_bucket_filters(filter_buckets)
+    if not normalized:
         return "TRUE"
-    if len(filter_buckets) == 1:
+    if len(normalized) == 1:
         return sql_agg_delinquency_filter(
-            filter_buckets[0],
+            normalized[0],
             overdue_days_expr,
             remaining_amount_expr,
             tolerance_param=tolerance_param,
         )
     parts = [
         f"({sql_agg_delinquency_filter(b, overdue_days_expr, remaining_amount_expr, tolerance_param=tolerance_param)})"
-        for b in filter_buckets
+        for b in normalized
     ]
     return "(" + " OR ".join(parts) + ")"
 
 
 def matches_any_delinquency_bucket_filter(
-    item_bucket: str, filter_buckets: list[str] | None
+    item_bucket: str | None, filter_buckets: list[str] | None
 ) -> bool:
     if not filter_buckets:
         return True
+    normalized = normalize_delinquency_bucket_filters(filter_buckets)
     return any(
-        matches_delinquency_bucket_filter(item_bucket, b) for b in filter_buckets
+        matches_delinquency_bucket_filter(item_bucket, b) for b in (normalized or [])
     )

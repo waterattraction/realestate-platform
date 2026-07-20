@@ -13,7 +13,7 @@ from app.service.ops_service import suggest_ops
 from app.overdue.buckets import matches_any_delinquency_bucket_filter
 from app.issuance_upload import ISSUANCE_CITY_UNKNOWN
 
-DEFAULT_DELINQUENCY_BUCKET = "M2_PLUS"
+DEFAULT_DELINQUENCY_BUCKET = "M0_PLUS"
 
 
 def _match_internal_status_filter(got: str, wants: list[str] | None) -> bool:
@@ -221,8 +221,10 @@ class OverdueWorkbenchService:
             if checks_service.is_es_closed(remaining_sum):
                 custody_agg["delinquency_bucket"] = "ES"
             else:
+                raw_od = custody_agg.get("overdue_days")
+                od = int(raw_od) if raw_od is not None else None
                 custody_agg["delinquency_bucket"] = checks_service.calc_risk_level(
-                    int(custody_agg["overdue_days"] or 0),
+                    od,
                     remaining_sum,
                 )
 

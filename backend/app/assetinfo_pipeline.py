@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from app.auth import record_assetinfo_run
+from app.overdue.overdue_days import compute_overdue_days
 
 RECONCILIATION_TOLERANCE = 0.01
 SHEET_MONITOR = "2更新的资产数据表"
@@ -498,14 +499,14 @@ def run_assetinfo_pipeline(
         last_payment_date = payment_dates.get(custody)
         max_payment_date = last_payment_date
         remaining = float(row["remaining_amount"])
-        if last_payment_date:
-            overdue_days = max(0, (data_date - last_payment_date).days)
-        elif remaining <= RECONCILIATION_TOLERANCE:
+        if remaining <= RECONCILIATION_TOLERANCE:
             overdue_days = None
+        elif last_payment_date:
+            overdue_days = compute_overdue_days(data_date, last_payment_date)
         else:
             issue_date = issue_dates.get(str(custody))
             overdue_days = (
-                max(0, (data_date - issue_date).days) if issue_date else None
+                compute_overdue_days(data_date, issue_date) if issue_date else None
             )
 
         monitor_source_file = row.get("source_file_name")

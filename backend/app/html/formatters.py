@@ -11,7 +11,7 @@ def fmt_delinquency_badge(bucket: str | None) -> str:
     from app.overdue.ui_constants import DELINQUENCY_BUCKET_COLORS, DELINQUENCY_BUCKET_LABELS
 
     if bucket is None:
-        return '<span class="badge">正常</span>'
+        return '<span class="badge">—</span>'
     label = DELINQUENCY_BUCKET_LABELS.get(bucket, bucket)
     color = DELINQUENCY_BUCKET_COLORS.get(bucket, "#94a3b8")
     return (

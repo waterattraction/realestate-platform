@@ -44,10 +44,11 @@ _PANEL_PREVIEW_ROWS = 3
 
 _BUCKET_FILTER_OPTIONS = [
     ("ES", "ES"),
+    ("M0", "M0"),
+    ("M0_5", "M0.5"),
     ("M1", "M1"),
-    ("M2", "M2"),
-    ("M3", "M3"),
-    ("M3_PLUS", "M3+"),
+    ("M1_PLUS", "M1+"),
+    ("M0_PLUS", "M0+"),
 ]
 
 
@@ -647,7 +648,7 @@ def _overdue_label(summary: dict) -> str:
     if bucket == "ES":
         return "提前结清"
     if od is not None:
-        return f"未付 {od} 天"
+        return f"逾期 {od} 天"
     return "—"
 
 
@@ -873,7 +874,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         f"信托产品：{product_name}",
     ]
 
-    m_tip = [f"未付款阶段：{bucket or '—'}"]
+    m_tip = [f"逾期阶段：{bucket or '—'}"]
     if risk_score is not None:
         m_tip.append(f"风险分：{risk_score}")
 
@@ -881,7 +882,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
     if bucket == "ES":
         od_tip.append("资产已提前结清")
     elif overdue_days is not None:
-        od_tip.append(f"汇总未付：{overdue_days} 天")
+        od_tip.append(f"汇总逾期：{overdue_days} 天")
         for s in splits:
             sod = s.get("overdue_days")
             if sod is not None:
@@ -957,7 +958,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
         sod = s.get("overdue_days")
         line4_tip.append(
             f"{s.get('custody_asset_code') or '—'} · "
-            f"未付 {sod if sod is not None else '—'}天 · "
+            f"逾期 {sod if sod is not None else '—'}天 · "
             f"{s.get('delinquency_bucket') or '—'}"
         )
     if not splits:
@@ -976,7 +977,7 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
     ops_detail_count = 0
     if ops.get("bucket") or ops.get("risk_level"):
         line4_tip.append(
-            f"未付款阶段 {ops.get('bucket') or '—'} · 风险 {ops.get('risk_level') or '—'}"
+            f"逾期阶段 {ops.get('bucket') or '—'} · 风险 {ops.get('risk_level') or '—'}"
         )
         ops_detail_count += 1
     if sla.get("due_date"):
@@ -1239,16 +1240,10 @@ def _render_asset_list(
 
 
 def _fmt_queue_bucket_days(bucket: str | None, overdue_days) -> str:
-    """清单行：`M2 45天`（短标签 + 天数）。"""
-    from app.overdue.buckets import DELINQUENCY_BUCKET_COLORS
+    """清单行：`M0.5 8天`（短标签 + 天数）。"""
+    from app.overdue.buckets import DELINQUENCY_BUCKET_COLORS, DELINQUENCY_BUCKET_LABELS
 
-    short = {
-        "ES": "ES",
-        "M1": "M1",
-        "M2": "M2",
-        "M3": "M3",
-        "M3_PLUS": "M3+",
-    }.get(bucket or "", bucket or "—")
+    short = DELINQUENCY_BUCKET_LABELS.get(bucket or "", bucket or "—")
     color = DELINQUENCY_BUCKET_COLORS.get(bucket or "", "#94a3b8")
     badge = (
         f'<span class="badge" style="background: {color}22; color: {color}; '
@@ -1317,7 +1312,7 @@ def _render_split_list(queue: list, selected_id: int | None, workbench_qs) -> st
         od_label = (
             f"提前结清 {item.get('last_payment_date') or '—'}"
             if item.get("delinquency_bucket") == "ES"
-            else f"未付 {item['overdue_days']}天"
+            else f"逾期 {item['overdue_days']}天"
         )
         badge = (
             fmt_risk_badge(item.get("risk_level"))
@@ -1571,7 +1566,7 @@ def _panel_repayment(rep: dict) -> str:
         row_fn=_repayment_table_row,
         colspan=4,
         expand_summary=f"查看全部还款明细（{len(items)} 条）",
-        empty_message="缺少还款明细，未付天数可能无法重算",
+        empty_message="缺少还款明细，逾期天数可能无法重算",
     )
     recent = _fmt_date_only(rep.get("recent_repayment_date"))
     return f"""<div class="info-card panel-dual">
@@ -1600,7 +1595,7 @@ def _panel_monitor(mon: dict, summary: dict, data_date: str | None) -> str:
             <td>{fmt_delinquency_badge(s.get('delinquency_bucket'))}</td>
         </tr>"""
     table = f"""<div class="table-wrap"><table>
-        <thead><tr><th>{CUSTODY_ASSET_CODE_LABEL}</th><th>初始</th><th>已还</th><th>剩余</th><th>未付天数</th><th>M级</th></tr></thead>
+        <thead><tr><th>{CUSTODY_ASSET_CODE_LABEL}</th><th>初始</th><th>已还</th><th>剩余</th><th>逾期天数</th><th>M级</th></tr></thead>
         <tbody>{rows or '<tr><td colspan="6" class="empty">无</td></tr>'}</tbody></table></div>"""
     return f"""<div class="info-card info-card-primary">
         <h3 class="info-card-title">当前监控</h3>
@@ -1679,7 +1674,7 @@ def _panel_ops(ops: dict | None, summary: dict, spatial_hint: dict | None = None
     return f"""<div class="info-card ops-panel{alert_cls}">
         <h3 class="info-card-title">Ops 建议（只读）</h3>
         <div class="info-card-body">
-            <p><span class="lbl">未付款阶段</span>{fmt_delinquency_badge(ops.get('bucket'))}</p>
+            <p><span class="lbl">逾期阶段</span>{fmt_delinquency_badge(ops.get('bucket'))}</p>
             <p><span class="lbl">风险</span>{fmt_risk_badge(ops.get('risk_level'))}</p>
             <p>SLA 截止 {sla_txt} {sla_badge}</p>
             <p class="lbl">建议动作</p><ul class="ops-list">{action_rows}</ul>

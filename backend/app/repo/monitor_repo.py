@@ -274,7 +274,7 @@ class MonitorRepo:
     ) -> list[dict]:
         """Return one row per asset_code for the workbench left-column list.
 
-        全序：等级优先级 → 未付天数 DESC → 资产主编号 ASC → trust_product_id。
+        全序：等级优先级 → 逾期天数 DESC → 资产主编号 ASC → trust_product_id。
         有 prefer_* 时：keyset 取「当前起连续最多 limit 户」；否则全序 Top limit。
         """
         from app import query_utils

@@ -29,7 +29,8 @@ class SpatialMapService:
                 bucket = "ES"
                 overdue_days = None
             else:
-                overdue_days = int(row.get("overdue_days") or 0)
+                raw_od = row.get("overdue_days")
+                overdue_days = int(raw_od) if raw_od is not None else None
                 bucket = checks_service.calc_risk_level(overdue_days, remaining)
 
             pid = int(row["trust_product_id"])

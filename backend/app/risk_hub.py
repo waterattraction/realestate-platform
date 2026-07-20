@@ -3,16 +3,20 @@
 from sqlalchemy import text
 
 from app.overdue.buckets import (
+    M0_5_MAX_DAYS,
+    M0_5_MIN_DAYS,
+    M0_MAX_DAYS,
     M1_MAX_DAYS,
-    M2_MAX_DAYS,
-    M3_MAX_DAYS,
-    M3_MIN_DAYS,
-    M2_MIN_DAYS,
-    M3_PLUS_MIN_DAYS,
+    M1_MIN_DAYS,
+    M1_PLUS_MIN_DAYS,
     OVERDUE_ASSET_MIN_DAYS,
     PERFORMING_MAX_DAYS,
     RECONCILIATION_TOLERANCE_DEFAULT,
     is_payment_gap_risk,
+    sql_m0_5_filter,
+    sql_m0_filter,
+    sql_m1_filter,
+    sql_m1_plus_filter,
     sql_risk_payment_gap_component,
     sql_risk_score_overdue_component,
 )
@@ -252,7 +256,7 @@ def recalculate_risk_scores(conn, trust_product_id: int | None = None) -> dict:
 def sync_risk_alerts(conn, trust_product_id: int | None = None) -> dict:
     params: dict = {
         "tolerance": RECONCILIATION_TOLERANCE,
-        "m3_plus_min_days": M3_PLUS_MIN_DAYS,
+        "m1_plus_min_days": M1_PLUS_MIN_DAYS,
     }
     product_filter = ""
     if trust_product_id is not None:
@@ -283,11 +287,12 @@ def sync_risk_alerts(conn, trust_product_id: int | None = None) -> dict:
             ),
             triggers AS (
                 SELECT m.trust_product_id, m.trust_asset_id, m.data_date, m.risk_level,
-                       'delinquency_m3_plus' AS risk_type,
-                       '未付天数 ≥92（M3+）' AS trigger_rule
+                       'delinquency_m1_plus' AS risk_type,
+                       '逾期天数 >30（M1+）' AS trigger_rule
                 FROM monitor m
                 WHERE m.remaining_amount > :tolerance
-                  AND COALESCE(m.overdue_days, 0) >= :m3_plus_min_days
+                  AND m.overdue_days IS NOT NULL
+                  AND m.overdue_days >= :m1_plus_min_days
                 UNION ALL
                 SELECT m.trust_product_id, m.trust_asset_id, m.data_date, m.risk_level,
                        'reconciliation_failure',
@@ -368,7 +373,8 @@ def sync_risk_cases(conn, trust_product_id: int | None = None) -> dict:
                 INNER JOIN latest l
                     ON l.trust_product_id = m.trust_product_id AND l.data_date = m.data_date
                 WHERE m.remaining_amount > :tolerance
-                  AND COALESCE(m.overdue_days, 0) >= :overdue_min_days
+                  AND m.overdue_days IS NOT NULL
+                  AND m.overdue_days >= :overdue_min_days
                   AND m.risk_level IN ('A', 'B', 'C')
                 {product_filter}
             )
@@ -473,11 +479,11 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
         params = {
             **params,
             "performing_max_days": PERFORMING_MAX_DAYS,
-            "m2_min_days": M2_MIN_DAYS,
-            "m2_max_days": M2_MAX_DAYS,
-            "m3_min_days": M3_MIN_DAYS,
-            "m3_max_days": M3_MAX_DAYS,
-            "m3_plus_min_days": M3_PLUS_MIN_DAYS,
+            "m0_5_min_days": M0_5_MIN_DAYS,
+            "m0_5_max_days": M0_5_MAX_DAYS,
+            "m1_min_days": M1_MIN_DAYS,
+            "m1_max_days": M1_MAX_DAYS,
+            "m1_plus_min_days": M1_PLUS_MIN_DAYS,
         }
 
     summary_row = conn.execute(
@@ -492,21 +498,17 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
                 COUNT(*) AS exposure_count,
                 COUNT(*) FILTER (WHERE m.remaining_amount <= :tolerance) AS es_count,
                 COUNT(*) FILTER (
-                    WHERE m.remaining_amount > :tolerance
-                      AND COALESCE(m.overdue_days, 0) <= :performing_max_days
+                    WHERE {sql_m0_filter("m.overdue_days", "m.remaining_amount")}
+                ) AS m0_count,
+                COUNT(*) FILTER (
+                    WHERE {sql_m0_5_filter("m.overdue_days", "m.remaining_amount")}
+                ) AS m0_5_count,
+                COUNT(*) FILTER (
+                    WHERE {sql_m1_filter("m.overdue_days", "m.remaining_amount")}
                 ) AS m1_count,
                 COUNT(*) FILTER (
-                    WHERE m.remaining_amount > :tolerance
-                      AND COALESCE(m.overdue_days, 0) BETWEEN :m2_min_days AND :m2_max_days
-                ) AS m2_count,
-                COUNT(*) FILTER (
-                    WHERE m.remaining_amount > :tolerance
-                      AND COALESCE(m.overdue_days, 0) BETWEEN :m3_min_days AND :m3_max_days
-                ) AS m3_count,
-                COUNT(*) FILTER (
-                    WHERE m.remaining_amount > :tolerance
-                      AND COALESCE(m.overdue_days, 0) >= :m3_plus_min_days
-                ) AS m3_plus_count,
+                    WHERE {sql_m1_plus_filter("m.overdue_days", "m.remaining_amount")}
+                ) AS m1_plus_count,
                 ROUND(
                     AVG(m.risk_score) FILTER (WHERE m.remaining_amount > :tolerance)::numeric,
                     1
@@ -610,12 +612,12 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
         detail = fetch_risk_asset_detail(conn, selected_id)
 
     es = int(summary_row.es_count) if summary_row else 0
+    m0 = int(summary_row.m0_count) if summary_row else 0
+    m0_5 = int(summary_row.m0_5_count) if summary_row else 0
     m1 = int(summary_row.m1_count) if summary_row else 0
-    m2 = int(summary_row.m2_count) if summary_row else 0
-    m3 = int(summary_row.m3_count) if summary_row else 0
-    m3_plus = int(summary_row.m3_plus_count) if summary_row else 0
-    exposure_total = es + m1 + m2 + m3 + m3_plus
-    overdue_total = m2 + m3 + m3_plus
+    m1_plus = int(summary_row.m1_plus_count) if summary_row else 0
+    exposure_total = es + m0 + m0_5 + m1 + m1_plus
+    overdue_total = m0_5 + m1 + m1_plus
 
     return {
         "data_date": str(summary_row.data_date) if summary_row else None,
@@ -630,7 +632,13 @@ def fetch_risk_workbench(conn, trust_product_id: int | None = None, trust_asset_
             "es_count": es,
             "exposure_total": exposure_total,
             "overdue_total": overdue_total,
-            "breakdown": {"ES": es, "M1": m1, "M2": m2, "M3": m3, "M3+": m3_plus},
+            "breakdown": {
+                "ES": es,
+                "M0": m0,
+                "M0.5": m0_5,
+                "M1": m1,
+                "M1+": m1_plus,
+            },
             "avg_risk_score": float(summary_row.avg_risk_score) if summary_row and summary_row.avg_risk_score else 0,
             "open_alert_count": int(alert_open.cnt) if alert_open else 0,
             "sla_breached_count": int(sla_breached.cnt) if sla_breached else 0,

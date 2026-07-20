@@ -18,7 +18,7 @@ def _bucket_legend() -> str:
     return "".join(parts)
 
 
-BUCKET_ORDER = ["ES", "M1", "M2", "M3", "M3_PLUS"]
+BUCKET_ORDER = ["ES", "M0", "M0_5", "M1", "M1_PLUS"]
 
 
 def render_spatial_map_gate_html(
@@ -558,7 +558,7 @@ def render_spatial_map_view_html(
             <span class="filter-label">M级</span>
             <div id="bucket-filters" class="filter-chips"></div>
             <div class="filter-presets">
-                <button type="button" class="btn" id="preset-m2plus">仅 M2+</button>
+                <button type="button" class="btn" id="preset-m0plus">仅 M0+</button>
                 <button type="button" class="btn" id="preset-all">全选</button>
             </div>
             <span class="filter-label">产品</span>
@@ -586,11 +586,11 @@ def render_spatial_map_view_html(
         var cityZoom = 11;
 
         var markerStyles = {{
-            ES: {{ radius: 5, strokeWeight: 1, zIndex: 10, halo: false, chipSize: 8 }},
-            M1: {{ radius: 5, strokeWeight: 1, zIndex: 20, halo: false, chipSize: 8 }},
-            M2: {{ radius: 8, strokeWeight: 2, zIndex: 30, halo: false, chipSize: 11 }},
-            M3: {{ radius: 9, strokeWeight: 2, zIndex: 40, halo: false, chipSize: 12 }},
-            M3_PLUS: {{ radius: 10, strokeWeight: 3, zIndex: 50, halo: true, chipSize: 13 }}
+            ES: {{ radius: 5, strokeWeight: 1, zIndex: 10, pulse: false, chipSize: 8 }},
+            M0: {{ radius: 5, strokeWeight: 1, zIndex: 20, pulse: false, chipSize: 8 }},
+            M0_5: {{ radius: 7, strokeWeight: 2, zIndex: 30, pulse: false, chipSize: 10 }},
+            M1: {{ radius: 9, strokeWeight: 2, zIndex: 40, pulse: false, chipSize: 12 }},
+            M1_PLUS: {{ radius: 10, strokeWeight: 3, zIndex: 50, pulse: true, chipSize: 13 }}
         }};
 
         var map = null;
@@ -652,7 +652,7 @@ def render_spatial_map_view_html(
             bucketOrder.forEach(function(code) {{
                 var color = bucketColors[code] || '#94a3b8';
                 var label = bucketLabels[code] || code;
-                var st = markerStyles[code] || markerStyles.M1;
+                var st = markerStyles[code] || markerStyles.M0;
                 var cnt = (byBucket && byBucket[code]) || 0;
                 var chip = document.createElement('button');
                 chip.type = 'button';
@@ -711,15 +711,15 @@ def render_spatial_map_view_html(
         function createMarkers(items) {{
             markerEntries = [];
             var sorted = items.slice().sort(function(a, b) {{
-                var za = (markerStyles[a.delinquency_bucket] || markerStyles.M1).zIndex;
-                var zb = (markerStyles[b.delinquency_bucket] || markerStyles.M1).zIndex;
+                var za = (markerStyles[a.delinquency_bucket] || markerStyles.M0).zIndex;
+                var zb = (markerStyles[b.delinquency_bucket] || markerStyles.M0).zIndex;
                 return za - zb;
             }});
             sorted.forEach(function(it) {{
                 var pos = [it.longitude, it.latitude];
-                var bucket = it.delinquency_bucket || 'M1';
+                var bucket = it.delinquency_bucket || 'M0';
                 var color = bucketColors[bucket] || '#94a3b8';
-                var st = markerStyles[bucket] || markerStyles.M1;
+                var st = markerStyles[bucket] || markerStyles.M0;
                 var layers = [];
                 if (st.halo) {{
                     var halo = new AMap.CircleMarker({{
@@ -752,8 +752,8 @@ def render_spatial_map_view_html(
             }});
         }}
 
-        document.getElementById('preset-m2plus').addEventListener('click', function() {{
-            activeBuckets = new Set(['M2', 'M3', 'M3_PLUS']);
+        document.getElementById('preset-m0plus').addEventListener('click', function() {{
+            activeBuckets = new Set(['M0_5', 'M1', 'M1_PLUS']);
             applyFilters();
         }});
         document.getElementById('preset-all').addEventListener('click', function() {{

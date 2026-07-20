@@ -84,7 +84,7 @@ MONITOR_EXPORT_LABELS: dict[str, str] = {
     "custody_asset_code": "托管房源号",
     "source_asset_code": "资产信托号",
     "data_date": "数据日期",
-    "overdue_days": "未付天数",
+    "overdue_days": "逾期天数",
     "initial_transfer_amount": "初始受让金额",
     "repaid_amount": "已还款金额",
     "remaining_amount": "剩余还款金额",
@@ -1663,7 +1663,7 @@ def recompute_monitor_payment_fields(
                 max_payment_date = sub.max_rd,
                 overdue_days = CASE
                     WHEN m.remaining_amount <= :tolerance THEN NULL
-                    ELSE GREATEST(0, m.data_date - sub.max_rd)
+                    ELSE (CAST(:dd AS date) - (sub.max_rd + INTERVAL '1 month')::date)
                 END
             FROM (
                 SELECT r.trust_product_id, ta.asset_code, MAX(r.repayment_date) AS max_rd
@@ -1687,7 +1687,7 @@ def recompute_monitor_payment_fields(
                 max_payment_date = NULL,
                 overdue_days = CASE
                     WHEN m.remaining_amount <= :tolerance THEN NULL
-                    ELSE GREATEST(0, m.data_date - iss.min_issue_date)
+                    ELSE (CAST(:dd AS date) - (iss.min_issue_date + INTERVAL '1 month')::date)
                 END
             FROM (
                 SELECT
@@ -1757,7 +1757,7 @@ def recompute_monitor_payment_fields(
         params,
     )
     for r in missing_rows:
-        warnings.append(f"{r.asset_code}: 无还款明细且无发行日，无法计算未付天数")
+        warnings.append(f"{r.asset_code}: 无还款明细且无发行日，无法计算逾期天数")
 
     conn.execute(
         text("""
