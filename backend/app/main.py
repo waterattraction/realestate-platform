@@ -4397,7 +4397,7 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             <div class="op-row">
                 <a href="/asset-swap" class="op-chip op-teal">
                     <svg viewBox="0 0 24 24"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
-                    资产置换推荐
+                    资产置换
                 </a>
             </div>
         </section>
@@ -5806,6 +5806,102 @@ def asset_swap_data(
             asset_codes=parsed_codes,
             exclude_asset_codes=exclude_asset_codes or None,
             required_asset_codes=required_asset_codes or None,
+        )
+
+
+def _parse_swap_payload(body: dict) -> dict:
+    pid = query_utils.parse_optional_int(body.get("trust_product_id"))
+    if pid is None:
+        raise HTTPException(status_code=400, detail="请选择信托产品")
+    scheme_id = query_utils.clean_optional_str(body.get("scheme_id")) or "manual"
+    biz_raw = query_utils.parse_optional_date(body.get("swap_business_date"))
+    if not biz_raw:
+        biz_date = date.today()
+    else:
+        try:
+            biz_date = date.fromisoformat(biz_raw[:10])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="置换业务日无效") from exc
+    source_codes = body.get("source_asset_codes") or []
+    candidate_codes = body.get("candidate_asset_codes") or []
+    if isinstance(source_codes, str):
+        source_codes = [source_codes]
+    if isinstance(candidate_codes, str):
+        candidate_codes = [candidate_codes]
+    note = query_utils.clean_optional_str(body.get("note"))
+    return {
+        "trust_product_id": pid,
+        "source_asset_codes": source_codes,
+        "candidate_asset_codes": candidate_codes,
+        "scheme_id": scheme_id,
+        "swap_business_date": biz_date,
+        "note": note,
+    }
+
+
+@app.post("/asset-swap/preview")
+def asset_swap_preview(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    payload = _parse_swap_payload(body)
+    with engine.connect() as conn:
+        return asset_swap.build_swap_preview(
+            conn,
+            trust_product_id=payload["trust_product_id"],
+            source_asset_codes=payload["source_asset_codes"],
+            candidate_asset_codes=payload["candidate_asset_codes"],
+            scheme_id=payload["scheme_id"],
+            swap_business_date=payload["swap_business_date"],
+        )
+
+
+@app.post("/asset-swap/execute")
+def asset_swap_execute(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    payload = _parse_swap_payload(body)
+    with engine.begin() as conn:
+        return asset_swap.execute_swap(
+            conn,
+            trust_product_id=payload["trust_product_id"],
+            source_asset_codes=payload["source_asset_codes"],
+            candidate_asset_codes=payload["candidate_asset_codes"],
+            scheme_id=payload["scheme_id"],
+            swap_business_date=payload["swap_business_date"],
+            note=payload["note"],
+            executed_by=current_user.get("username"),
+        )
+
+
+@app.get("/asset-swap/orders")
+def asset_swap_orders_list(
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.connect() as conn:
+        return {"items": asset_swap.list_swap_orders(conn)}
+
+
+@app.get("/asset-swap/orders/{order_id}")
+def asset_swap_order_detail(
+    order_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.connect() as conn:
+        return asset_swap.get_swap_order(conn, order_id)
+
+
+@app.post("/asset-swap/orders/{order_id}/void")
+def asset_swap_order_void(
+    order_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.begin() as conn:
+        return asset_swap.void_swap_order(
+            conn,
+            order_id,
+            voided_by=current_user.get("username"),
         )
 
 

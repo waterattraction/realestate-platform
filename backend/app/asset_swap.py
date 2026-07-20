@@ -1,11 +1,11 @@
-"""资产置换推荐 — 只读查询与组合算法（不写库）."""
+"""资产置换 — 只读推荐 + 新表落库执行（不改监控/发行事实表）."""
 
 from __future__ import annotations
 
 import itertools
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -923,3 +923,579 @@ def fetch_swap_recommendations(
             "candidate_max_overdue_days": SWAP_CANDIDATE_MAX_OVERDUE_DAYS,
         },
     }
+
+
+# ── 置换执行域（仅写 asset_swap_* 新表）────────────────────────
+
+MONITOR_SNAPSHOT_FIELDS = (
+    "asset_pool_code",
+    "renovation_vendor",
+    "initial_transfer_amount",
+    "repaid_amount",
+    "remaining_amount",
+    "asset_status",
+    "last_renovation_payment_date",
+    "community_name",
+    "city",
+    "collection_contract_code",
+    "custody_agreement_sign_date",
+    "collection_contract_years",
+    "owner_code",
+    "withholding_ratio",
+    "actual_monthly_rent",
+    "overdue_days",
+)
+
+
+def _jsonable_val(v: Any) -> Any:
+    if v is None:
+        return None
+    if isinstance(v, date) and not isinstance(v, datetime):
+        return v.isoformat()
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    if isinstance(v, (int, float, str, bool)):
+        return v
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _row_to_dict(row: Any) -> dict[str, Any]:
+    return {k: _jsonable_val(v) for k, v in dict(row._mapping).items()}
+
+
+def _product_name(conn: Connection, product_id: int) -> str:
+    row = conn.execute(
+        text("SELECT name FROM trust_products WHERE id = :id"),
+        {"id": product_id},
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=400, detail=f"信托产品 {product_id} 不存在")
+    return str(row.name)
+
+
+def fetch_latest_monitor_row(
+    conn: Connection,
+    trust_product_id: int,
+    asset_code: str,
+) -> dict[str, Any]:
+    """取产品下该主编号最新监控行（与推荐同源：最新快照层）+ 发行折扣率。"""
+    row = conn.execute(
+        text(f"""
+            SELECT r.*, tp.name AS trust_product_name,
+                   iss.asset_transfer_discount_rate
+            FROM trust_asset_monitor_records r
+            JOIN trust_products tp ON tp.id = r.trust_product_id
+            {au._monitor_latest_snapshot_join_sql()}
+            {_issuance_lateral_join_sql("i.asset_transfer_discount_rate")}
+            WHERE r.trust_product_id = :trust_product_id
+              AND r.asset_code = :asset_code
+            ORDER BY r.id DESC
+            LIMIT 1
+        """),
+        {"trust_product_id": trust_product_id, "asset_code": asset_code},
+    ).fetchone()
+    if not row:
+        raise HTTPException(
+            status_code=400,
+            detail=f"资产 {asset_code} 在产品 {trust_product_id} 下无最新监控数据",
+        )
+    item = _row_to_dict(row)
+    rate = item.get("asset_transfer_discount_rate")
+    try:
+        rate_f = float(rate) if rate is not None else None
+    except (TypeError, ValueError):
+        rate_f = None
+    item["asset_transfer_discount_rate"] = rate_f
+    item["asset_transfer_discount_rate_display"] = (
+        format_rate(rate_f) if rate_f is not None else "—"
+    )
+    overdue = int(item.get("overdue_days") or 0)
+    rem = float(item.get("remaining_amount") or 0)
+    bucket = calc_delinquency_bucket(overdue, rem, tolerance=TOLERANCE)
+    item["delinquency_bucket"] = bucket
+    item["delinquency_bucket_display"] = (
+        f"{DELINQUENCY_BUCKET_LABELS.get(bucket, bucket)} · {overdue}天"
+    )
+    item["overdue_days"] = overdue
+    return item
+
+
+def _build_monitor_snapshot_payload(
+    monitor: dict[str, Any],
+    *,
+    role: str,
+    trust_product_id: int,
+    trust_product_name: str,
+) -> dict[str, Any]:
+    payload = {
+        "snapshot_role": role,
+        "trust_product_id": trust_product_id,
+        "trust_product_name": trust_product_name,
+        "source_monitor_record_id": monitor.get("id"),
+        "asset_code": monitor.get("asset_code"),
+        "custody_asset_code": monitor.get("custody_asset_code"),
+        "source_asset_code": monitor.get("source_asset_code") or monitor.get("asset_code"),
+        "data_date": monitor.get("data_date"),
+    }
+    for key in MONITOR_SNAPSHOT_FIELDS:
+        payload[key] = monitor.get(key)
+    return payload
+
+
+def _build_leg(
+    *,
+    direction: str,
+    monitor: dict[str, Any],
+    from_product_id: int,
+    from_product_name: str,
+    to_product_id: int,
+    to_product_name: str,
+) -> dict[str, Any]:
+    exit_snap = _build_monitor_snapshot_payload(
+        monitor,
+        role="exit",
+        trust_product_id=from_product_id,
+        trust_product_name=from_product_name,
+    )
+    # 转入时：初始受让 = 转出时剩余还款；已还款 = 0；剩余 = 初始 − 已还
+    entry_snap = _build_monitor_snapshot_payload(
+        monitor,
+        role="entry",
+        trust_product_id=to_product_id,
+        trust_product_name=to_product_name,
+    )
+    exit_remaining = exit_snap.get("remaining_amount")
+    try:
+        entry_initial = float(exit_remaining) if exit_remaining is not None else None
+    except (TypeError, ValueError):
+        entry_initial = None
+    entry_repaid = 0.0 if entry_initial is not None else None
+    entry_remaining = (
+        round(entry_initial - entry_repaid, 2) if entry_initial is not None else None
+    )
+    entry_snap["initial_transfer_amount"] = entry_initial
+    entry_snap["repaid_amount"] = entry_repaid
+    entry_snap["remaining_amount"] = entry_remaining
+    return {
+        "direction": direction,
+        "asset_code": monitor.get("asset_code"),
+        "custody_asset_code": monitor.get("custody_asset_code"),
+        "source_asset_code": monitor.get("source_asset_code") or monitor.get("asset_code"),
+        "from_trust_product_id": from_product_id,
+        "from_trust_product_name": from_product_name,
+        "to_trust_product_id": to_product_id,
+        "to_trust_product_name": to_product_name,
+        "monitor_data_date": monitor.get("data_date"),
+        "source_monitor_record_id": monitor.get("id"),
+        "remaining_amount": monitor.get("remaining_amount"),
+        "city": monitor.get("city") or "—",
+        "overdue_days": monitor.get("overdue_days"),
+        "delinquency_bucket": monitor.get("delinquency_bucket"),
+        "delinquency_bucket_display": monitor.get("delinquency_bucket_display") or "—",
+        "last_renovation_payment_date": monitor.get("last_renovation_payment_date"),
+        "asset_transfer_discount_rate": monitor.get("asset_transfer_discount_rate"),
+        "asset_transfer_discount_rate_display": monitor.get(
+            "asset_transfer_discount_rate_display"
+        )
+        or "—",
+        "initial_transfer_amount": monitor.get("initial_transfer_amount"),
+        "repaid_amount": monitor.get("repaid_amount"),
+        "asset_status": monitor.get("asset_status"),
+        "community_name": monitor.get("community_name"),
+        "exit_monitor": exit_snap,
+        "entry_monitor": entry_snap,
+    }
+
+
+def build_swap_preview(
+    conn: Connection,
+    *,
+    trust_product_id: int,
+    source_asset_codes: list[str],
+    candidate_asset_codes: list[str],
+    scheme_id: str,
+    swap_business_date: date,
+) -> dict[str, Any]:
+    """预览置换结果（只读，不写库）。"""
+    if scheme_id not in ("a", "b", "c", "manual"):
+        raise HTTPException(status_code=400, detail="scheme_id 无效")
+    source_codes = parse_asset_code_list(
+        source_asset_codes, max_count=MAX_SOURCE_ASSETS, field_label="转出资产编号"
+    )
+    candidate_codes = parse_asset_code_list(
+        candidate_asset_codes, max_count=N_MAX, field_label="美润候选资产编号"
+    )
+    if not source_codes:
+        raise HTTPException(status_code=400, detail="请提供转出资产")
+    if not candidate_codes:
+        raise HTTPException(status_code=400, detail="请提供方案候选资产")
+
+    source_name = _product_name(conn, trust_product_id)
+    if not source_name.startswith(MEIHAOSHENG_NAME_PREFIX):
+        raise HTTPException(status_code=400, detail="仅支持美好生活系列信托产品转出")
+    meirun_id = resolve_meirun_product_id(conn)
+    meirun_name = MEIRUN_PRODUCT_NAME
+
+    out_legs = []
+    for code in source_codes:
+        mon = fetch_latest_monitor_row(conn, trust_product_id, code)
+        out_legs.append(
+            _build_leg(
+                direction="out",
+                monitor=mon,
+                from_product_id=trust_product_id,
+                from_product_name=source_name,
+                to_product_id=meirun_id,
+                to_product_name=meirun_name,
+            )
+        )
+
+    in_legs = []
+    for code in candidate_codes:
+        mon = fetch_latest_monitor_row(conn, meirun_id, code)
+        in_legs.append(
+            _build_leg(
+                direction="in",
+                monitor=mon,
+                from_product_id=meirun_id,
+                from_product_name=meirun_name,
+                to_product_id=trust_product_id,
+                to_product_name=source_name,
+            )
+        )
+
+    source_total = round(sum(float(x["remaining_amount"] or 0) for x in out_legs), 2)
+    candidate_total = round(sum(float(x["remaining_amount"] or 0) for x in in_legs), 2)
+
+    return {
+        "scheme_id": scheme_id,
+        "swap_business_date": swap_business_date.isoformat(),
+        "source_trust_product_id": trust_product_id,
+        "source_trust_product_name": source_name,
+        "counterparty_trust_product_id": meirun_id,
+        "counterparty_trust_product_name": meirun_name,
+        "out_assets": out_legs,
+        "in_assets": in_legs,
+        "source_asset_count": len(out_legs),
+        "candidate_asset_count": len(in_legs),
+        "source_total_remaining": source_total,
+        "candidate_total_remaining": candidate_total,
+        "surplus": round(candidate_total - source_total, 2),
+        "note": (
+            "预览不写库。确认置换后仅写入置换新表，"
+            "不修改资产监控导入表与发行表。"
+        ),
+    }
+
+
+def _insert_monitor_snapshot(
+    conn: Connection,
+    *,
+    swap_asset_id: int,
+    swap_order_id: int,
+    snap: dict[str, Any],
+) -> None:
+    conn.execute(
+        text(
+            """
+            INSERT INTO asset_swap_monitor_snapshots (
+                swap_asset_id, swap_order_id, snapshot_role,
+                trust_product_id, trust_product_name, source_monitor_record_id,
+                asset_code, custody_asset_code, source_asset_code, data_date,
+                asset_pool_code, renovation_vendor,
+                initial_transfer_amount, repaid_amount, remaining_amount,
+                asset_status, last_renovation_payment_date, community_name, city,
+                collection_contract_code, custody_agreement_sign_date,
+                collection_contract_years, owner_code, withholding_ratio,
+                actual_monthly_rent, overdue_days
+            ) VALUES (
+                :swap_asset_id, :swap_order_id, :snapshot_role,
+                :trust_product_id, :trust_product_name, :source_monitor_record_id,
+                :asset_code, :custody_asset_code, :source_asset_code, :data_date,
+                :asset_pool_code, :renovation_vendor,
+                :initial_transfer_amount, :repaid_amount, :remaining_amount,
+                :asset_status, :last_renovation_payment_date, :community_name, :city,
+                :collection_contract_code, :custody_agreement_sign_date,
+                :collection_contract_years, :owner_code, :withholding_ratio,
+                :actual_monthly_rent, :overdue_days
+            )
+            """
+        ),
+        {
+            "swap_asset_id": swap_asset_id,
+            "swap_order_id": swap_order_id,
+            **{k: snap.get(k) for k in (
+                "snapshot_role", "trust_product_id", "trust_product_name",
+                "source_monitor_record_id", "asset_code", "custody_asset_code",
+                "source_asset_code", "data_date", "asset_pool_code", "renovation_vendor",
+                "initial_transfer_amount", "repaid_amount", "remaining_amount",
+                "asset_status", "last_renovation_payment_date", "community_name", "city",
+                "collection_contract_code", "custody_agreement_sign_date",
+                "collection_contract_years", "owner_code", "withholding_ratio",
+                "actual_monthly_rent", "overdue_days",
+            )},
+        },
+    )
+
+
+def _insert_swap_asset(
+    conn: Connection,
+    *,
+    swap_order_id: int,
+    leg: dict[str, Any],
+) -> int:
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO asset_swap_assets (
+                swap_order_id, direction, asset_code, custody_asset_code, source_asset_code,
+                from_trust_product_id, from_trust_product_name,
+                to_trust_product_id, to_trust_product_name,
+                monitor_data_date, source_monitor_record_id, remaining_amount
+            ) VALUES (
+                :oid, :direction, :asset_code, :custody_asset_code, :source_asset_code,
+                :from_id, :from_name, :to_id, :to_name,
+                :monitor_data_date, :source_monitor_record_id, :remaining_amount
+            )
+            RETURNING id
+            """
+        ),
+        {
+            "oid": swap_order_id,
+            "direction": leg["direction"],
+            "asset_code": leg["asset_code"],
+            "custody_asset_code": leg.get("custody_asset_code"),
+            "source_asset_code": leg.get("source_asset_code"),
+            "from_id": leg["from_trust_product_id"],
+            "from_name": leg["from_trust_product_name"],
+            "to_id": leg["to_trust_product_id"],
+            "to_name": leg["to_trust_product_name"],
+            "monitor_data_date": leg.get("monitor_data_date"),
+            "source_monitor_record_id": leg.get("source_monitor_record_id"),
+            "remaining_amount": leg.get("remaining_amount"),
+        },
+    ).fetchone()
+    asset_id = int(row.id)
+    _insert_monitor_snapshot(
+        conn,
+        swap_asset_id=asset_id,
+        swap_order_id=swap_order_id,
+        snap=leg["exit_monitor"],
+    )
+    _insert_monitor_snapshot(
+        conn,
+        swap_asset_id=asset_id,
+        swap_order_id=swap_order_id,
+        snap=leg["entry_monitor"],
+    )
+    return asset_id
+
+
+def execute_swap(
+    conn: Connection,
+    *,
+    trust_product_id: int,
+    source_asset_codes: list[str],
+    candidate_asset_codes: list[str],
+    scheme_id: str,
+    swap_business_date: date,
+    note: str | None = None,
+    executed_by: str | None = None,
+) -> dict[str, Any]:
+    """执行置换：仅写入 asset_swap_* 新表。"""
+    preview = build_swap_preview(
+        conn,
+        trust_product_id=trust_product_id,
+        source_asset_codes=source_asset_codes,
+        candidate_asset_codes=candidate_asset_codes,
+        scheme_id=scheme_id,
+        swap_business_date=swap_business_date,
+    )
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO asset_swap_orders (
+                source_trust_product_id, source_trust_product_name,
+                counterparty_trust_product_id, counterparty_trust_product_name,
+                scheme_id, swap_business_date, status, executed_by, note,
+                source_total_remaining, candidate_total_remaining,
+                source_asset_count, candidate_asset_count
+            ) VALUES (
+                :sid, :sname, :cid, :cname,
+                :scheme_id, :biz_date, 'completed', :executed_by, :note,
+                :stotal, :ctotal, :scount, :ccount
+            )
+            RETURNING id, executed_at
+            """
+        ),
+        {
+            "sid": preview["source_trust_product_id"],
+            "sname": preview["source_trust_product_name"],
+            "cid": preview["counterparty_trust_product_id"],
+            "cname": preview["counterparty_trust_product_name"],
+            "scheme_id": scheme_id,
+            "biz_date": swap_business_date,
+            "executed_by": executed_by,
+            "note": (note or "").strip() or None,
+            "stotal": preview["source_total_remaining"],
+            "ctotal": preview["candidate_total_remaining"],
+            "scount": preview["source_asset_count"],
+            "ccount": preview["candidate_asset_count"],
+        },
+    ).fetchone()
+    order_id = int(row.id)
+    for leg in preview["out_assets"] + preview["in_assets"]:
+        _insert_swap_asset(conn, swap_order_id=order_id, leg=leg)
+    return {
+        "order_id": order_id,
+        "executed_at": _jsonable_val(row.executed_at),
+        "swap_business_date": swap_business_date.isoformat(),
+        "status": "completed",
+        "source_asset_count": preview["source_asset_count"],
+        "candidate_asset_count": preview["candidate_asset_count"],
+    }
+
+
+def _monitor_import_after(
+    conn: Connection,
+    product_ids: list[int],
+    after_ts: Any,
+) -> bool:
+    """置换涉及产品在 executed_at 之后是否有过监控导入。"""
+    if not product_ids:
+        return False
+    placeholders = []
+    params: dict[str, Any] = {"after_ts": after_ts}
+    for i, pid in enumerate(product_ids):
+        key = f"p{i}"
+        placeholders.append(f":{key}")
+        params[key] = int(pid)
+    row = conn.execute(
+        text(
+            f"""
+            SELECT 1
+            FROM assetinfo_pipeline_runs
+            WHERE trust_product_id IN ({', '.join(placeholders)})
+              AND inserted_monitor_count > 0
+              AND created_at > :after_ts
+            LIMIT 1
+            """
+        ),
+        params,
+    ).fetchone()
+    return row is not None
+
+
+def can_void_swap_order(conn: Connection, order: dict[str, Any]) -> tuple[bool, str | None]:
+    if order.get("status") == "voided":
+        return False, "该置换单已失效"
+    pids = [
+        int(order["source_trust_product_id"]),
+        int(order["counterparty_trust_product_id"]),
+    ]
+    if _monitor_import_after(conn, pids, order.get("executed_at")):
+        return False, (
+            "置换后已对相关信托产品进行过新的资产监控表导入，不可失效"
+        )
+    return True, None
+
+
+def list_swap_orders(conn: Connection, limit: int = 50) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT *
+            FROM asset_swap_orders
+            ORDER BY executed_at DESC, id DESC
+            LIMIT :lim
+            """
+        ),
+        {"lim": limit},
+    ).fetchall()
+    items = []
+    for r in rows:
+        d = _row_to_dict(r)
+        ok, reason = can_void_swap_order(conn, d)
+        d["can_void"] = ok
+        d["void_block_reason"] = reason
+        items.append(d)
+    return items
+
+
+def get_swap_order(conn: Connection, order_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        text("SELECT * FROM asset_swap_orders WHERE id = :id"),
+        {"id": order_id},
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="置换单不存在")
+    order = _row_to_dict(row)
+    ok, reason = can_void_swap_order(conn, order)
+    order["can_void"] = ok
+    order["void_block_reason"] = reason
+
+    assets = [
+        _row_to_dict(r)
+        for r in conn.execute(
+            text(
+                """
+                SELECT * FROM asset_swap_assets
+                WHERE swap_order_id = :oid
+                ORDER BY direction, id
+                """
+            ),
+            {"oid": order_id},
+        ).fetchall()
+    ]
+    snaps = [
+        _row_to_dict(r)
+        for r in conn.execute(
+            text(
+                """
+                SELECT * FROM asset_swap_monitor_snapshots
+                WHERE swap_order_id = :oid
+                ORDER BY swap_asset_id, snapshot_role
+                """
+            ),
+            {"oid": order_id},
+        ).fetchall()
+    ]
+    snaps_by_asset: dict[int, dict[str, Any]] = {}
+    for s in snaps:
+        aid = int(s["swap_asset_id"])
+        snaps_by_asset.setdefault(aid, {})[s["snapshot_role"]] = s
+    for a in assets:
+        pair = snaps_by_asset.get(int(a["id"]), {})
+        a["exit_monitor"] = pair.get("exit")
+        a["entry_monitor"] = pair.get("entry")
+    order["out_assets"] = [a for a in assets if a["direction"] == "out"]
+    order["in_assets"] = [a for a in assets if a["direction"] == "in"]
+    return order
+
+
+def void_swap_order(
+    conn: Connection,
+    order_id: int,
+    *,
+    voided_by: str | None = None,
+) -> dict[str, Any]:
+    order = get_swap_order(conn, order_id)
+    ok, reason = can_void_swap_order(conn, order)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason or "不可失效")
+    conn.execute(
+        text(
+            """
+            UPDATE asset_swap_orders
+            SET status = 'voided',
+                voided_at = NOW(),
+                voided_by = :voided_by
+            WHERE id = :id AND status = 'completed'
+            """
+        ),
+        {"id": order_id, "voided_by": voided_by},
+    )
+    return {"order_id": order_id, "status": "voided", "voided_by": voided_by}

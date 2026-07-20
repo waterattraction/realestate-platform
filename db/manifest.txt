@@ -53,3 +53,4 @@ migrations/20260719_issuance_full_columns.sql
 migrations/20260720_monitor_repayment_template_columns.sql
 migrations/20260720_monitor_owner_code_widen.sql
 migrations/20260720_disclosure_snapshots.sql
+migrations/20260720_asset_swap_orders.sql
