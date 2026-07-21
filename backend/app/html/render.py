@@ -1,5 +1,6 @@
 """Overdue workbench HTML — dumb render from get_detail() DTO only."""
 
+import json
 import re
 from datetime import date, datetime, timezone
 from html import escape
@@ -21,6 +22,7 @@ from app.html.formatters import (
 )
 from app.issuance_labels import format_rate, migration_type_label
 from app.overdue.ui_constants import (
+    DELINQUENCY_BUCKET_COLORS,
     FOLLOWUP_CASE_CATEGORIES,
     FOLLOWUP_STATUS_LABELS,
     INTERNAL_STATUS_DEFAULT,
@@ -200,27 +202,17 @@ def _is_selected_asset_item(
     )
 
 
-def render_overdue_workbench_html(
-    dto: dict,
-    *,
-    new_followup: bool = False,
-    new_followup_case: bool = False,
-    followup_expanded: bool = False,
-    followup_entry_id: int | None = None,
-    followup_case_id: int | None = None,
-) -> str:
-    if dto.get("legacy_error"):
-        return _render_legacy_error_page(dto)
-
+def _make_workbench_qs(dto: dict):
+    """Build workbench query-string helper from page/detail DTO."""
     trust_product_id = dto.get("trust_product_id")
     current_asset_code = dto.get("asset_code")
     filters = dto.get("filters") or {}
-    buckets = _filter_buckets(filters)
-    delinquency_bucket = buckets[0] if buckets else ""
     asset = dto.get("asset") or {}
     selected_trust_asset_id = asset.get("selected_trust_asset_id")
 
-    def workbench_qs(trust_asset_id: int | None = None, asset_code: str | None = None) -> str:
+    def workbench_qs(
+        trust_asset_id: int | None = None, asset_code: str | None = None
+    ) -> str:
         parts: list[str] = []
         if trust_product_id is not None:
             parts.append(f"trust_product_id={trust_product_id}")
@@ -235,6 +227,120 @@ def render_overdue_workbench_html(
             parts.append(f"trust_asset_id={tid}")
         _append_list_product_qs(parts, filters)
         return "?" + "&".join(parts) if parts else ""
+
+    return workbench_qs
+
+
+def _compute_followup_pane_state(
+    asset: dict,
+    *,
+    new_followup: bool = False,
+    new_followup_case: bool = False,
+    followup_expanded: bool = False,
+    followup_entry_id: int | None = None,
+    followup_case_id: int | None = None,
+) -> tuple[str, bool, bool]:
+    """Return (initial_followup_pane, force_new_case, scroll_followup)."""
+    followup_entries_for_pane = asset.get("followup_entries") or []
+    followup_cases_for_pane = asset.get("followup_cases") or []
+    initial_followup_pane = ""
+    if followup_entry_id and any(
+        int(e["id"]) == followup_entry_id for e in followup_entries_for_pane
+    ):
+        initial_followup_pane = f"followup-pane-entry-{followup_entry_id}"
+    elif new_followup_case:
+        initial_followup_pane = "followup-pane-new"
+    elif new_followup and followup_cases_for_pane:
+        initial_followup_pane = (
+            f"followup-pane-new-{int(followup_cases_for_pane[0]['id'])}"
+        )
+    elif followup_case_id and not new_followup:
+        case_entries = [
+            e
+            for e in followup_entries_for_pane
+            if int(e.get("case_id") or 0) == int(followup_case_id)
+        ]
+        if case_entries:
+            initial_followup_pane = f"followup-pane-entry-{int(case_entries[0]['id'])}"
+        else:
+            initial_followup_pane = f"followup-pane-new-{int(followup_case_id)}"
+    elif followup_entries_for_pane and not new_followup:
+        latest = max(
+            followup_entries_for_pane,
+            key=lambda e: (str(e.get("created_at") or ""), int(e.get("id") or 0)),
+        )
+        initial_followup_pane = f"followup-pane-entry-{int(latest['id'])}"
+    elif followup_cases_for_pane and not new_followup:
+        initial_followup_pane = (
+            f"followup-pane-new-{int(followup_cases_for_pane[0]['id'])}"
+        )
+    force_new_case = bool(new_followup_case) or (
+        bool(new_followup) and not followup_cases_for_pane
+    )
+    scroll_followup = bool(new_followup or new_followup_case or followup_expanded)
+    return initial_followup_pane, force_new_case, scroll_followup
+
+
+def _build_workbench_detail_meta(
+    dto: dict,
+    *,
+    initial_followup_pane: str,
+    scroll_followup: bool,
+) -> dict:
+    trust_product_id = dto.get("trust_product_id")
+    current_asset_code = dto.get("asset_code")
+    asset = dto.get("asset") or {}
+    workbench_qs = _make_workbench_qs(dto)
+    queue_patch = dto.get("queue_patch") or {}
+    if not queue_patch and current_asset_code:
+        summary = asset.get("summary") or {}
+        queue_patch = {
+            "trust_product_id": trust_product_id,
+            "asset_code": current_asset_code,
+            "internal_status": summary.get("internal_status"),
+            "followup_count": len(asset.get("followup_entries") or []),
+        }
+    status_html = _render_queue_internal_status(queue_patch.get("internal_status"))
+    identity_id = dto.get("identity_id")
+    json_qs = workbench_qs()
+    return {
+        "trust_product_id": trust_product_id,
+        "asset_code": current_asset_code,
+        "identity_id": identity_id,
+        "data_date": dto.get("data_date"),
+        "followup_pane": initial_followup_pane,
+        "scroll_followup": scroll_followup,
+        "json_href": f"/overdue/workbench/detail{json_qs}",
+        "asset_workbench_href": (
+            f"/asset-workbench/{identity_id}" if identity_id else ""
+        ),
+        "queue_patch": {
+            "trust_product_id": queue_patch.get("trust_product_id"),
+            "asset_code": queue_patch.get("asset_code"),
+            "internal_status": queue_patch.get("internal_status"),
+            "followup_count": queue_patch.get("followup_count"),
+            "internal_status_html": status_html,
+        },
+    }
+
+
+def render_workbench_detail_main(
+    dto: dict,
+    *,
+    new_followup: bool = False,
+    new_followup_case: bool = False,
+    followup_expanded: bool = False,
+    followup_entry_id: int | None = None,
+    followup_case_id: int | None = None,
+) -> str:
+    """Render ``<main id="workbench-detail">`` (detail grid + follow-up bar)."""
+    trust_product_id = dto.get("trust_product_id")
+    current_asset_code = dto.get("asset_code")
+    filters = dto.get("filters") or {}
+    buckets = _filter_buckets(filters)
+    delinquency_bucket = buckets[0] if buckets else ""
+    asset = dto.get("asset") or {}
+    workbench_qs = _make_workbench_qs(dto)
 
     product_hidden = (
         f'<input type="hidden" name="trust_product_id" value="{trust_product_id}">'
@@ -252,59 +358,16 @@ def render_overdue_workbench_html(
         else ""
     )
 
-    sidebar_html = _render_sidebar(dto, trust_product_id, current_asset_code, workbench_qs)
     detail_html = _render_panels(dto, asset, workbench_qs)
-    json_qs = workbench_qs()
-    identity_id = dto.get("identity_id")
-    header_actions = _render_header_actions(
-        trust_product_id, json_qs, identity_id, dto=dto
-    )
-    selection_notice = _render_selection_notice(dto.get("selection_notice"))
-    data_date_display = escape(str(dto.get("data_date") or ""))
-    data_date_span = (
-        f' <span class="header-data-date">· 数据日期 {data_date_display}</span>'
-        if data_date_display else ""
+    initial_followup_pane, force_new_case, scroll_followup = _compute_followup_pane_state(
+        asset,
+        new_followup=new_followup,
+        new_followup_case=new_followup_case,
+        followup_expanded=followup_expanded,
+        followup_entry_id=followup_entry_id,
+        followup_case_id=followup_case_id,
     )
     write_bar = ""
-    followup_entries_for_pane = asset.get("followup_entries") or []
-    followup_cases_for_pane = asset.get("followup_cases") or []
-    initial_followup_pane = ""
-    if followup_entry_id and any(
-        int(e["id"]) == followup_entry_id for e in followup_entries_for_pane
-    ):
-        initial_followup_pane = f"followup-pane-entry-{followup_entry_id}"
-    elif new_followup_case:
-        initial_followup_pane = "followup-pane-new"
-    elif new_followup and followup_cases_for_pane:
-        # 组合页「+」：打开当前事项的新建跟进记录
-        initial_followup_pane = (
-            f"followup-pane-new-{int(followup_cases_for_pane[0]['id'])}"
-        )
-    elif followup_case_id and not new_followup:
-        # 指定事项：优先最近一条记录，否则新建记录页
-        case_entries = [
-            e
-            for e in followup_entries_for_pane
-            if int(e.get("case_id") or 0) == int(followup_case_id)
-        ]
-        if case_entries:
-            initial_followup_pane = f"followup-pane-entry-{int(case_entries[0]['id'])}"
-        else:
-            initial_followup_pane = f"followup-pane-new-{int(followup_case_id)}"
-    elif followup_entries_for_pane and not new_followup:
-        # 组合页状态灯：查看最近一条跟进记录
-        latest = max(
-            followup_entries_for_pane,
-            key=lambda e: (str(e.get("created_at") or ""), int(e.get("id") or 0)),
-        )
-        initial_followup_pane = f"followup-pane-entry-{int(latest['id'])}"
-    elif followup_cases_for_pane and not new_followup:
-        initial_followup_pane = (
-            f"followup-pane-new-{int(followup_cases_for_pane[0]['id'])}"
-        )
-    force_new_case = bool(new_followup_case) or (
-        bool(new_followup) and not followup_cases_for_pane
-    )
     if asset.get("selected_split") or asset.get("monitor", {}).get("splits"):
         write_bar = _panel_followup_write(
             product_hidden,
@@ -318,7 +381,102 @@ def render_overdue_workbench_html(
             force_new_case=force_new_case,
         )
 
-    scroll_flag = "1" if (new_followup or new_followup_case or followup_expanded) else "0"
+    meta = _build_workbench_detail_meta(
+        dto,
+        initial_followup_pane=initial_followup_pane,
+        scroll_followup=scroll_followup,
+    )
+    meta_json = escape(json.dumps(meta, ensure_ascii=False, default=str), quote=True)
+    scroll_flag = "1" if scroll_followup else "0"
+    return (
+        f'<main id="workbench-detail" class="detail-main"'
+        f' data-scroll-followup="{scroll_flag}"'
+        f' data-followup-pane="{escape(initial_followup_pane)}"'
+        f' data-wb-meta="{meta_json}">'
+        f"{detail_html}{write_bar}</main>"
+    )
+
+
+def build_workbench_fragment_payload(
+    dto: dict,
+    *,
+    new_followup: bool = False,
+    new_followup_case: bool = False,
+    followup_expanded: bool = False,
+    followup_entry_id: int | None = None,
+    followup_case_id: int | None = None,
+) -> dict:
+    """HTML fragment + meta for partial workbench refresh."""
+    asset = dto.get("asset") or {}
+    initial_followup_pane, _force, scroll_followup = _compute_followup_pane_state(
+        asset,
+        new_followup=new_followup,
+        new_followup_case=new_followup_case,
+        followup_expanded=followup_expanded,
+        followup_entry_id=followup_entry_id,
+        followup_case_id=followup_case_id,
+    )
+    html = render_workbench_detail_main(
+        dto,
+        new_followup=new_followup,
+        new_followup_case=new_followup_case,
+        followup_expanded=followup_expanded,
+        followup_entry_id=followup_entry_id,
+        followup_case_id=followup_case_id,
+    )
+    meta = _build_workbench_detail_meta(
+        dto,
+        initial_followup_pane=initial_followup_pane,
+        scroll_followup=scroll_followup,
+    )
+    return {"html": html, "meta": meta}
+
+
+def render_overdue_workbench_html(
+    dto: dict,
+    *,
+    new_followup: bool = False,
+    new_followup_case: bool = False,
+    followup_expanded: bool = False,
+    followup_entry_id: int | None = None,
+    followup_case_id: int | None = None,
+) -> str:
+    if dto.get("legacy_error"):
+        return _render_legacy_error_page(dto)
+
+    trust_product_id = dto.get("trust_product_id")
+    current_asset_code = dto.get("asset_code")
+    workbench_qs = _make_workbench_qs(dto)
+
+    sidebar_html = _render_sidebar(dto, trust_product_id, current_asset_code, workbench_qs)
+    detail_main = render_workbench_detail_main(
+        dto,
+        new_followup=new_followup,
+        new_followup_case=new_followup_case,
+        followup_expanded=followup_expanded,
+        followup_entry_id=followup_entry_id,
+        followup_case_id=followup_case_id,
+    )
+    json_qs = workbench_qs()
+    identity_id = dto.get("identity_id")
+    header_actions = _render_header_actions(
+        trust_product_id, json_qs, identity_id, dto=dto
+    )
+    selection_notice = _render_selection_notice(dto.get("selection_notice"))
+    data_date_display = escape(str(dto.get("data_date") or ""))
+    data_date_span = (
+        f' <span class="header-data-date">· 数据日期 {data_date_display}</span>'
+        if data_date_display else ""
+    )
+    _pane, _force, scroll_followup = _compute_followup_pane_state(
+        dto.get("asset") or {},
+        new_followup=new_followup,
+        new_followup_case=new_followup_case,
+        followup_expanded=followup_expanded,
+        followup_entry_id=followup_entry_id,
+        followup_case_id=followup_case_id,
+    )
+    scroll_flag = "1" if scroll_followup else "0"
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -328,7 +486,7 @@ def render_overdue_workbench_html(
     <title>资产逾期跟进工作台 · 房地产资产证券化平台</title>
     {_WORKBENCH_CSS}
 </head>
-<body class="workbench-page" data-scroll-followup="{scroll_flag}" data-followup-pane="{escape(initial_followup_pane)}">
+<body class="workbench-page" data-scroll-followup="{scroll_flag}" data-followup-pane="{escape(_pane)}">
 <div class="page-wrap">
 <div class="container">
     <div class="breadcrumb">
@@ -346,10 +504,7 @@ def render_overdue_workbench_html(
         <aside class="sidebar panel">
             {sidebar_html}
         </aside>
-        <main class="detail-main">
-            {detail_html}
-            {write_bar}
-        </main>
+        {detail_main}
     </div>
 </div>
 </div>
@@ -847,13 +1002,14 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
 
     if bucket == "ES":
         overdue_str = "提前结清"
-        od_cls = ""
+        od_style = ""
     elif overdue_days is not None:
         overdue_str = f"{overdue_days}天"
-        od_cls = " summary-warn"
+        od_color = DELINQUENCY_BUCKET_COLORS.get(bucket or "", "#94a3b8")
+        od_style = f" color:{od_color}; font-weight:600;"
     else:
         overdue_str = "—"
-        od_cls = ""
+        od_style = ""
 
     pid = dto.get("trust_product_id")
     ac_raw = asset_code_raw if asset_code_raw != "—" else ""
@@ -998,7 +1154,11 @@ def _render_summary_card(dto: dict, asset: dict) -> str:
     elif sla.get("due_date"):
         sla_badge = ' <span class="badge ok-badge tiny-badge">SLA正常</span>'
 
-    od_inner = f'<span class="summary-warn">{escape(overdue_str)}</span>' if od_cls else escape(overdue_str)
+    od_inner = (
+        f'<span style="{od_style}">{escape(overdue_str)}</span>'
+        if od_style
+        else escape(overdue_str)
+    )
 
     line1 = (
         f"{_summary_chip(asset_code, asset_tip)}"
@@ -1111,6 +1271,30 @@ def _render_check_card(checks: dict | None) -> str:
     </div>"""
 
 
+def _asset_list_signature(asset_list: dict, filters: dict) -> str:
+    """清单状态签名：筛选条件 + 数据日期 + 页首资产（页位置代理）。
+
+    签名一致 = 同一筛选、同一数据页 → 恢复点击前滚动位置；
+    签名变化（改筛选 / 翻页 / 换数据日）→ 对当前资产居中定位。
+    """
+    items = asset_list.get("items") or []
+    first_key = (
+        f"{items[0].get('trust_product_id')}:{items[0].get('asset_code')}"
+        if items
+        else ""
+    )
+    payload = {
+        "pids": filters.get("list_product_ids"),
+        "buckets": filters.get("delinquency_buckets"),
+        "markers": filters.get("trust_markers"),
+        "statuses": filters.get("followup_statuses"),
+        "cities": filters.get("cities"),
+        "dd": asset_list.get("data_date"),
+        "first": first_key,
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def _render_sidebar(
     dto: dict,
     trust_product_id: int | None,
@@ -1118,36 +1302,73 @@ def _render_sidebar(
     workbench_qs,
 ) -> str:
     asset_list = dto.get("asset_list") or {}
+    filters = dto.get("filters") or {}
     asset_list_html = _render_asset_list(
         asset_list,
         trust_product_id,
         current_asset_code,
-        dto.get("filters") or {},
+        filters,
     )
     list_count = len(asset_list.get("items") or [])
     # 清单查询有上限 100：满额时显示 100+
     list_count_label = "100+" if list_count >= 100 else str(list_count)
     sidebar_filter = _render_sidebar_filter(dto)
+    list_sig = escape(_asset_list_signature(asset_list, filters), quote=True)
     return f"""
         <div class="sidebar-section">
             <div class="panel-hd">资产清单 <span class="muted tiny">· {list_count_label}</span></div>
             {sidebar_filter}
-            <div class="queue-body compact-queue" id="asset-queue">{asset_list_html}</div>
+            <div class="queue-body compact-queue" id="asset-queue" data-list-sig="{list_sig}">{asset_list_html}</div>
             <script>
             (function(){{
                 var queue = document.getElementById('asset-queue');
                 if (!queue) return;
+                var sig = queue.getAttribute('data-list-sig') || '';
                 var active = queue.querySelector('.queue-item.active');
-                if (active) {{
-                    active.scrollIntoView({{ block: 'nearest', behavior: 'instant' }});
-                    sessionStorage.removeItem('_queueScroll');
-                    return;
+
+                function centerActive() {{
+                    if (!active) return;
+                    var top = active.offsetTop - queue.offsetTop;
+                    queue.scrollTop = top - (queue.clientHeight - active.offsetHeight) / 2;
                 }}
-                var pos = sessionStorage.getItem('_queueScroll');
-                if (pos !== null) {{
-                    queue.scrollTop = parseInt(pos, 10);
-                    sessionStorage.removeItem('_queueScroll');
+
+                function isActiveVisible() {{
+                    if (!active) return true;
+                    var qr = queue.getBoundingClientRect();
+                    var ar = active.getBoundingClientRect();
+                    return ar.top >= qr.top && ar.bottom <= qr.bottom;
                 }}
+
+                var saved = null;
+                try {{
+                    saved = JSON.parse(sessionStorage.getItem('_queueState') || 'null');
+                }} catch (e) {{ saved = null; }}
+                sessionStorage.removeItem('_queueState');
+                sessionStorage.removeItem('_queueScroll');
+
+                requestAnimationFrame(function() {{
+                    if (saved && saved.sig === sig && typeof saved.top === 'number') {{
+                        // 同筛选、同数据页：恢复点击前位置，选中项保持原位
+                        queue.scrollTop = saved.top;
+                        // 恢复后若选中项仍不可见（极端情况），退回居中
+                        if (!isActiveVisible()) centerActive();
+                        return;
+                    }}
+                    // 翻页 / 改筛选 / 首次进入：选中项居中
+                    if (active) centerActive();
+                }});
+
+                // 点击清单项前保存当前状态（签名 + 滚动位置）
+                queue.addEventListener('mousedown', function(e) {{
+                    if (e.target.closest('.queue-item')) {{
+                        try {{
+                            sessionStorage.setItem('_queueState', JSON.stringify({{
+                                sig: sig,
+                                top: queue.scrollTop
+                            }}));
+                        }} catch (err) {{ /* ignore quota errors */ }}
+                    }}
+                }});
             }})();
             </script>
         </div>
@@ -2891,358 +3112,736 @@ _WORKBENCH_SCRIPTS = """
 <script>
 """ + _ATTACHMENT_OPEN_SCRIPT + _ATTACHMENT_UPLOADER_SCRIPT + """
 document.addEventListener('DOMContentLoaded', function() {
-    var writeBar = document.getElementById('followup-entry-form');
-    var expandBtn = document.getElementById('followup-expand-btn');
-    var expandToggle = document.getElementById('followup-expand');
-    var collapseBtn = document.getElementById('followup-collapse');
+    var detailLoadSeq = 0;
+    var detailAbort = null;
+    var detailInitAbort = null;
+    var markerDocBound = false;
 
-    function setWriteExpanded(expanded) {
-        if (!writeBar) return;
-        writeBar.dataset.expanded = expanded ? '1' : '0';
-        var toggles = [expandToggle, expandBtn, collapseBtn];
-        toggles.forEach(function(el) {
-            if (el) el.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    function parseDetailMeta(root) {
+        if (!root) return {};
+        try {
+            return JSON.parse(root.getAttribute('data-wb-meta') || '{}');
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function revokeAttachmentUrls(root) {
+        if (!root) return;
+        root.querySelectorAll('.attachment-uploader').forEach(function(el) {
+            if (el._objectUrls) {
+                el._objectUrls.forEach(function(url) { URL.revokeObjectURL(url); });
+                el._objectUrls.clear();
+            }
         });
-        var icon = writeBar.querySelector('.write-toggle-icon');
-        if (icon) icon.textContent = expanded ? '▼' : '▶';
     }
 
-    function expandWriteBar() {
-        setWriteExpanded(true);
-        if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    function detailHasUnsavedEdit(root) {
+        if (!root) return false;
+        var shell = root.querySelector('.followup-entry-shell:not(.followup-entry-shell--create)[data-editing="1"]');
+        return !!shell;
     }
 
-    if (expandBtn) expandBtn.addEventListener('click', expandWriteBar);
-    if (expandToggle) {
-        expandToggle.addEventListener('click', function() {
-            if (writeBar && writeBar.dataset.expanded === '1') {
-                setWriteExpanded(false);
+    function confirmLeaveUnsaved(root) {
+        if (!detailHasUnsavedEdit(root)) return true;
+        return confirm('有未保存修改，是否放弃？');
+    }
+
+    function setActiveQueueItem(pid, assetCode) {
+        var queue = document.getElementById('asset-queue');
+        if (!queue) return null;
+        var active = null;
+        queue.querySelectorAll('.queue-item').forEach(function(item) {
+            var id = item.id || '';
+            var expect = 'asset-' + pid + '-' + assetCode;
+            var isActive = id === expect;
+            item.classList.toggle('active', isActive);
+            if (isActive) active = item;
+        });
+        return active;
+    }
+
+    function applyQueuePatch(meta) {
+        var patch = (meta && meta.queue_patch) || {};
+        var pid = patch.trust_product_id;
+        var ac = patch.asset_code;
+        if (pid == null || !ac) return;
+        var item = document.getElementById('asset-' + pid + '-' + ac);
+        if (!item) return;
+        if (patch.internal_status_html) {
+            var cell = item.querySelector('.queue-status, .internal-status-cell');
+            if (cell) {
+                var wrap = document.createElement('div');
+                wrap.innerHTML = patch.internal_status_html;
+                var next = wrap.firstElementChild;
+                if (next) cell.replaceWith(next);
+            }
+        }
+    }
+
+    function applyHeaderMeta(meta) {
+        if (!meta) return;
+        var links = document.querySelector('.header-tool-links');
+        if (!links) return;
+        var jsonLink = null;
+        var awLink = null;
+        links.querySelectorAll('a.header-tool-link').forEach(function(a) {
+            var href = a.getAttribute('href') || '';
+            if (href.indexOf('/overdue/workbench/detail') === 0) jsonLink = a;
+            if (href.indexOf('/asset-workbench/') === 0) awLink = a;
+        });
+        if (jsonLink && meta.json_href) jsonLink.setAttribute('href', meta.json_href);
+        if (meta.asset_workbench_href) {
+            if (awLink) {
+                awLink.setAttribute('href', meta.asset_workbench_href);
             } else {
-                expandWriteBar();
+                var a = document.createElement('a');
+                a.className = 'header-tool-link';
+                a.href = meta.asset_workbench_href;
+                a.textContent = 'Asset Workbench';
+                links.appendChild(a);
             }
-        });
-    }
-    if (collapseBtn) collapseBtn.addEventListener('click', function() { setWriteExpanded(false); });
-
-    if (document.body.dataset.scrollFollowup === '1') {
-        expandWriteBar();
+        } else if (awLink) {
+            awLink.remove();
+        }
     }
 
-    function refreshAttachmentUploadLabel(shell) {
-        if (!shell) return;
-        var uploader = shell.querySelector('.attachment-uploader');
-        var toggle = shell.querySelector('.attachment-upload-toggle');
-        if (!uploader || !toggle) return;
-        var maxFiles = parseInt(uploader.dataset.maxFiles || '10', 10);
-        var base = parseInt(uploader.dataset.existingCount || '0', 10);
-        var removed = shell.querySelectorAll('.remove-attachment-input').length;
-        var pending = uploader._attachmentPool ? uploader._attachmentPool.files.length : 0;
-        var current = Math.max(0, base - removed) + pending;
-        toggle.textContent = (toggle.textContent.indexOf('添加') >= 0 ? '添加附件' : '追加附件')
-            + '（' + current + '/' + maxFiles + '）';
+    function syncHiddenFilters(meta) {
+        var form = document.getElementById('sf-form');
+        if (!form || !meta) return;
+        var pidInput = form.querySelector('input[name="trust_product_id"]');
+        var acInput = form.querySelector('input[name="asset_code"]');
+        if (pidInput && meta.trust_product_id != null) {
+            pidInput.value = String(meta.trust_product_id);
+        }
+        if (acInput && meta.asset_code) {
+            acInput.value = String(meta.asset_code);
+        }
     }
 
-    function restoreRemovedAttachments(shell) {
-        if (!shell) return;
-        shell.querySelectorAll('.attachment-chip-saved.marked-removed').forEach(function(chip) {
-            chip.classList.remove('marked-removed');
-            chip.hidden = false;
-        });
-        shell.querySelectorAll('.remove-attachment-input').forEach(function(el) {
-            el.remove();
-        });
-        shell.querySelectorAll('.followup-saved-attachments-empty').forEach(function(el) {
-            el.remove();
-        });
-        refreshAttachmentUploadLabel(shell);
+    function setDetailLoading(loading) {
+        var root = document.getElementById('workbench-detail');
+        if (!root) return;
+        root.classList.toggle('is-loading', !!loading);
     }
 
-    function initSavedAttachmentRemovers(shell) {
-        if (!shell) return;
-        shell.querySelectorAll('.attachment-saved-remove').forEach(function(btn) {
-            if (btn.dataset.bound === '1') return;
-            btn.dataset.bound = '1';
-            btn.addEventListener('click', function(e) {
-                e.preventDefault();
-                e.stopPropagation();
-                var chip = btn.closest('.attachment-chip-saved');
-                if (!chip || chip.classList.contains('marked-removed')) return;
-                var aid = chip.dataset.attachmentId;
-                var form = shell.querySelector('.followup-entry-form');
-                if (!form || !aid) return;
-                chip.classList.add('marked-removed');
-                chip.hidden = true;
-                var input = document.createElement('input');
-                input.type = 'hidden';
-                input.name = 'remove_attachment_ids';
-                input.value = aid;
-                input.className = 'remove-attachment-input';
-                form.appendChild(input);
-                refreshAttachmentUploadLabel(shell);
-                var list = shell.querySelector('.followup-saved-attachments');
-                if (list && !list.querySelector('.attachment-chip-saved:not(.marked-removed)')) {
-                    if (!list.querySelector('.followup-saved-attachments-empty')) {
-                        var span = document.createElement('span');
-                        span.className = 'muted followup-saved-attachments-empty';
-                        span.textContent = '—';
-                        list.appendChild(span);
+    function pageUrlToFragmentUrl(pageUrl) {
+        var url = new URL(pageUrl, window.location.origin);
+        url.pathname = '/overdue/workbench/fragment';
+        return url.toString();
+    }
+
+    function initWorkbenchDetail(root) {
+        if (!root) return;
+        if (detailInitAbort) detailInitAbort.abort();
+        detailInitAbort = new AbortController();
+        var signal = detailInitAbort.signal;
+        var opts = { signal: signal };
+
+        var writeBar = root.querySelector('#followup-entry-form') || document.getElementById('followup-entry-form');
+        var expandBtn = root.querySelector('#followup-expand-btn');
+        var expandToggle = root.querySelector('#followup-expand');
+        var collapseBtn = root.querySelector('#followup-collapse');
+
+        function setWriteExpanded(expanded) {
+            if (!writeBar) return;
+            writeBar.dataset.expanded = expanded ? '1' : '0';
+            [expandToggle, expandBtn, collapseBtn].forEach(function(el) {
+                if (el) el.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+            });
+            var icon = writeBar.querySelector('.write-toggle-icon');
+            if (icon) icon.textContent = expanded ? '▼' : '▶';
+        }
+
+        function expandWriteBar() {
+            setWriteExpanded(true);
+            if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        if (expandBtn) expandBtn.addEventListener('click', expandWriteBar, opts);
+        if (expandToggle) {
+            expandToggle.addEventListener('click', function() {
+                if (writeBar && writeBar.dataset.expanded === '1') setWriteExpanded(false);
+                else expandWriteBar();
+            }, opts);
+        }
+        if (collapseBtn) {
+            collapseBtn.addEventListener('click', function() { setWriteExpanded(false); }, opts);
+        }
+
+        var scrollFlag = root.getAttribute('data-scroll-followup') || document.body.dataset.scrollFollowup || '0';
+        if (scrollFlag === '1') expandWriteBar();
+
+        function refreshAttachmentUploadLabel(shell) {
+            if (!shell) return;
+            var uploader = shell.querySelector('.attachment-uploader');
+            var toggle = shell.querySelector('.attachment-upload-toggle');
+            if (!uploader || !toggle) return;
+            var maxFiles = parseInt(uploader.dataset.maxFiles || '10', 10);
+            var base = parseInt(uploader.dataset.existingCount || '0', 10);
+            var removed = shell.querySelectorAll('.remove-attachment-input').length;
+            var pending = uploader._attachmentPool ? uploader._attachmentPool.files.length : 0;
+            var current = Math.max(0, base - removed) + pending;
+            toggle.textContent = (toggle.textContent.indexOf('添加') >= 0 ? '添加附件' : '追加附件')
+                + '（' + current + '/' + maxFiles + '）';
+        }
+
+        function restoreRemovedAttachments(shell) {
+            if (!shell) return;
+            shell.querySelectorAll('.attachment-chip-saved.marked-removed').forEach(function(chip) {
+                chip.classList.remove('marked-removed');
+                chip.hidden = false;
+            });
+            shell.querySelectorAll('.remove-attachment-input').forEach(function(el) { el.remove(); });
+            shell.querySelectorAll('.followup-saved-attachments-empty').forEach(function(el) { el.remove(); });
+            refreshAttachmentUploadLabel(shell);
+        }
+
+        function initSavedAttachmentRemovers(shell) {
+            if (!shell) return;
+            shell.querySelectorAll('.attachment-saved-remove').forEach(function(btn) {
+                if (btn.dataset.bound === '1') return;
+                btn.dataset.bound = '1';
+                btn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    var chip = btn.closest('.attachment-chip-saved');
+                    if (!chip || chip.classList.contains('marked-removed')) return;
+                    var aid = chip.dataset.attachmentId;
+                    var form = shell.querySelector('.followup-entry-form');
+                    if (!form || !aid) return;
+                    chip.classList.add('marked-removed');
+                    chip.hidden = true;
+                    var input = document.createElement('input');
+                    input.type = 'hidden';
+                    input.name = 'remove_attachment_ids';
+                    input.value = aid;
+                    input.className = 'remove-attachment-input';
+                    form.appendChild(input);
+                    refreshAttachmentUploadLabel(shell);
+                    var list = shell.querySelector('.followup-saved-attachments');
+                    if (list && !list.querySelector('.attachment-chip-saved:not(.marked-removed)')) {
+                        if (!list.querySelector('.followup-saved-attachments-empty')) {
+                            var span = document.createElement('span');
+                            span.className = 'muted followup-saved-attachments-empty';
+                            span.textContent = '—';
+                            list.appendChild(span);
+                        }
                     }
-                }
+                }, opts);
             });
-        });
-    }
-
-    function cancelEntryEdit(shell) {
-        if (!shell) return;
-        var form = shell.querySelector('.followup-entry-form');
-        if (form) form.reset();
-        restoreRemovedAttachments(shell);
-        shell.dataset.editing = '0';
-        shell.querySelectorAll('.attachment-upload-panel').forEach(function(panel) {
-            panel.hidden = true;
-        });
-        shell.querySelectorAll('.attachment-upload-toggle').forEach(function(btn) {
-            btn.setAttribute('aria-expanded', 'false');
-        });
-    }
-
-    function startEntryEdit(shell) {
-        if (!shell) return;
-        shell.dataset.editing = '1';
-        initSavedAttachmentRemovers(shell);
-        refreshAttachmentUploadLabel(shell);
-    }
-
-    function paneHasUnsavedEdit(pane) {
-        var shell = pane && pane.querySelector('.followup-entry-shell:not(.followup-entry-shell--create)');
-        return shell && shell.dataset.editing === '1';
-    }
-
-    function switchFollowupCase(caseId) {
-        if (!caseId && caseId !== 0) return;
-        var id = String(caseId);
-        if (writeBar) writeBar.dataset.activeCase = id;
-        document.querySelectorAll('.case-chip').forEach(function(chip) {
-            chip.classList.toggle('active', String(chip.dataset.caseId) === id);
-        });
-        document.querySelectorAll('.followup-case-panel').forEach(function(panel) {
-            panel.classList.toggle('active', String(panel.dataset.casePanel) === id);
-        });
-        document.querySelectorAll('.followup-entries-block').forEach(function(block) {
-            block.classList.toggle('active', String(block.dataset.caseEntries) === id);
-        });
-    }
-
-    function switchFollowupPane(paneId) {
-        if (!paneId) return;
-        var targetPane = document.getElementById(paneId);
-        if (!targetPane) return;
-        var block = targetPane.closest('.followup-entries-block');
-        if (block && block.dataset.caseEntries) {
-            switchFollowupCase(block.dataset.caseEntries);
         }
-        var scope = block || document;
-        var activePane = scope.querySelector('.followup-pane.active');
-        if (activePane && activePane.id !== paneId && paneHasUnsavedEdit(activePane)) {
-            if (!confirm('有未保存修改，是否放弃？')) return;
-            var activeShell = activePane.querySelector('.followup-entry-shell');
-            cancelEntryEdit(activeShell);
-        }
-        scope.querySelectorAll('.followup-pane').forEach(function(pane) {
-            pane.classList.toggle('active', pane.id === paneId);
-        });
-        scope.querySelectorAll('.entry-tab').forEach(function(tab) {
-            tab.classList.toggle('active', tab.dataset.pane === paneId);
-        });
-    }
 
-    document.querySelectorAll('.case-chip').forEach(function(chip) {
-        chip.addEventListener('click', function() {
-            switchFollowupCase(chip.dataset.caseId);
-            if (chip.dataset.caseId !== 'new') {
-                var newPane = document.getElementById('followup-pane-new-' + chip.dataset.caseId);
-                if (newPane) switchFollowupPane(newPane.id);
+        function cancelEntryEdit(shell) {
+            if (!shell) return;
+            var form = shell.querySelector('.followup-entry-form');
+            if (form) form.reset();
+            restoreRemovedAttachments(shell);
+            shell.dataset.editing = '0';
+            shell.querySelectorAll('.attachment-upload-panel').forEach(function(panel) { panel.hidden = true; });
+            shell.querySelectorAll('.attachment-upload-toggle').forEach(function(btn) {
+                btn.setAttribute('aria-expanded', 'false');
+            });
+        }
+
+        function startEntryEdit(shell) {
+            if (!shell) return;
+            shell.dataset.editing = '1';
+            initSavedAttachmentRemovers(shell);
+            refreshAttachmentUploadLabel(shell);
+        }
+
+        function paneHasUnsavedEdit(pane) {
+            var shell = pane && pane.querySelector('.followup-entry-shell:not(.followup-entry-shell--create)');
+            return shell && shell.dataset.editing === '1';
+        }
+
+        function switchFollowupCase(caseId) {
+            if (!caseId && caseId !== 0) return;
+            var id = String(caseId);
+            if (writeBar) writeBar.dataset.activeCase = id;
+            root.querySelectorAll('.case-chip').forEach(function(chip) {
+                chip.classList.toggle('active', String(chip.dataset.caseId) === id);
+            });
+            root.querySelectorAll('.followup-case-panel').forEach(function(panel) {
+                panel.classList.toggle('active', String(panel.dataset.casePanel) === id);
+            });
+            root.querySelectorAll('.followup-entries-block').forEach(function(block) {
+                block.classList.toggle('active', String(block.dataset.caseEntries) === id);
+            });
+        }
+
+        function switchFollowupPane(paneId) {
+            if (!paneId) return;
+            var targetPane = document.getElementById(paneId);
+            if (!targetPane) return;
+            var block = targetPane.closest('.followup-entries-block');
+            if (block && block.dataset.caseEntries) {
+                switchFollowupCase(block.dataset.caseEntries);
             }
-            expandWriteBar();
-        });
-    });
-
-    document.querySelectorAll('.entry-tab').forEach(function(tab) {
-        tab.addEventListener('click', function() {
-            switchFollowupPane(tab.dataset.pane);
-        });
-    });
-
-    document.querySelectorAll('.entry-edit-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            if (btn.disabled) return;
-            var shell = btn.closest('.followup-entry-shell');
-            startEntryEdit(shell);
-        });
-    });
-
-    document.querySelectorAll('.entry-cancel-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            cancelEntryEdit(btn.closest('.followup-entry-shell'));
-        });
-    });
-
-    function followupApiError(data) {
-        if (!data) return '操作失败';
-        if (typeof data.detail === 'string') return data.detail;
-        if (Array.isArray(data.detail)) {
-            return data.detail.map(function(d) {
-                return d.msg || JSON.stringify(d);
-            }).join('; ') || '操作失败';
-        }
-        return data.message || '操作失败';
-    }
-
-    function reloadWorkbenchAfterFollowup(data) {
-        var url = new URL(window.location.href);
-        url.searchParams.set('followup_expanded', '1');
-        url.searchParams.delete('new_followup');
-        url.searchParams.delete('new_followup_case');
-        var caseId = data && data.case_id != null ? data.case_id : null;
-        var entryId = data && data.entry_id != null ? data.entry_id : null;
-        if (data && data.deleted) entryId = null;
-        if (caseId != null) url.searchParams.set('followup_case_id', String(caseId));
-        else url.searchParams.delete('followup_case_id');
-        if (entryId != null) url.searchParams.set('followup_entry_id', String(entryId));
-        else url.searchParams.delete('followup_entry_id');
-        window.location.replace(url.toString());
-    }
-
-    function submitFollowupForm(form, extraDisableEls) {
-        if (!form || form.dataset.submitting === '1') return;
-        form.dataset.submitting = '1';
-        var fd = new FormData(form);
-        fd.delete('redirect_to_workbench');
-        var btns = Array.prototype.slice.call(
-            form.querySelectorAll('button[type="submit"]')
-        );
-        if (extraDisableEls && extraDisableEls.length) {
-            extraDisableEls.forEach(function(el) {
-                if (el && btns.indexOf(el) < 0) btns.push(el);
+            var scope = block || root;
+            var activePane = scope.querySelector('.followup-pane.active');
+            if (activePane && activePane.id !== paneId && paneHasUnsavedEdit(activePane)) {
+                if (!confirm('有未保存修改，是否放弃？')) return;
+                cancelEntryEdit(activePane.querySelector('.followup-entry-shell'));
+            }
+            scope.querySelectorAll('.followup-pane').forEach(function(pane) {
+                pane.classList.toggle('active', pane.id === paneId);
+            });
+            scope.querySelectorAll('.entry-tab').forEach(function(tab) {
+                tab.classList.toggle('active', tab.dataset.pane === paneId);
             });
         }
-        btns.forEach(function(b) { b.disabled = true; });
-        fetch(form.getAttribute('action') || form.action, {
-            method: 'POST',
-            body: fd,
-            credentials: 'same-origin',
-            headers: { 'Accept': 'application/json' }
-        }).then(function(res) {
-            return res.text().then(function(text) {
-                var data = {};
-                if (text) {
-                    try { data = JSON.parse(text); }
-                    catch (e) { data = { detail: text }; }
+
+        function followupApiError(data) {
+            if (!data) return '操作失败';
+            if (typeof data.detail === 'string') return data.detail;
+            if (Array.isArray(data.detail)) {
+                return data.detail.map(function(d) {
+                    return d.msg || JSON.stringify(d);
+                }).join('; ') || '操作失败';
+            }
+            return data.message || '操作失败';
+        }
+
+        function reloadWorkbenchAfterFollowup(data) {
+            var url = new URL(window.location.href);
+            url.searchParams.set('followup_expanded', '1');
+            url.searchParams.delete('new_followup');
+            url.searchParams.delete('new_followup_case');
+            var caseId = data && data.case_id != null ? data.case_id : null;
+            var entryId = data && data.entry_id != null ? data.entry_id : null;
+            if (data && data.deleted) entryId = null;
+            if (caseId != null) url.searchParams.set('followup_case_id', String(caseId));
+            else url.searchParams.delete('followup_case_id');
+            if (entryId != null) url.searchParams.set('followup_entry_id', String(entryId));
+            else url.searchParams.delete('followup_entry_id');
+            loadWorkbenchDetail(url.toString(), { history: 'replace', skipUnsavedCheck: true });
+        }
+
+        function submitFollowupForm(form, extraDisableEls) {
+            if (!form || form.dataset.submitting === '1') return;
+            form.dataset.submitting = '1';
+            var fd = new FormData(form);
+            fd.delete('redirect_to_workbench');
+            var btns = Array.prototype.slice.call(form.querySelectorAll('button[type="submit"]'));
+            if (extraDisableEls && extraDisableEls.length) {
+                extraDisableEls.forEach(function(el) {
+                    if (el && btns.indexOf(el) < 0) btns.push(el);
+                });
+            }
+            btns.forEach(function(b) { b.disabled = true; });
+            fetch(form.getAttribute('action') || form.action, {
+                method: 'POST',
+                body: fd,
+                credentials: 'same-origin',
+                headers: { 'Accept': 'application/json' }
+            }).then(function(res) {
+                return res.text().then(function(text) {
+                    var data = {};
+                    if (text) {
+                        try { data = JSON.parse(text); }
+                        catch (e) { data = { detail: text }; }
+                    }
+                    if (!res.ok) throw new Error(followupApiError(data));
+                    reloadWorkbenchAfterFollowup(data || {});
+                });
+            }).catch(function(err) {
+                form.dataset.submitting = '0';
+                btns.forEach(function(b) { b.disabled = false; });
+                alert(err.message || '操作失败');
+            });
+        }
+
+        if (writeBar) {
+            writeBar.addEventListener('submit', function(e) {
+                var form = e.target;
+                if (!form || form.tagName !== 'FORM') return;
+                if (!form.querySelector('[name="redirect_to_workbench"]')) return;
+                e.preventDefault();
+                submitFollowupForm(form);
+            }, opts);
+        }
+
+        root.addEventListener('click', function(e) {
+            var chip = e.target.closest('.case-chip');
+            if (chip && root.contains(chip)) {
+                switchFollowupCase(chip.dataset.caseId);
+                if (chip.dataset.caseId !== 'new') {
+                    var newPane = document.getElementById('followup-pane-new-' + chip.dataset.caseId);
+                    if (newPane) switchFollowupPane(newPane.id);
                 }
-                if (!res.ok) throw new Error(followupApiError(data));
-                reloadWorkbenchAfterFollowup(data || {});
+                expandWriteBar();
+                return;
+            }
+            var tab = e.target.closest('.entry-tab');
+            if (tab && root.contains(tab)) {
+                switchFollowupPane(tab.dataset.pane);
+                return;
+            }
+            var editBtn = e.target.closest('.entry-edit-btn');
+            if (editBtn && root.contains(editBtn)) {
+                if (editBtn.disabled) return;
+                startEntryEdit(editBtn.closest('.followup-entry-shell'));
+                return;
+            }
+            var cancelBtn = e.target.closest('.entry-cancel-btn');
+            if (cancelBtn && root.contains(cancelBtn)) {
+                cancelEntryEdit(cancelBtn.closest('.followup-entry-shell'));
+                return;
+            }
+            var delBtn = e.target.closest('.entry-delete-btn');
+            if (delBtn && root.contains(delBtn)) {
+                if (delBtn.disabled) return;
+                if (!confirm('确定删除该条跟进记录？此操作不可恢复。')) return;
+                var shell = delBtn.closest('.followup-entry-shell');
+                var form = shell && shell.querySelector('.entry-delete-form');
+                if (form) submitFollowupForm(form, [delBtn]);
+                return;
+            }
+            var uploadToggle = e.target.closest('.attachment-upload-toggle');
+            if (uploadToggle && root.contains(uploadToggle)) {
+                var wrap = uploadToggle.closest('.followup-attachment-upload');
+                var panel = wrap && wrap.querySelector('.attachment-upload-panel');
+                if (!panel) return;
+                var open = panel.hidden;
+                panel.hidden = !open;
+                uploadToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+                return;
+            }
+            var citeBtn = e.target.closest('.entry-cite-btn');
+            if (citeBtn && root.contains(citeBtn)) {
+                var block = citeBtn.closest('.followup-entries-block');
+                var caseId = block && block.dataset.caseEntries;
+                var form = caseId
+                    ? document.getElementById('followup-form-' + caseId)
+                    : root.querySelector('.followup-entries-block.active .followup-entry-shell--create form');
+                if (!form) return;
+                var owner = form.querySelector('[name="owner_name"]');
+                var reason = form.querySelector('[name="overdue_reason"]');
+                var plan = form.querySelector('[name="follow_up_plan"]');
+                if (owner) owner.value = citeBtn.dataset.owner || '';
+                if (reason) reason.value = citeBtn.dataset.reason || '';
+                if (plan) plan.value = citeBtn.dataset.plan || '';
+                if (caseId) switchFollowupPane('followup-pane-new-' + caseId);
+                if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                return;
+            }
+            var tlToggle = e.target.closest('.tl-case-toggle');
+            if (tlToggle && root.contains(tlToggle)) {
+                var tlBlock = tlToggle.closest('.tl-case-block');
+                if (!tlBlock) return;
+                var tlOpen = !tlBlock.classList.contains('is-open');
+                tlBlock.classList.toggle('is-open', tlOpen);
+                tlToggle.setAttribute('aria-expanded', tlOpen ? 'true' : 'false');
+                var detail = tlBlock.querySelector('.tl-case-detail');
+                if (detail) detail.hidden = !tlOpen;
+                return;
+            }
+            var gotoEntry = e.target.closest('.timeline-goto-entry');
+            if (gotoEntry && root.contains(gotoEntry)) {
+                if (gotoEntry.dataset.caseId) switchFollowupCase(gotoEntry.dataset.caseId);
+                if (gotoEntry.dataset.entryPane) switchFollowupPane(gotoEntry.dataset.entryPane);
+                expandWriteBar();
+                if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                return;
+            }
+            var statusOpen = e.target.closest('.summary-status-open');
+            if (statusOpen && root.contains(statusOpen)) {
+                expandWriteBar();
+                if (writeBar && writeBar.dataset.activeCase && writeBar.dataset.activeCase !== 'new') {
+                    switchFollowupCase(writeBar.dataset.activeCase);
+                }
+                if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                return;
+            }
+            var newCaseBtn = e.target.closest('.summary-new-case-btn');
+            if (newCaseBtn && root.contains(newCaseBtn)) {
+                switchFollowupCase('new');
+                expandWriteBar();
+                if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                return;
+            }
+            var clearBtn = e.target.closest('.followup-clear-btn');
+            if (clearBtn && root.contains(clearBtn)) {
+                var clearForm = clearBtn.closest('form');
+                if (!clearForm) return;
+                clearForm.reset();
+                var uploader = clearForm.querySelector('.attachment-uploader');
+                if (uploader && uploader.clearAttachmentUploader) uploader.clearAttachmentUploader();
+                clearForm.querySelectorAll('.attachment-upload-panel').forEach(function(panel) { panel.hidden = true; });
+                clearForm.querySelectorAll('.attachment-upload-toggle').forEach(function(btn) {
+                    btn.setAttribute('aria-expanded', 'false');
+                });
+                return;
+            }
+            var markerBadge = e.target.closest('.trust-marker-badge');
+            if (markerBadge && root.contains(markerBadge)) {
+                e.stopPropagation();
+                var cell = markerBadge.closest('.trust-marker-cell');
+                var menu = cell && cell.querySelector('.trust-marker-menu');
+                if (!cell || !menu) return;
+                var open = !cell.classList.contains('is-open');
+                root.querySelectorAll('.trust-marker-cell.is-open').forEach(function(c) {
+                    if (c !== cell) {
+                        c.classList.remove('is-open');
+                        var m = c.querySelector('.trust-marker-menu');
+                        var b = c.querySelector('.trust-marker-badge');
+                        if (m) m.hidden = true;
+                        if (b) b.setAttribute('aria-expanded', 'false');
+                    }
+                });
+                cell.classList.toggle('is-open', open);
+                menu.hidden = !open;
+                markerBadge.setAttribute('aria-expanded', open ? 'true' : 'false');
+                return;
+            }
+            var markerOpt = e.target.closest('.trust-marker-option');
+            if (markerOpt && root.contains(markerOpt)) {
+                e.stopPropagation();
+                var mCell = markerOpt.closest('.trust-marker-cell');
+                if (!mCell) return;
+                root.querySelectorAll('.trust-marker-cell.is-open').forEach(function(c) {
+                    c.classList.remove('is-open');
+                    var m = c.querySelector('.trust-marker-menu');
+                    var b = c.querySelector('.trust-marker-badge');
+                    if (m) m.hidden = true;
+                    if (b) b.setAttribute('aria-expanded', 'false');
+                });
+                var value = markerOpt.dataset.value;
+                if (!value || value === mCell.dataset.value) return;
+                saveMarker(mCell, value);
+                return;
+            }
+        }, opts);
+
+        function saveMarker(cell, value) {
+            var MARKER_VISUAL = {
+                '无标记': { tone: 'none', short: '无' },
+                '已关注': { tone: 'watch', short: '已关注' },
+                '重点关注': { tone: 'focus', short: '重点关注' }
+            };
+            var field = cell.dataset.field || 'trust_marker';
+            var payload = {
+                trust_product_id: parseInt(cell.dataset.trustProductId, 10),
+                asset_code: cell.dataset.assetCode,
+                data_date: cell.dataset.dataDate
+            };
+            payload[field] = value;
+            cell.classList.remove('saved', 'error');
+            cell.classList.add('saving');
+            fetch('/overdue/custody-marks', {
+                method: 'PATCH',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(function(res) {
+                return res.json().then(function(data) {
+                    cell.classList.remove('saving');
+                    if (!res.ok) {
+                        cell.classList.add('error');
+                        throw new Error(data.detail || '保存失败');
+                    }
+                    var vis = MARKER_VISUAL[value] || { tone: 'none', short: value };
+                    cell.dataset.value = value;
+                    var badge = cell.querySelector('.trust-marker-badge');
+                    var label = cell.querySelector('.trust-marker-label');
+                    var dot = badge && badge.querySelector('.trust-marker-dot');
+                    if (badge) {
+                        badge.className = 'trust-marker-badge tone-' + vis.tone;
+                        badge.title = '信托标记：' + value;
+                        badge.setAttribute('aria-label', '信托标记：' + value + '，点击修改');
+                    }
+                    if (dot) dot.className = 'trust-marker-dot tone-' + vis.tone;
+                    if (label) label.textContent = vis.short;
+                    cell.querySelectorAll('.trust-marker-option').forEach(function(opt) {
+                        var active = opt.dataset.value === value;
+                        opt.classList.toggle('is-active', active);
+                        opt.setAttribute('aria-selected', active ? 'true' : 'false');
+                    });
+                    cell.classList.add('saved');
+                    setTimeout(function() { cell.classList.remove('saved'); }, 1200);
+                });
+            }).catch(function() {
+                cell.classList.remove('saving');
+                cell.classList.add('error');
+            });
+        }
+
+        root.querySelectorAll('.mark-select').forEach(function(sel) {
+            sel.addEventListener('change', function() {
+                var payload = {
+                    trust_product_id: parseInt(this.dataset.product, 10),
+                    asset_code: this.dataset.assetCode,
+                    data_date: this.dataset.date
+                };
+                payload[this.dataset.field] = this.value;
+                fetch('/overdue/custody-marks', {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                }).catch(function() { alert('标注保存失败'); });
+            }, opts);
+        });
+
+        root.querySelectorAll('.mark-inline-group').forEach(function(group) {
+            var display = group.querySelector('.mark-display');
+            var sel = group.querySelector('.mark-select');
+            if (!display || !sel) return;
+            display.addEventListener('dblclick', function() {
+                display.classList.add('mark-edit-hidden');
+                sel.classList.remove('mark-edit-hidden');
+                sel.focus();
+            }, opts);
+            sel.addEventListener('change', function() {
+                display.textContent = this.options[this.selectedIndex].text;
+                sel.classList.add('mark-edit-hidden');
+                display.classList.remove('mark-edit-hidden');
+            }, opts);
+            sel.addEventListener('blur', function() {
+                sel.classList.add('mark-edit-hidden');
+                display.classList.remove('mark-edit-hidden');
+            }, opts);
+        });
+
+        if (!markerDocBound) {
+            markerDocBound = true;
+            document.addEventListener('click', function() {
+                document.querySelectorAll('.trust-marker-cell.is-open').forEach(function(cell) {
+                    cell.classList.remove('is-open');
+                    var menu = cell.querySelector('.trust-marker-menu');
+                    var badge = cell.querySelector('.trust-marker-badge');
+                    if (menu) menu.hidden = true;
+                    if (badge) badge.setAttribute('aria-expanded', 'false');
+                });
+            });
+            document.addEventListener('keydown', function(e) {
+                if (e.key !== 'Escape') return;
+                document.querySelectorAll('.trust-marker-cell.is-open').forEach(function(cell) {
+                    cell.classList.remove('is-open');
+                    var menu = cell.querySelector('.trust-marker-menu');
+                    var badge = cell.querySelector('.trust-marker-badge');
+                    if (menu) menu.hidden = true;
+                    if (badge) badge.setAttribute('aria-expanded', 'false');
+                });
+            });
+        }
+
+        var initialFollowupPane = root.getAttribute('data-followup-pane')
+            || document.body.dataset.followupPane || '';
+        if (initialFollowupPane && document.getElementById(initialFollowupPane)) {
+            switchFollowupPane(initialFollowupPane);
+        } else if (writeBar && writeBar.dataset.activeCase) {
+            switchFollowupCase(writeBar.dataset.activeCase);
+        }
+
+        root.querySelectorAll('.attachment-uploader').forEach(initAttachmentUploader);
+        root.querySelectorAll('.followup-entry-shell:not(.followup-entry-shell--create)').forEach(initSavedAttachmentRemovers);
+
+        // expose for leave-check from navigation
+        root._wbConfirmLeave = function() { return confirmLeaveUnsaved(root); };
+        root._wbExpandWriteBar = expandWriteBar;
+    }
+
+    function replaceDetailMain(html, meta) {
+        var current = document.getElementById('workbench-detail');
+        if (!current) return null;
+        revokeAttachmentUrls(current);
+        if (detailInitAbort) detailInitAbort.abort();
+        var wrap = document.createElement('div');
+        wrap.innerHTML = html;
+        var next = wrap.firstElementChild;
+        if (!next) return null;
+        current.replaceWith(next);
+        var resolvedMeta = meta || parseDetailMeta(next);
+        document.body.dataset.scrollFollowup = next.getAttribute('data-scroll-followup') || '0';
+        document.body.dataset.followupPane = next.getAttribute('data-followup-pane') || '';
+        applyHeaderMeta(resolvedMeta);
+        syncHiddenFilters(resolvedMeta);
+        applyQueuePatch(resolvedMeta);
+        if (resolvedMeta.trust_product_id != null && resolvedMeta.asset_code) {
+            setActiveQueueItem(resolvedMeta.trust_product_id, resolvedMeta.asset_code);
+        }
+        initWorkbenchDetail(next);
+        return next;
+    }
+
+    function loadWorkbenchDetail(pageUrl, options) {
+        options = options || {};
+        var current = document.getElementById('workbench-detail');
+        if (!options.skipUnsavedCheck && current && current._wbConfirmLeave) {
+            if (!current._wbConfirmLeave()) return Promise.resolve(false);
+        }
+        var seq = ++detailLoadSeq;
+        if (detailAbort) detailAbort.abort();
+        detailAbort = new AbortController();
+        setDetailLoading(true);
+        var fragmentUrl = pageUrlToFragmentUrl(pageUrl);
+        return fetch(fragmentUrl, {
+            credentials: 'same-origin',
+            headers: { 'Accept': 'application/json' },
+            signal: detailAbort.signal
+        }).then(function(res) {
+            if (res.redirected && res.url && res.url.indexOf('/login') >= 0) {
+                window.location.href = pageUrl;
+                return null;
+            }
+            if (res.status === 401 || res.status === 403) {
+                window.location.href = pageUrl;
+                return null;
+            }
+            return res.text().then(function(text) {
+                if (seq !== detailLoadSeq) return null;
+                var data = null;
+                try { data = JSON.parse(text); }
+                catch (e) {
+                    // login HTML or unexpected payload
+                    window.location.href = pageUrl;
+                    return null;
+                }
+                if (!res.ok) throw new Error((data && data.detail) || '加载失败');
+                if (!data || !data.html) throw new Error('加载失败');
+                replaceDetailMain(data.html, data.meta || {});
+                if (options.history === 'push') {
+                    history.pushState({ workbenchPartial: true }, '', pageUrl);
+                } else if (options.history === 'replace') {
+                    history.replaceState({ workbenchPartial: true }, '', pageUrl);
+                }
+                return true;
             });
         }).catch(function(err) {
-            form.dataset.submitting = '0';
-            btns.forEach(function(b) { b.disabled = false; });
-            alert(err.message || '操作失败');
+            if (err && err.name === 'AbortError') return false;
+            if (seq !== detailLoadSeq) return false;
+            console.error(err);
+            alert((err && err.message) || '加载资产详情失败，请重试');
+            return false;
+        }).finally(function() {
+            if (seq === detailLoadSeq) setDetailLoading(false);
         });
     }
 
-    if (writeBar) {
-        writeBar.addEventListener('submit', function(e) {
-            var form = e.target;
-            if (!form || form.tagName !== 'FORM') return;
-            if (!form.querySelector('[name="redirect_to_workbench"]')) return;
-            e.preventDefault();
-            submitFollowupForm(form);
-        });
-    }
+    // initial detail bind
+    initWorkbenchDetail(document.getElementById('workbench-detail'));
+    history.replaceState({ workbenchPartial: true }, '', window.location.href);
 
-    document.querySelectorAll('.entry-delete-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            if (btn.disabled) return;
-            if (!confirm('确定删除该条跟进记录？此操作不可恢复。')) return;
-            var shell = btn.closest('.followup-entry-shell');
-            var form = shell && shell.querySelector('.entry-delete-form');
-            if (form) submitFollowupForm(form, [btn]);
-        });
-    });
-
-    document.querySelectorAll('.attachment-upload-toggle').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            var wrap = btn.closest('.followup-attachment-upload');
-            var panel = wrap && wrap.querySelector('.attachment-upload-panel');
-            if (!panel) return;
-            var open = panel.hidden;
-            panel.hidden = !open;
-            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-        });
-    });
-
-    document.querySelectorAll('.entry-cite-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            var block = btn.closest('.followup-entries-block');
-            var caseId = block && block.dataset.caseEntries;
-            var form = caseId
-                ? document.getElementById('followup-form-' + caseId)
-                : document.querySelector('.followup-entries-block.active .followup-entry-shell--create form');
-            if (!form) return;
-            var owner = form.querySelector('[name="owner_name"]');
-            var reason = form.querySelector('[name="overdue_reason"]');
-            var plan = form.querySelector('[name="follow_up_plan"]');
-            if (owner) owner.value = btn.dataset.owner || '';
-            if (reason) reason.value = btn.dataset.reason || '';
-            if (plan) plan.value = btn.dataset.plan || '';
-            if (caseId) switchFollowupPane('followup-pane-new-' + caseId);
-            if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        });
-    });
-
-    var initialFollowupPane = document.body.dataset.followupPane || '';
-    if (initialFollowupPane && document.getElementById(initialFollowupPane)) {
-        switchFollowupPane(initialFollowupPane);
-    } else if (writeBar && writeBar.dataset.activeCase) {
-        switchFollowupCase(writeBar.dataset.activeCase);
-    }
-
-    document.querySelectorAll('.tl-case-toggle').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            var block = btn.closest('.tl-case-block');
-            if (!block) return;
-            var open = !block.classList.contains('is-open');
-            block.classList.toggle('is-open', open);
-            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
-            var detail = block.querySelector('.tl-case-detail');
-            if (detail) detail.hidden = !open;
-        });
-    });
-
-    document.querySelectorAll('.timeline-goto-entry').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            if (btn.dataset.caseId) switchFollowupCase(btn.dataset.caseId);
-            var paneId = btn.dataset.entryPane;
-            if (paneId) switchFollowupPane(paneId);
-            expandWriteBar();
-            if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        });
-    });
-
-    var activeQueueItem = document.querySelector('.compact-queue .queue-item.active');
-    if (activeQueueItem) {
-        activeQueueItem.scrollIntoView({ block: 'nearest', behavior: 'instant' });
-        sessionStorage.removeItem('_queueScroll');
-    }
-
-    // Save scroll position before navigating to a new asset
     var assetQueue = document.getElementById('asset-queue');
     if (assetQueue) {
-        assetQueue.addEventListener('mousedown', function(e) {
-            if (e.target.closest('.queue-item')) {
-                sessionStorage.setItem('_queueScroll', assetQueue.scrollTop);
-            }
+        assetQueue.addEventListener('click', function(e) {
+            var item = e.target.closest('.queue-item');
+            if (!item || !assetQueue.contains(item)) return;
+            if (e.defaultPrevented) return;
+            if (e.button !== 0) return;
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            var href = item.getAttribute('href');
+            if (!href) return;
+            e.preventDefault();
+            loadWorkbenchDetail(href, { history: 'push' });
         });
     }
+
+    window.addEventListener('popstate', function() {
+        loadWorkbenchDetail(window.location.href, { history: 'none', skipUnsavedCheck: true });
+    });
 
     var SIDEBAR_ALL_LABELS = {
         'trust-product': '全部产品',
@@ -3370,175 +3969,6 @@ document.addEventListener('DOMContentLoaded', function() {
     bindSidebarMultiselects(document.getElementById('sf-form'));
     bindSidebarMultiselects(document.querySelector('.workbench-filter'));
 
-    document.querySelectorAll('.mark-select').forEach(function(sel) {
-        sel.addEventListener('change', function() {
-            var payload = {
-                trust_product_id: parseInt(this.dataset.product, 10),
-                asset_code: this.dataset.assetCode,
-                data_date: this.dataset.date
-            };
-            payload[this.dataset.field] = this.value;
-            fetch('/overdue/custody-marks', {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            }).catch(function() { alert('标注保存失败'); });
-        });
-    });
-
-    // Double-click to edit inline mark fields in Summary Card
-    document.querySelectorAll('.mark-inline-group').forEach(function(group) {
-        var display = group.querySelector('.mark-display');
-        var sel = group.querySelector('.mark-select');
-        if (!display || !sel) return;
-        display.addEventListener('dblclick', function() {
-            display.classList.add('mark-edit-hidden');
-            sel.classList.remove('mark-edit-hidden');
-            sel.focus();
-        });
-        sel.addEventListener('change', function() {
-            display.textContent = this.options[this.selectedIndex].text;
-            sel.classList.add('mark-edit-hidden');
-            display.classList.remove('mark-edit-hidden');
-        });
-        sel.addEventListener('blur', function() {
-            sel.classList.add('mark-edit-hidden');
-            display.classList.remove('mark-edit-hidden');
-        });
-    });
-
-    (function() {
-        var MARKER_VISUAL = {
-            '无标记': { tone: 'none', short: '无' },
-            '已关注': { tone: 'watch', short: '已关注' },
-            '重点关注': { tone: 'focus', short: '重点关注' }
-        };
-        function closeAllMarkerMenus(except) {
-            document.querySelectorAll('.trust-marker-cell.is-open').forEach(function(cell) {
-                if (except && cell === except) return;
-                cell.classList.remove('is-open');
-                var menu = cell.querySelector('.trust-marker-menu');
-                var badge = cell.querySelector('.trust-marker-badge');
-                if (menu) menu.hidden = true;
-                if (badge) badge.setAttribute('aria-expanded', 'false');
-            });
-        }
-        function applyMarkerVisual(cell, value) {
-            var vis = MARKER_VISUAL[value] || { tone: 'none', short: value };
-            cell.dataset.value = value;
-            var badge = cell.querySelector('.trust-marker-badge');
-            var label = cell.querySelector('.trust-marker-label');
-            var dot = badge && badge.querySelector('.trust-marker-dot');
-            if (badge) {
-                badge.className = 'trust-marker-badge tone-' + vis.tone;
-                badge.title = '信托标记：' + value;
-                badge.setAttribute('aria-label', '信托标记：' + value + '，点击修改');
-            }
-            if (dot) dot.className = 'trust-marker-dot tone-' + vis.tone;
-            if (label) label.textContent = vis.short;
-            cell.querySelectorAll('.trust-marker-option').forEach(function(opt) {
-                var active = opt.dataset.value === value;
-                opt.classList.toggle('is-active', active);
-                opt.setAttribute('aria-selected', active ? 'true' : 'false');
-            });
-        }
-        function saveMarker(cell, value) {
-            var field = cell.dataset.field || 'trust_marker';
-            var payload = {
-                trust_product_id: parseInt(cell.dataset.trustProductId, 10),
-                asset_code: cell.dataset.assetCode,
-                data_date: cell.dataset.dataDate
-            };
-            payload[field] = value;
-            cell.classList.remove('saved', 'error');
-            cell.classList.add('saving');
-            fetch('/overdue/custody-marks', {
-                method: 'PATCH',
-                credentials: 'same-origin',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            }).then(function(res) {
-                return res.json().then(function(data) {
-                    cell.classList.remove('saving');
-                    if (!res.ok) {
-                        cell.classList.add('error');
-                        throw new Error(data.detail || '保存失败');
-                    }
-                    applyMarkerVisual(cell, value);
-                    cell.classList.add('saved');
-                    setTimeout(function() { cell.classList.remove('saved'); }, 1200);
-                });
-            }).catch(function() {
-                cell.classList.remove('saving');
-                cell.classList.add('error');
-            });
-        }
-        document.querySelectorAll('.trust-marker-cell').forEach(function(cell) {
-            var badge = cell.querySelector('.trust-marker-badge');
-            var menu = cell.querySelector('.trust-marker-menu');
-            if (!badge || !menu) return;
-            badge.addEventListener('click', function(e) {
-                e.stopPropagation();
-                var open = !cell.classList.contains('is-open');
-                closeAllMarkerMenus(open ? cell : null);
-                cell.classList.toggle('is-open', open);
-                menu.hidden = !open;
-                badge.setAttribute('aria-expanded', open ? 'true' : 'false');
-            });
-            menu.querySelectorAll('.trust-marker-option').forEach(function(opt) {
-                opt.addEventListener('click', function(e) {
-                    e.stopPropagation();
-                    var value = opt.dataset.value;
-                    closeAllMarkerMenus();
-                    if (!value || value === cell.dataset.value) return;
-                    saveMarker(cell, value);
-                });
-            });
-        });
-        document.addEventListener('click', function() { closeAllMarkerMenus(); });
-        document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') closeAllMarkerMenus();
-        });
-    })();
-
-    document.querySelectorAll('.summary-status-open').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            expandWriteBar();
-            if (writeBar && writeBar.dataset.activeCase && writeBar.dataset.activeCase !== 'new') {
-                switchFollowupCase(writeBar.dataset.activeCase);
-            }
-            if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        });
-    });
-    document.querySelectorAll('.summary-new-case-btn').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-            switchFollowupCase('new');
-            expandWriteBar();
-            if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        });
-    });
-
-    document.querySelectorAll('.followup-clear-btn').forEach(function(clearBtn) {
-        clearBtn.addEventListener('click', function() {
-            var form = clearBtn.closest('form');
-            if (!form) return;
-            form.reset();
-            var uploader = form.querySelector('.attachment-uploader');
-            if (uploader && uploader.clearAttachmentUploader) {
-                uploader.clearAttachmentUploader();
-            }
-            form.querySelectorAll('.attachment-upload-panel').forEach(function(panel) {
-                panel.hidden = true;
-            });
-            form.querySelectorAll('.attachment-upload-toggle').forEach(function(btn) {
-                btn.setAttribute('aria-expanded', 'false');
-            });
-        });
-    });
-
-    document.querySelectorAll('.attachment-uploader').forEach(initAttachmentUploader);
-    document.querySelectorAll('.followup-entry-shell:not(.followup-entry-shell--create)').forEach(initSavedAttachmentRemovers);
-
     window.addEventListener('beforeunload', function() {
         document.querySelectorAll('.attachment-uploader').forEach(function(el) {
             if (el._objectUrls) {
@@ -3555,6 +3985,11 @@ _WORKBENCH_SPECIFIC_CSS = """
     .page-wrap { padding: 0; }
     .container { padding-bottom: 1.5rem; }
     .page-header { margin-bottom: 0.25rem; }
+    .detail-main.is-loading {
+        opacity: 0.55;
+        pointer-events: none;
+        transition: opacity 0.12s ease;
+    }
     .header-row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
     .header-actions {
         display: flex; flex-direction: column; align-items: flex-end;

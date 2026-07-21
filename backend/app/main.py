@@ -4980,6 +4980,83 @@ def overdue_workbench_data(
     )
 
 
+@app.get("/overdue/workbench/fragment")
+def overdue_workbench_fragment(
+    page_user: Annotated[dict, Depends(get_page_user)],
+    trust_product_id: str | None = None,
+    asset_code: str | None = None,
+    custody_asset_code: str | None = None,
+    delinquency_bucket: str | None = None,
+    delinquency_buckets: list[str] | None = Query(default=None),
+    data_date: str | None = None,
+    list_product_id: str | None = None,
+    list_product_ids: list[str] | None = Query(default=None),
+    trust_asset_id: str | None = None,
+    new_followup: str | None = None,
+    new_followup_case: str | None = None,
+    followup_expanded: str | None = None,
+    followup_entry_id: str | None = None,
+    followup_case_id: str | None = None,
+    trust_marker: str | None = None,
+    trust_markers: list[str] | None = Query(default=None),
+    followup_status: str | None = None,
+    followup_statuses: list[str] | None = Query(default=None),
+    city: str | None = None,
+    cities: list[str] | None = Query(default=None),
+):
+    """Partial detail-main HTML for workbench asset switching (no asset_list)."""
+    del page_user  # auth only
+    from app.html.render import build_workbench_fragment_payload
+    from app.service.overdue_workbench import build_overdue_workbench_service
+
+    svc = build_overdue_workbench_service(engine)
+    pid = query_utils.parse_optional_int(trust_product_id)
+    aid = query_utils.parse_optional_int(trust_asset_id)
+    list_pid = query_utils.parse_optional_int(list_product_id)
+    parsed_list_ids = query_utils.parse_trust_product_ids(
+        list_product_id, list_product_ids
+    )
+    ac = query_utils.clean_optional_str(asset_code)
+    custody = query_utils.clean_optional_str(custody_asset_code)
+    parsed_buckets = normalize_delinquency_bucket_filters(
+        query_utils.parse_optional_str_list(delinquency_bucket, delinquency_buckets)
+    )
+    parsed_markers = query_utils.parse_optional_str_list(trust_marker, trust_markers)
+    parsed_statuses = query_utils.parse_optional_str_list(
+        followup_status, followup_statuses
+    )
+    parsed_cities = query_utils.parse_optional_str_list(city, cities)
+    list_scope_explicit = list_product_id is not None or list_product_ids is not None
+    parsed_date = query_utils.parse_optional_date(data_date)
+
+    dto = svc.get_workbench_detail_dto(
+        trust_product_id=pid,
+        asset_code=ac,
+        custody_asset_code=custody if ac else None,
+        delinquency_bucket=None,
+        delinquency_buckets=parsed_buckets,
+        data_date=parsed_date,
+        list_product_id=list_pid,
+        list_product_ids=parsed_list_ids,
+        list_product_scope_explicit=list_scope_explicit,
+        trust_asset_id=aid,
+        trust_markers=parsed_markers,
+        followup_statuses=parsed_statuses,
+        cities=parsed_cities,
+    )
+    return build_workbench_fragment_payload(
+        dto,
+        new_followup=bool(query_utils.parse_optional_int(new_followup)),
+        new_followup_case=bool(query_utils.parse_optional_int(new_followup_case)),
+        followup_expanded=bool(
+            query_utils.parse_optional_int(followup_expanded)
+            or query_utils.parse_optional_int(new_followup_case)
+        ),
+        followup_entry_id=query_utils.parse_optional_int(followup_entry_id),
+        followup_case_id=query_utils.parse_optional_int(followup_case_id),
+    )
+
+
 @app.get("/overdue/workbench", response_class=HTMLResponse)
 def overdue_workbench_page(
     page_user: Annotated[dict, Depends(get_page_user)],
@@ -5627,11 +5704,14 @@ def disclosure_repayment_page(
     with engine.connect() as conn:
         products = fetch_trust_products(conn)
         snapshots = disclosure.list_snapshots(conn, "repayment")
+    if not pids:
+        pids = [int(p["id"]) for p in products]
+    as_of_val = query_utils.parse_optional_date(as_of) or date.today().isoformat()
     html = disclosure_html.render_repayment_disclosure_page(
         products,
         snapshots,
         selected_ids=pids,
-        as_of=query_utils.parse_optional_date(as_of) or "",
+        as_of=as_of_val,
         username=page_user["username"],
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
@@ -5648,11 +5728,14 @@ def disclosure_monitor_page(
     with engine.connect() as conn:
         products = fetch_trust_products(conn)
         snapshots = disclosure.list_snapshots(conn, "monitor")
+    if not pids:
+        pids = [int(p["id"]) for p in products]
+    as_of_val = query_utils.parse_optional_date(as_of) or date.today().isoformat()
     html = disclosure_html.render_monitor_disclosure_page(
         products,
         snapshots,
         selected_ids=pids,
-        as_of=query_utils.parse_optional_date(as_of) or "",
+        as_of=as_of_val,
         username=page_user["username"],
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))

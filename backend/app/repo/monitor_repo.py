@@ -275,7 +275,8 @@ class MonitorRepo:
         """Return one row per asset_code for the workbench left-column list.
 
         全序：等级优先级 → 逾期天数 DESC → 资产主编号 ASC → trust_product_id。
-        有 prefer_* 时：keyset 取「当前起连续最多 limit 户」；否则全序 Top limit。
+        默认取全序第 1 页（OFFSET 0 LIMIT）。
+        有 prefer_* 时：翻到该资产所在页（同序 OFFSET 对齐到 limit 边界），页内顺序不变。
         """
         from app import query_utils
 
@@ -319,6 +320,7 @@ class MonitorRepo:
             "data_date": data_date,
             "tolerance": RECONCILIATION_TOLERANCE_DEFAULT,
             "limit": limit,
+            "offset": 0,
             **pid_params,
             **marker_params,
         }
@@ -347,15 +349,46 @@ class MonitorRepo:
         """
 
         prefer_code = (prefer_asset_code or "").strip() or None
-        use_keyset = prefer_trust_product_id is not None and prefer_code is not None
+        use_prefer = prefer_trust_product_id is not None and prefer_code is not None
+
+        page_sql = f"""
+            SELECT
+                asset_code,
+                trust_product_id,
+                trust_product_name,
+                overdue_days,
+                remaining_amount,
+                split_count,
+                custody_asset_codes
+            FROM ({agg_sql}) agg
+            ORDER BY
+                sort_priority ASC,
+                COALESCE(overdue_days, 0) DESC,
+                asset_code ASC,
+                trust_product_id ASC
+            OFFSET :offset
+            LIMIT :limit
+        """
 
         with self._engine.connect() as conn:
-            if use_keyset:
-                cur = conn.execute(
+            if use_prefer:
+                rank_row = conn.execute(
                     text(
                         f"""
-                        SELECT sort_priority, overdue_days, asset_code, trust_product_id
-                        FROM ({agg_sql}) agg
+                        SELECT rn
+                        FROM (
+                            SELECT
+                                trust_product_id,
+                                asset_code,
+                                ROW_NUMBER() OVER (
+                                    ORDER BY
+                                        sort_priority ASC,
+                                        COALESCE(overdue_days, 0) DESC,
+                                        asset_code ASC,
+                                        trust_product_id ASC
+                                ) AS rn
+                            FROM ({agg_sql}) agg
+                        ) ranked
                         WHERE trust_product_id = :prefer_pid
                           AND asset_code = :prefer_code
                         LIMIT 1
@@ -367,77 +400,9 @@ class MonitorRepo:
                         "prefer_code": prefer_code,
                     },
                 ).fetchone()
-                if cur is not None:
-                    params.update(
-                        {
-                            "cur_priority": int(cur.sort_priority),
-                            "cur_days": int(cur.overdue_days or 0),
-                            "cur_code": str(cur.asset_code),
-                            "cur_pid": int(cur.trust_product_id),
-                        }
-                    )
-                    rows = conn.execute(
-                        text(
-                            f"""
-                            SELECT
-                                asset_code,
-                                trust_product_id,
-                                trust_product_name,
-                                overdue_days,
-                                remaining_amount,
-                                split_count,
-                                custody_asset_codes
-                            FROM ({agg_sql}) agg
-                            WHERE (
-                                sort_priority > :cur_priority
-                                OR (
-                                    sort_priority = :cur_priority
-                                    AND COALESCE(overdue_days, 0) < :cur_days
-                                )
-                                OR (
-                                    sort_priority = :cur_priority
-                                    AND COALESCE(overdue_days, 0) = :cur_days
-                                    AND asset_code > :cur_code
-                                )
-                                OR (
-                                    sort_priority = :cur_priority
-                                    AND COALESCE(overdue_days, 0) = :cur_days
-                                    AND asset_code = :cur_code
-                                    AND trust_product_id >= :cur_pid
-                                )
-                            )
-                            ORDER BY
-                                sort_priority ASC,
-                                COALESCE(overdue_days, 0) DESC,
-                                asset_code ASC,
-                                trust_product_id ASC
-                            LIMIT :limit
-                            """
-                        ),
-                        params,
-                    ).fetchall()
-                    return rows_to_dicts(rows)
+                if rank_row is not None:
+                    rn = int(rank_row.rn)
+                    params["offset"] = ((rn - 1) // int(limit)) * int(limit)
 
-            rows = conn.execute(
-                text(
-                    f"""
-                    SELECT
-                        asset_code,
-                        trust_product_id,
-                        trust_product_name,
-                        overdue_days,
-                        remaining_amount,
-                        split_count,
-                        custody_asset_codes
-                    FROM ({agg_sql}) agg
-                    ORDER BY
-                        sort_priority ASC,
-                        COALESCE(overdue_days, 0) DESC,
-                        asset_code ASC,
-                        trust_product_id ASC
-                    LIMIT :limit
-                    """
-                ),
-                params,
-            ).fetchall()
+            rows = conn.execute(text(page_sql), params).fetchall()
         return rows_to_dicts(rows)

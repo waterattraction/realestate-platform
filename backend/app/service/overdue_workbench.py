@@ -425,7 +425,7 @@ class OverdueWorkbenchService:
         trust_product_ids: None = 全部产品；非空 = 多选限定。
         delinquency_buckets / trust_markers / followup_statuses / cities:
         None = 不限；非空 = 组合筛选。
-        prefer_*：当前资产主编号，keyset 取「当前起连续最多 100 户」。
+        prefer_*：当前资产主编号；若命中筛选结果，翻到其所在页（页长 limit），页内全序不变。
         """
         ids = trust_product_ids
         if ids is None and trust_product_id is not None:
@@ -505,34 +505,47 @@ class OverdueWorkbenchService:
             )
         return {"data_date": resolved_date, "items": items}
 
-    def get_workbench_page_dto(
-        self,
-        *,
-        trust_product_id: int | None = None,
-        asset_code: str | None = None,
-        custody_asset_code: str | None = None,
-        delinquency_bucket: str | None = None,
-        delinquency_buckets: list[str] | None = None,
-        data_date: str | None = None,
-        list_product_id: int | None = None,
-        list_product_ids: list[int] | None = None,
-        list_product_scope_explicit: bool = False,
-        trust_asset_id: int | None = None,
-        trust_marker: str | None = None,
-        trust_markers: list[str] | None = None,
-        followup_status: str | None = None,
-        followup_statuses: list[str] | None = None,
-        cities: list[str] | None = None,
-    ) -> dict:
-        """Build full DTO expected by render.py (asset_code-centric)."""
-        resolved_asset = asset_code
-        if not resolved_asset and custody_asset_code and trust_product_id is not None:
-            resolved_asset = self.resolve_asset_code(
-                trust_product_id, custody_asset_code, data_date
-            )
+    @staticmethod
+    def build_asset_panel_dto(detail: dict) -> dict:
+        """Map get_detail() output to the ``asset`` slice used by render.py."""
+        resolved_asset = detail.get("asset_code")
+        if not resolved_asset:
+            return {}
+        return {
+            "asset_code": resolved_asset,
+            "custody_asset_codes": list(detail.get("custody_asset_codes") or []),
+            "selected_trust_asset_id": detail.get("selected_asset_id"),
+            "selected_split": detail.get("detail"),
+            "summary": detail.get("summary"),
+            "checks": detail.get("checks"),
+            "issuance_records": detail.get("issuance_records") or [],
+            "repayment": detail.get("repayment") or {},
+            "monitor": detail.get("monitor") or {},
+            "trust_mark": detail.get("trust_mark"),
+            "timeline": detail.get("timeline") or [],
+            "ops": detail.get("ops"),
+            "spatial_hint": detail.get("spatial_hint"),
+            "followup_case": detail.get("followup_case"),
+            "followup_cases": detail.get("followup_cases") or [],
+            "followup_entries": detail.get("followup_entries") or [],
+        }
 
+    @staticmethod
+    def _build_workbench_filters(
+        *,
+        trust_product_id: int | None,
+        delinquency_bucket: str | None,
+        delinquency_buckets: list[str] | None,
+        list_product_id: int | None,
+        list_product_ids: list[int] | None,
+        list_product_scope_explicit: bool,
+        trust_marker: str | None,
+        trust_markers: list[str] | None,
+        followup_status: str | None,
+        followup_statuses: list[str] | None,
+        cities: list[str] | None,
+    ) -> tuple[dict, list[int] | None]:
         if list_product_scope_explicit:
-            # None = 全部；兼容单参 list_product_id
             effective_ids = list_product_ids
             if effective_ids is None and list_product_id is not None:
                 effective_ids = [list_product_id]
@@ -562,6 +575,112 @@ class OverdueWorkbenchService:
             "followup_statuses": statuses,
             "cities": cities,
         }
+        return filters, effective_ids
+
+    def get_workbench_detail_dto(
+        self,
+        *,
+        trust_product_id: int | None = None,
+        asset_code: str | None = None,
+        custody_asset_code: str | None = None,
+        delinquency_bucket: str | None = None,
+        delinquency_buckets: list[str] | None = None,
+        data_date: str | None = None,
+        list_product_id: int | None = None,
+        list_product_ids: list[int] | None = None,
+        list_product_scope_explicit: bool = False,
+        trust_asset_id: int | None = None,
+        trust_marker: str | None = None,
+        trust_markers: list[str] | None = None,
+        followup_status: str | None = None,
+        followup_statuses: list[str] | None = None,
+        cities: list[str] | None = None,
+    ) -> dict:
+        """Detail-only DTO for fragment refresh (no asset_list query)."""
+        resolved_asset = asset_code
+        if not resolved_asset and custody_asset_code and trust_product_id is not None:
+            resolved_asset = self.resolve_asset_code(
+                trust_product_id, custody_asset_code, data_date
+            )
+
+        filters, _effective_ids = self._build_workbench_filters(
+            trust_product_id=trust_product_id,
+            delinquency_bucket=delinquency_bucket,
+            delinquency_buckets=delinquency_buckets,
+            list_product_id=list_product_id,
+            list_product_ids=list_product_ids,
+            list_product_scope_explicit=list_product_scope_explicit,
+            trust_marker=trust_marker,
+            trust_markers=trust_markers,
+            followup_status=followup_status,
+            followup_statuses=followup_statuses,
+            cities=cities,
+        )
+
+        old = self.get_detail(
+            trust_product_id=trust_product_id,
+            asset_code=resolved_asset,
+            trust_asset_id=trust_asset_id,
+            data_date=data_date,
+        )
+        asset_dict = self.build_asset_panel_dto(old)
+        summary = (asset_dict.get("summary") or {}) if asset_dict else {}
+        followup_entries = asset_dict.get("followup_entries") or []
+        return {
+            "trust_product_id": trust_product_id,
+            "asset_code": resolved_asset,
+            "custody_asset_codes": list(old.get("custody_asset_codes") or []),
+            "identity_id": old.get("identity_id"),
+            "data_date": old.get("data_date"),
+            "filters": filters,
+            "asset": asset_dict,
+            "queue_patch": {
+                "trust_product_id": trust_product_id,
+                "asset_code": resolved_asset,
+                "internal_status": summary.get("internal_status"),
+                "followup_count": len(followup_entries),
+            },
+        }
+
+    def get_workbench_page_dto(
+        self,
+        *,
+        trust_product_id: int | None = None,
+        asset_code: str | None = None,
+        custody_asset_code: str | None = None,
+        delinquency_bucket: str | None = None,
+        delinquency_buckets: list[str] | None = None,
+        data_date: str | None = None,
+        list_product_id: int | None = None,
+        list_product_ids: list[int] | None = None,
+        list_product_scope_explicit: bool = False,
+        trust_asset_id: int | None = None,
+        trust_marker: str | None = None,
+        trust_markers: list[str] | None = None,
+        followup_status: str | None = None,
+        followup_statuses: list[str] | None = None,
+        cities: list[str] | None = None,
+    ) -> dict:
+        """Build full DTO expected by render.py (asset_code-centric)."""
+        resolved_asset = asset_code
+        if not resolved_asset and custody_asset_code and trust_product_id is not None:
+            resolved_asset = self.resolve_asset_code(
+                trust_product_id, custody_asset_code, data_date
+            )
+
+        filters, effective_ids = self._build_workbench_filters(
+            trust_product_id=trust_product_id,
+            delinquency_bucket=delinquency_bucket,
+            delinquency_buckets=delinquency_buckets,
+            list_product_id=list_product_id,
+            list_product_ids=list_product_ids,
+            list_product_scope_explicit=list_product_scope_explicit,
+            trust_marker=trust_marker,
+            trust_markers=trust_markers,
+            followup_status=followup_status,
+            followup_statuses=followup_statuses,
+            cities=cities,
+        )
 
         old = self.get_detail(
             trust_product_id=trust_product_id,
@@ -574,40 +693,20 @@ class OverdueWorkbenchService:
         asset_list = self.get_asset_list(
             trust_product_ids=effective_ids,
             data_date=resolved_date,
-            delinquency_buckets=buckets,
-            trust_markers=markers,
-            followup_statuses=statuses,
+            delinquency_buckets=filters.get("delinquency_buckets"),
+            trust_markers=filters.get("trust_markers"),
+            followup_statuses=filters.get("followup_statuses"),
             cities=cities,
             prefer_trust_product_id=trust_product_id,
             prefer_asset_code=resolved_asset,
         )
 
-        custody_codes = list(old.get("custody_asset_codes") or [])
-
-        asset_dict: dict = {}
-        if resolved_asset:
-            asset_dict = {
-                "asset_code": resolved_asset,
-                "custody_asset_codes": custody_codes,
-                "selected_trust_asset_id": old.get("selected_asset_id"),
-                "selected_split": old.get("detail"),
-                "summary": old.get("summary"),
-                "checks": old.get("checks"),
-                "issuance_records": old.get("issuance_records") or [],
-                "repayment": old.get("repayment") or {},
-                "monitor": old.get("monitor") or {},
-                "trust_mark": old.get("trust_mark"),
-                "timeline": old.get("timeline") or [],
-                "ops": old.get("ops"),
-                "followup_case": old.get("followup_case"),
-                "followup_cases": old.get("followup_cases") or [],
-                "followup_entries": old.get("followup_entries") or [],
-            }
+        asset_dict = self.build_asset_panel_dto(old)
 
         return {
             "trust_product_id": trust_product_id,
             "asset_code": resolved_asset,
-            "custody_asset_codes": custody_codes,
+            "custody_asset_codes": list(old.get("custody_asset_codes") or []),
             "identity_id": old.get("identity_id"),
             "data_date": resolved_date,
             "filters": filters,
