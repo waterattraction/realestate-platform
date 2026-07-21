@@ -137,6 +137,17 @@ class OverdueWorkbenchService:
         repayment_items = self._repayment.fetch_by_product_asset_code(
             trust_product_id, resolved_asset
         )
+        from app import manual_settlement as ms
+
+        with self._engine.connect() as _conn:
+            settlements = ms.list_settlements_for_asset(
+                _conn, trust_product_id, resolved_asset
+            )
+        settlement_sum = sum(float(s.get("amount") or 0) for s in settlements)
+        repayment_items = ms.merge_repayment_items_with_settlements(
+            repayment_items, settlements
+        )
+        repayment_total = float(repayment_total or 0) + float(settlement_sum or 0)
         code_mismatch = self._repayment.fetch_code_mismatch_summary(
             trust_product_id, resolved_asset
         )
@@ -147,6 +158,8 @@ class OverdueWorkbenchService:
         queue = []
         for row in splits_raw:
             remaining = float(row.get("remaining_amount") or 0)
+            repaid = float(row.get("repaid_amount") or 0)
+            # 手工结算叠加在资产主编号汇总层；分笔行先保留事实值，custody_agg 再叠加
             is_es = checks_service.is_es_closed(remaining)
             od_val = None if is_es else int(row.get("overdue_days") or 0)
             bucket = (
@@ -156,7 +169,7 @@ class OverdueWorkbenchService:
             )
             checks = checks_service.run_asset_checks(
                 float(row.get("initial_transfer_amount") or 0),
-                float(row.get("repaid_amount") or 0),
+                repaid,
                 remaining,
                 repayment_total,
                 code_mismatch=code_mismatch,
@@ -180,7 +193,7 @@ class OverdueWorkbenchService:
                         str(row["last_payment_date"]) if row.get("last_payment_date") else None
                     ),
                     "initial_transfer_amount": float(row.get("initial_transfer_amount") or 0),
-                    "repaid_amount": float(row.get("repaid_amount") or 0),
+                    "repaid_amount": repaid,
                     "remaining_amount": remaining,
                     "checks": checks,
                     "followup_id": active.get("id") if active else None,
@@ -202,14 +215,25 @@ class OverdueWorkbenchService:
 
         detail = next((q for q in queue if q["trust_asset_id"] == selected_id), None)
 
-        custody_checks = checks_service.run_custody_checks(
-            queue, repayment_total, code_mismatch=code_mismatch
+        fact_initial = sum(q["initial_transfer_amount"] for q in queue)
+        fact_repaid = sum(q["repaid_amount"] for q in queue)
+        fact_remaining = sum(q["remaining_amount"] for q in queue)
+        overlay_repaid, overlay_remaining = ms.apply_amount_overlay(
+            fact_repaid, fact_remaining, settlement_sum
+        )
+        # 核对左右两侧均含手工结算叠加，避免一侧叠加一侧不叠加产生假异常
+        custody_checks = checks_service.run_asset_checks(
+            fact_initial,
+            overlay_repaid,
+            overlay_remaining,
+            repayment_total,
+            code_mismatch=code_mismatch,
         )
 
         custody_agg = {
-            "initial_transfer_amount": sum(q["initial_transfer_amount"] for q in queue),
-            "repaid_amount": sum(q["repaid_amount"] for q in queue),
-            "remaining_amount": sum(q["remaining_amount"] for q in queue),
+            "initial_transfer_amount": fact_initial,
+            "repaid_amount": overlay_repaid,
+            "remaining_amount": overlay_remaining,
             "overdue_days": max(
                 (q["overdue_days"] for q in queue if q["overdue_days"] is not None),
                 default=None,
@@ -228,11 +252,23 @@ class OverdueWorkbenchService:
                     remaining_sum,
                 )
 
-        recent_repay = canonical_recent_repay
-        if recent_repay is None and repayment_items:
-            recent_repay = repayment_items[0].get("repayment_date")
-            if recent_repay is not None:
-                recent_repay = str(recent_repay)
+        recent_repay = None
+        for item in repayment_items:
+            rd = item.get("repayment_date")
+            if rd is None:
+                continue
+            rd_s = str(rd).strip()[:10]
+            if rd_s and (recent_repay is None or rd_s > recent_repay):
+                recent_repay = rd_s
+        for s in settlements:
+            sd = s.get("settlement_date")
+            if sd is None:
+                continue
+            sd_s = str(sd).strip()[:10]
+            if sd_s and (recent_repay is None or sd_s > recent_repay):
+                recent_repay = sd_s
+        if recent_repay is None and canonical_recent_repay is not None:
+            recent_repay = str(canonical_recent_repay).strip()[:10] or None
 
         followup_cases = self._followup.fetch_cases_by_asset_code(
             trust_product_id, resolved_asset
@@ -308,7 +344,7 @@ class OverdueWorkbenchService:
             "split_count": custody_agg.get("split_count"),
             "internal_status": (trust_mark or {}).get("internal_status"),
             "has_check_anomaly": has_check_anomaly,
-            "last_payment_date": canonical_recent_repay,
+            "last_payment_date": recent_repay,
         }
 
         followup_case = self._followup.fetch_case_by_asset_code(
@@ -360,6 +396,7 @@ class OverdueWorkbenchService:
             "followup_case": followup_case,
             "followup_cases": followup_cases,
             "followup_entries": followup_entries,
+            "manual_settlements": settlements,
             "timeline": timeline,
             "product_queue": product_queue,
             "queue": queue,
@@ -456,6 +493,17 @@ class OverdueWorkbenchService:
         pairs = [(int(r["trust_product_id"]), str(r["asset_code"])) for r in rows]
         city_map = self._fetch_city_by_asset(pairs) if cities else {}
 
+        from app import manual_settlement as ms
+
+        settlement_sums: dict[tuple[int, str], float] = {}
+        if rows:
+            with self._engine.connect() as conn:
+                settlement_sums = ms.settlement_sums_by_asset_code(
+                    conn,
+                    product_ids=ids,
+                    asset_codes=[str(r["asset_code"]) for r in rows],
+                )
+
         items = []
         for row in rows:
             ac = row["asset_code"]
@@ -463,9 +511,17 @@ class OverdueWorkbenchService:
             custodies = list(row.get("custody_asset_codes") or [])
             remaining = float(row.get("remaining_amount") or 0)
             overdue_days = row.get("overdue_days")
+            settlement_sum = float(
+                settlement_sums.get((pid, str(ac).strip()), 0) or 0
+            )
+            if settlement_sum:
+                _, remaining = ms.apply_amount_overlay(
+                    row.get("repaid_amount"), remaining, settlement_sum
+                )
 
             if checks_service.is_es_closed(remaining):
                 bucket = "ES"
+                overdue_days = None
             else:
                 bucket = checks_service.calc_risk_level(int(overdue_days or 0), remaining)
 
@@ -520,6 +576,7 @@ class OverdueWorkbenchService:
             "checks": detail.get("checks"),
             "issuance_records": detail.get("issuance_records") or [],
             "repayment": detail.get("repayment") or {},
+            "manual_settlements": detail.get("manual_settlements") or [],
             "monitor": detail.get("monitor") or {},
             "trust_mark": detail.get("trust_mark"),
             "timeline": detail.get("timeline") or [],

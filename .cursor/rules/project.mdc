@@ -71,6 +71,7 @@ curl http://localhost:8000/
 
 - 保持 diff 聚焦；匹配现有命名与响应格式
 - 金额 → `float`；日期/时间 → `str` 或 `None`
+- **系统时间一律使用北京时间（Asia/Shanghai）**：API/UI 展示、日志、导出文件名时间戳、冻结时间等；实现优先 `app.timeutil`（`to_beijing` / `format_beijing_datetime` / `now_beijing`）
 - 不提交 secrets（`.env`、凭证）
 - 不擅自添加前端框架、ORM、测试、文档或 git commit，除非明确要求
 - **SQL 目录治理**：所有数据库 SQL 见 `db/README.md`；禁止根目录新增 `.sql`；migration 必须更新 `manifest.txt`

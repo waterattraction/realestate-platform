@@ -30,7 +30,7 @@
 | initial_transfer_amount | 初始受让金额 | NUMERIC(18,2) | 否 | Excel | |
 | repaid_amount | 已还款金额 | NUMERIC(18,2) | 否 | Excel | |
 | remaining_amount | 剩余还款金额 | NUMERIC(18,2) | 否 | Excel | |
-| community_name | 小区名称 | VARCHAR(200) | 否 | Excel | |
+| community_name | 小区名称 | VARCHAR(200) | 否 | Excel | 列别名：小区名称 / 小区地址 |
 | city | 城市 | VARCHAR(64) | 否 | Excel | |
 | current_bill_date | 当期账单日 | DATE | 否 | Excel | 独有列 |
 | repayment_amount_detail | 回款金额明细 | TEXT | 否 | Excel | 独有列 |

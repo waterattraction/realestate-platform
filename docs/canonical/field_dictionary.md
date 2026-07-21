@@ -52,6 +52,15 @@
 | `repaid_amount` | 已还款金额 | `repaid_amount` | 已还款金额 | `repaidAmount` | Repaid Amount | 监控 |
 | `actual_repayment_amount` | 当期实际还款金额 | `actual_repayment_amount` | 当期实际还款金额 | `actualRepaymentAmount` | Actual Repayment Amount | 还款 |
 | `period_no` | 还款期数 | `period_no` | 还款期数 | `periodNo` | Period Number | 防重维度 |
+| `historical_property_codes` | 历史房源号 | `asset_repurchase_assets.historical_property_codes` | — | `historicalPropertyCodes` | Historical Property Codes | 该主编号涉及的全部 distinct custody/source 编号，逗号分隔留档 |
+| `repurchase_amount` | 实际回购金额 | `asset_repurchase_assets.repurchase_amount` | — | `repurchaseAmount` | Repurchase Amount | 默认=剩余金额，确认前可改 |
+| `repurchase_business_date` | 回购业务日 | `asset_repurchase_orders.repurchase_business_date` | — | `repurchaseBusinessDate` | Repurchase Business Date | 人工选择，默认当日 |
+| `settlement_date` | 结算日期 | `trust_asset_manual_settlements.settlement_date` | — | `settlementDate` | Settlement Date | 手工结算业务日；还款披露「当期」按区间、累计/监控按全部 |
+| `settled_by` | 结算人 | `trust_asset_manual_settlements.settled_by` | — | `settledBy` | Settled By | 手工结算 |
+| `payer` | 结算主体 | `trust_asset_manual_settlements.payer` | — | `payer` | Settlement Entity | 手工结算（原「付款方」） |
+| `repayer` | 还款方 | `trust_asset_manual_settlements.repayer` | — | `repayer` | Repayer | 手工结算；虚拟还款行 `current_payer` |
+| `as_of_date` | 披露截止日 / 统计日 | `disclosure_snapshots.as_of_date` | — | `asOfDate` | Disclosure As-Of Date | 还款=截止日；监控=统计日 |
+| `as_of_start_date` | 披露开始日 | `disclosure_snapshots.as_of_start_date` | — | `asOfStartDate` | Disclosure Start Date | 仅还款披露；默认截止日−6（含首尾 7 天） |
 
 ## 关键语义（强制）
 
@@ -71,3 +80,6 @@
 |------|------|
 | 2026-06 | M2.5 首批 30 字段 |
 | 2026-07 | 发行全列：拟转入 + 结算/首期业务字段 |
+| 2026-07-21 | 资产回购域：`historical_property_codes` / `repurchase_amount` / `repurchase_business_date`；回购域以 `asset_code`（资产主编号）为入口（identifiers 例外，见 `docs/data_dictionary/asset_repurchase.md`） |
+| 2026-07-21 | 手工结算域：`settlement_date` / `settled_by` / `payer`（结算主体）/ `repayer`（还款方）；独立账本 + 读路径 overlay（见 `docs/data_dictionary/manual_settlements.md`） |
+| 2026-07-21 | 还款披露日期范围：`as_of_date`（截止日）+ `as_of_start_date`（开始日）；见 `docs/data_dictionary/disclosure_snapshots.md` |

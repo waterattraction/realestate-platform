@@ -19,6 +19,8 @@
 | [repayment_plan_records.md](repayment_plan_records.md) | `trust_repayment_plan_records` | 回款计划 |
 | [disclosure_snapshots.md](disclosure_snapshots.md) | `disclosure_snapshots` 等 | 数据披露 |
 | [asset_swap_orders.md](asset_swap_orders.md) | `asset_swap_orders` 等 | 资产置换 |
+| [asset_repurchase.md](asset_repurchase.md) | `asset_repurchase_orders` 等 | 资产回购 |
+| [manual_settlements.md](manual_settlements.md) | `trust_asset_manual_settlements` 等 | 手工结算 |
 | [assetinfo_pipeline_runs.md](assetinfo_pipeline_runs.md) | `assetinfo_pipeline_runs` | 导入审计 |
 | [assetinfo_sheet_runs.md](assetinfo_sheet_runs.md) | `assetinfo_sheet_runs` | 导入审计 |
 | [data_mapping_config.md](data_mapping_config.md) | `data_mapping_config` | 导入配置 |

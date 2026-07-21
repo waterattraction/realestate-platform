@@ -1,0 +1,20 @@
+---
+description: 系统时间统一使用北京时间（Asia/Shanghai）
+alwaysApply: true
+---
+
+# 系统时间：北京时间
+
+凡涉及**系统时间**（创建/更新/冻结/导出文件名时间戳、UI 展示的时分秒、API 序列化的 timestamptz 展示字段等），一律使用 **北京时间 `Asia/Shanghai`**。
+
+## 约定
+
+- 优先使用 `backend/app/timeutil.py`：`to_beijing` / `format_beijing_datetime` / `now_beijing` / `BEIJING_TZ`
+- 展示格式默认：`YYYY-MM-DD HH:MM:SS`（或业务已有的 `YYYY-MM-DD HH:MM`）
+- 无时区的 datetime 按 **UTC** 解释后再转到北京时间（与当前 PG `timestamptz` / 容器习惯一致）
+- **业务日**（如 `as_of_date`、`repayment_date`、`data_date`）仍是日历日，不要改成带时区的时刻
+
+## 禁止
+
+- 在 UI/导出文件名中直接展示 UTC（例如把 `+00:00` / `Z` 截成本地样子却未换算）
+- 新增平行的时区工具而不复用 `timeutil`

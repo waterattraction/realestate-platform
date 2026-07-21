@@ -928,7 +928,6 @@ def fetch_swap_recommendations(
 # ── 置换执行域（仅写 asset_swap_* 新表）────────────────────────
 
 MONITOR_SNAPSHOT_FIELDS = (
-    "asset_pool_code",
     "renovation_vendor",
     "initial_transfer_amount",
     "repaid_amount",
@@ -1037,7 +1036,7 @@ def _build_monitor_snapshot_payload(
         "source_monitor_record_id": monitor.get("id"),
         "asset_code": monitor.get("asset_code"),
         "custody_asset_code": monitor.get("custody_asset_code"),
-        "source_asset_code": monitor.get("source_asset_code") or monitor.get("asset_code"),
+        "source_asset_code": None,
         "data_date": monitor.get("data_date"),
     }
     for key in MONITOR_SNAPSHOT_FIELDS:
@@ -1083,7 +1082,7 @@ def _build_leg(
         "direction": direction,
         "asset_code": monitor.get("asset_code"),
         "custody_asset_code": monitor.get("custody_asset_code"),
-        "source_asset_code": monitor.get("source_asset_code") or monitor.get("asset_code"),
+        "source_asset_code": None,
         "from_trust_product_id": from_product_id,
         "from_trust_product_name": from_product_name,
         "to_trust_product_id": to_product_id,
@@ -1205,7 +1204,7 @@ def _insert_monitor_snapshot(
                 swap_asset_id, swap_order_id, snapshot_role,
                 trust_product_id, trust_product_name, source_monitor_record_id,
                 asset_code, custody_asset_code, source_asset_code, data_date,
-                asset_pool_code, renovation_vendor,
+                renovation_vendor,
                 initial_transfer_amount, repaid_amount, remaining_amount,
                 asset_status, last_renovation_payment_date, community_name, city,
                 collection_contract_code, custody_agreement_sign_date,
@@ -1215,7 +1214,7 @@ def _insert_monitor_snapshot(
                 :swap_asset_id, :swap_order_id, :snapshot_role,
                 :trust_product_id, :trust_product_name, :source_monitor_record_id,
                 :asset_code, :custody_asset_code, :source_asset_code, :data_date,
-                :asset_pool_code, :renovation_vendor,
+                :renovation_vendor,
                 :initial_transfer_amount, :repaid_amount, :remaining_amount,
                 :asset_status, :last_renovation_payment_date, :community_name, :city,
                 :collection_contract_code, :custody_agreement_sign_date,
@@ -1230,7 +1229,7 @@ def _insert_monitor_snapshot(
             **{k: snap.get(k) for k in (
                 "snapshot_role", "trust_product_id", "trust_product_name",
                 "source_monitor_record_id", "asset_code", "custody_asset_code",
-                "source_asset_code", "data_date", "asset_pool_code", "renovation_vendor",
+                "source_asset_code", "data_date", "renovation_vendor",
                 "initial_transfer_amount", "repaid_amount", "remaining_amount",
                 "asset_status", "last_renovation_payment_date", "community_name", "city",
                 "collection_contract_code", "custody_agreement_sign_date",
@@ -1268,7 +1267,7 @@ def _insert_swap_asset(
             "direction": leg["direction"],
             "asset_code": leg["asset_code"],
             "custody_asset_code": leg.get("custody_asset_code"),
-            "source_asset_code": leg.get("source_asset_code"),
+            "source_asset_code": None,
             "from_id": leg["from_trust_product_id"],
             "from_name": leg["from_trust_product_name"],
             "to_id": leg["to_trust_product_id"],

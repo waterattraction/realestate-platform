@@ -32,19 +32,27 @@ def render_repayment_disclosure_page(
     *,
     selected_ids: list[int] | None = None,
     as_of: str = "",
+    as_of_start: str = "",
     username: str = "",
 ) -> str:
     return _render_page(
         kind="repayment",
         title="还款明细披露",
-        date_label="披露截止日",
-        date_hint="明细按还款日期 ≤ 截止日；回款计划取各产品统计日 ≤ 截止日的最新批次；逾期天数取监控统计日 ≤ 截止日的最新值。",
+        date_label="截止日",
+        date_hint=(
+            "明细：还款日期=截止日且实际还款>0；已回购资产排除。"
+            "归属与三列按置换转入/回购/发行（同日多事件报错；回购/置换不受开始日影响）。"
+            "当期实际还款叠加披露区间内手工结算；累计已还/剩余、回款计划已还/剩余叠加全部手工结算。"
+            "回款计划取各产品统计日≤截止日最新批次。"
+        ),
         products=products,
         snapshots=snapshots,
         selected_ids=selected_ids,
         as_of=as_of,
+        as_of_start=as_of_start,
         username=username,
         has_tabs=True,
+        date_range=True,
     )
 
 
@@ -60,13 +68,20 @@ def render_monitor_disclosure_page(
         kind="monitor",
         title="资产监控披露",
         date_label="统计日期",
-        date_hint="仅展示所选信托产品在该统计日期（data_date）的监控导入数据。",
+        date_hint=(
+            "统计日=data_date（不变）；已还款金额/剩余还款金额叠加该资产全部手工结算。"
+            "归属按置换/回购/发行（与还款披露一致）。"
+            "状态优先级：已回购/已置换转出 > 重度跟进 > M 级；转入资产不标转出，状态以 M 级为准。"
+            "逾期天数仅轻度/重度展示，已回购/已置换转出等为空。"
+        ),
         products=products,
         snapshots=snapshots,
         selected_ids=selected_ids,
         as_of=as_of,
+        as_of_start="",
         username=username,
         has_tabs=False,
+        date_range=False,
     )
 
 
@@ -80,8 +95,10 @@ def _render_page(
     snapshots: list[dict],
     selected_ids: list[int] | None,
     as_of: str,
+    as_of_start: str,
     username: str,
     has_tabs: bool,
+    date_range: bool,
 ) -> str:
     product_html = _product_checkboxes(products, selected_ids)
     snaps_json = _snapshots_json(snapshots)
@@ -175,6 +192,10 @@ h1 {{ font-size: 1.45rem; margin-bottom: 0.25rem; }}
       <label>信托产品（可多选）</label>
       <div class="tp-box" id="tp-box">{product_html}</div>
     </div>
+    {(
+      '<div><label for="as_of_start">披露开始日</label>'
+      f'<input type="date" id="as_of_start" name="as_of_start" value="{escape(as_of_start or "")}" required/></div>'
+    ) if date_range else ""}
     <div>
       <label for="as_of">{escape(date_label)}</label>
       <input type="date" id="as_of" name="as_of" value="{escape(as_of or '')}" required/>
@@ -204,7 +225,7 @@ h1 {{ font-size: 1.45rem; margin-bottom: 0.25rem; }}
       <button type="button" class="btn-danger" id="btn-delete-snap">删除快照</button>
     </div>
   </div>
-  <p class="muted">同一产品与时点可多次冻结；冻结满 1 个月的快照不可删除。</p>
+  <p class="muted">同一产品与时点可多次冻结；冻结满 1 个月的快照不可删除。还款 / 监控导出均按信托产品拆成多个 Excel，打包为 ZIP。</p>
 </div>
 
 <div class="card">
@@ -219,10 +240,46 @@ h1 {{ font-size: 1.45rem; margin-bottom: 0.25rem; }}
 const KIND = {json.dumps(kind)};
 const INITIAL_SNAPS = {snaps_json};
 const HAS_TABS = {json.dumps(has_tabs)};
+const DATE_RANGE = {json.dumps(date_range)};
 
 function selectedProductIds() {{
   return Array.from(document.querySelectorAll('input[name="trust_product_ids"]:checked'))
     .map((el) => el.value);
+}}
+
+function addDaysYmd(ymd, deltaDays) {{
+  const parts = String(ymd || '').split('-').map(Number);
+  if (parts.length !== 3 || parts.some((n) => !n)) return '';
+  const d = new Date(parts[0], parts[1] - 1, parts[2]);
+  d.setDate(d.getDate() + deltaDays);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${{y}}-${{m}}-${{day}}`;
+}}
+
+function ensureDefaultDateRange() {{
+  if (!DATE_RANGE) return;
+  const endEl = document.getElementById('as_of');
+  const startEl = document.getElementById('as_of_start');
+  if (!endEl || !startEl) return;
+  if (!endEl.value) {{
+    const t = new Date();
+    endEl.value = `${{t.getFullYear()}}-${{String(t.getMonth()+1).padStart(2,'0')}}-${{String(t.getDate()).padStart(2,'0')}}`;
+  }}
+  if (!startEl.value && endEl.value) {{
+    startEl.value = addDaysYmd(endEl.value, -6);
+  }}
+}}
+ensureDefaultDateRange();
+if (DATE_RANGE) {{
+  const endEl = document.getElementById('as_of');
+  endEl.addEventListener('change', () => {{
+    const startEl = document.getElementById('as_of_start');
+    if (endEl.value && (!startEl.value || startEl.value > endEl.value)) {{
+      startEl.value = addDaysYmd(endEl.value, -6);
+    }}
+  }});
 }}
 
 function qs(params) {{
@@ -262,12 +319,34 @@ function renderTable(headers, keys, rows) {{
   return html;
 }}
 
+function fmtFrozenAt(v) {{
+  if (v == null || v === '') return '';
+  const s = String(v).trim();
+  // 后端已转北京时间「YYYY-MM-DD HH:MM:SS」；兼容旧 ISO
+  if (/^\d{{4}}-\d{{2}}-\d{{2}}[ T]\d{{2}}:\d{{2}}/.test(s)) {{
+    return s.replace('T', ' ').slice(0, 19);
+  }}
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s.slice(0, 19);
+  const parts = new Intl.DateTimeFormat('en-CA', {{
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }}).formatToParts(d);
+  const g = (t) => (parts.find((p) => p.type === t) || {{}}).value || '';
+  return `${{g('year')}}-${{g('month')}}-${{g('day')}} ${{g('hour')}}:${{g('minute')}}:${{g('second')}}`;
+}}
+
 function fillSnapshotSelect(snaps) {{
   const sel = document.getElementById('snapshot_id');
   const cur = sel.value;
   sel.innerHTML = '<option value="">— 请选择 —</option>';
   (snaps || []).forEach((s) => {{
-    const label = `${{s.as_of_date}} · 冻结 ${{String(s.frozen_at || '').replace('T', ' ').slice(0, 19)}} · ${{s.product_names || ''}}`
+    const range = (KIND === 'repayment' && s.as_of_start_date && s.as_of_start_date !== s.as_of_date)
+      ? `${{s.as_of_start_date}}~${{s.as_of_date}}`
+      : `${{s.as_of_date}}`;
+    const label = `${{range}} · 冻结 ${{fmtFrozenAt(s.frozen_at)}} · ${{s.product_names || ''}}`
       + (KIND === 'repayment'
         ? `（明细 ${{s.detail_row_count || 0}} / 计划 ${{s.plan_row_count || 0}}）`
         : `（监控 ${{s.monitor_row_count || 0}}）`);
@@ -283,9 +362,15 @@ function showPreview(data) {{
   const status = document.getElementById('status');
   if (data.mode === 'snapshot') {{
     const s = data.snapshot || {{}};
-    status.textContent = `快照 #${{s.id}} · 时点 ${{s.as_of_date}} · 冻结于 ${{s.frozen_at || ''}} · ${{s.product_names || ''}}`;
+    const range = (KIND === 'repayment' && s.as_of_start_date && s.as_of_start_date !== s.as_of_date)
+      ? `${{s.as_of_start_date}}~${{s.as_of_date}}`
+      : `${{s.as_of_date}}`;
+    status.textContent = `快照 #${{s.id}} · 时点 ${{range}} · 冻结于 ${{fmtFrozenAt(s.frozen_at)}} · ${{s.product_names || ''}}`;
   }} else {{
-    status.textContent = `活数据 · ${{data.as_of_date || ''}} · 预览最多 200 行`;
+    const range = (KIND === 'repayment' && data.as_of_start_date && data.as_of_start_date !== data.as_of_date)
+      ? `${{data.as_of_start_date}}~${{data.as_of_date}}`
+      : `${{data.as_of_date || ''}}`;
+    status.textContent = `活数据 · ${{range}} · 预览最多 200 行`;
   }}
   if (KIND === 'repayment') {{
     status.textContent += ` · 明细 ${{data.detail_total}} 行 / 计划 ${{data.plan_total}} 行`;
@@ -337,6 +422,12 @@ function baseParams() {{
   const asOf = document.getElementById('as_of').value;
   if (!pids.length) throw new Error('请至少选择一个信托产品');
   if (!asOf) throw new Error('请选择' + {json.dumps(date_label)});
+  if (DATE_RANGE) {{
+    const start = document.getElementById('as_of_start').value;
+    if (!start) throw new Error('请选择披露开始日');
+    if (start > asOf) throw new Error('披露开始日不能晚于截止日');
+    return {{ trust_product_ids: pids, as_of: asOf, as_of_start: start }};
+  }}
   return {{ trust_product_ids: pids, as_of: asOf }};
 }}
 

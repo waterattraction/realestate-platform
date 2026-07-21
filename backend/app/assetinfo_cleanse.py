@@ -16,7 +16,6 @@ RECONCILIATION_TOLERANCE = 0.01
 COL_ALIASES: dict[str, tuple[str, ...]] = {
     "remaining_amount": ("剩余还款金额", "剩余应还款余额"),
     "last_renovation_payment_date": ("最后一期装修款付款时间",),
-    "asset_pool_code": ("资产包编号",),
     "current_payer": ("当前还款方",),
     "planned_repayment_amount": ("当期计划还款金额",),
     "initial_renovation_amount": ("初始受让装修金额",),
@@ -24,7 +23,7 @@ COL_ALIASES: dict[str, tuple[str, ...]] = {
     "remaining_balance": ("剩余应还款余额",),
     "renovation_vendor": ("装修服务商",),
     "asset_status": ("资产状态",),
-    "community_name": ("小区名称",),
+    "community_name": ("小区名称", "小区地址"),
     "city": ("城市", "所属城市", "所属区域"),
     "collection_contract_code": ("收房合同编码",),
     "custody_agreement_sign_date": ("托管协议签署日期",),

@@ -527,10 +527,8 @@ REPAYMENT_PLAN_COLUMN_LABELS: dict[str, str] = {
 
 REPAYMENT_COLUMN_ORDER: tuple[str, ...] = (
     "trust_product_name",
-    "asset_pool_code",
     "current_payer",
     "custody_asset_code",
-    "source_asset_code",
     "asset_code",
     "planned_repayment_amount",
     "initial_renovation_amount",
@@ -551,10 +549,8 @@ REPAYMENT_COLUMN_ORDER: tuple[str, ...] = (
 
 REPAYMENT_PLAN_COLUMN_ORDER: tuple[str, ...] = (
     "trust_product_name",
-    "asset_pool_code",
-    "source_asset_code",
-    "custody_asset_code",
     "asset_code",
+    "custody_asset_code",
     "renovation_vendor",
     "data_date",
     "initial_transfer_amount",
@@ -577,8 +573,6 @@ REPAYMENT_PLAN_COLUMN_ORDER: tuple[str, ...] = (
 
 MONITOR_COLUMN_ORDER: tuple[str, ...] = (
     "trust_product_name",
-    "asset_pool_code",
-    "source_asset_code",
     "asset_code",
     "custody_asset_code",
     "renovation_vendor",
@@ -822,17 +816,11 @@ def render_records_page(
         <div><label>信托产品</label>
         <select name="trust_product_id" form="f" style="width:100%">{product_options}</select></div>"""
 
-    source_label = (
-        "资产信托号" if record_type == "monitor"
-        else "资产编号(房源)" if record_type == "repayment_plan"
-        else "资产分笔号"
-    )
     data_date_label = "统计日期" if record_type == "repayment_plan" else "数据日期"
     field_specs = [
         ("data_date", data_date_label, "date", False),
         ("asset_code", "资产主编号", "text", True),
         ("custody_asset_code", "托管房源号", "text", True),
-        ("source_asset_code", source_label, "text", True),
         ("source_file_name", "文件名", "text", True),
         ("source_sheet_name", "Sheet名", "text", True),
     ]

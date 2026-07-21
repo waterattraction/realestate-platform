@@ -53,8 +53,11 @@ class TestMonitorRenovationDateParse(unittest.TestCase):
 class TestMonitorRenovationDateDisplay(unittest.TestCase):
     def test_monitor_column_order_after_remaining_amount(self):
         order = list(assetinfo_html.MONITOR_COLUMN_ORDER)
+        self.assertNotIn("asset_pool_code", order)
+        self.assertNotIn("source_asset_code", order)
         rem_idx = order.index("remaining_amount")
-        self.assertEqual(order[rem_idx + 1], "last_renovation_payment_date")
+        self.assertEqual(order[rem_idx + 1], "asset_status")
+        self.assertEqual(order[rem_idx + 2], "last_renovation_payment_date")
 
     def test_monitor_column_label(self):
         self.assertEqual(

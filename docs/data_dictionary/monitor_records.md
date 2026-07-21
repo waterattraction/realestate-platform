@@ -30,7 +30,7 @@
 | id | 记录 ID | BIGINT | 是 | 系统 | 主键 | |
 | trust_product_id | 信托产品 ID | BIGINT | 是 | 导入 | 产品维度 | FK |
 | trust_asset_id | 底层资产 ID | BIGINT | 是 | 导入 upsert | 关联 `trust_assets` | FK |
-| asset_code | 资产编号（历史） | VARCHAR(64) | 是 | 导入 | **历史字段** | 与 trust_assets 一致 |
+| asset_code | 资产主编号 | VARCHAR(64) | 是 | Excel「资产编号(房源)」左 12 | 主编号 | 已有非空不 UPDATE |
 | data_date | 监控快照日期 | DATE | 是 | Excel「统计日期」 | **本表核心时间维度** | 非 issue_date |
 | initial_transfer_amount | 初始受让金额 | NUMERIC(18,2) | 是 | Excel | 监控指标 | |
 | repaid_amount | 已还款金额 | NUMERIC(18,2) | 是 | Excel | 监控指标 | |
@@ -42,13 +42,13 @@
 | source_sheet_name | 来源 Sheet | VARCHAR(200) | 否 | 系统 | 追溯 | |
 | synced_at | 同步时间 | TIMESTAMPTZ | 是 | 系统 | 导入时间 | |
 | created_at | 创建时间 | TIMESTAMPTZ | 是 | 系统 | | |
-| custody_asset_code | 托管房源号 | VARCHAR(64) | 否 | Excel/回填 | 主体识别 | V2 列 |
-| source_asset_code | 资产分笔号 | VARCHAR(64) | 否 | Excel/回填 | 分笔识别 | V2 列 |
+| custody_asset_code | 托管房源号 | VARCHAR(64) | 否 | Excel/回填 | 主体识别 | V2 列；无托管列时 = asset_code 左 12 |
+| source_asset_code | 资产分笔号 | VARCHAR(64) | 否 | — | **死列** | 停导入、停展示；历史值可保留 |
 | risk_score | 风险评分 | INT | 否 | 风险计算 | 风险展示 | risk_v2 |
 | risk_level | 风险等级 | VARCHAR(2) | 否 | 风险计算 | 风险展示 | risk_v2 |
 | updated_at | 更新时间 | TIMESTAMPTZ | 否 | 系统 | 重算标记 | migration |
 | overdue_days_as_of | 逾期天数截止日 | DATE | 否 | 系统 | 逾期重算 | migration |
-| asset_pool_code | 资产包编号 | VARCHAR(64) | 否 | Excel | 监控模版 | 20260720 |
+| ~~asset_pool_code~~ | ~~资产包编号~~ | — | — | — | **已 DROP** | `20260721_drop_asset_pool_code` |
 | renovation_vendor | 装修服务商 | VARCHAR(200) | 否 | Excel | 监控模版 | 20260720 |
 | asset_status | 资产状态 | VARCHAR(100) | 否 | Excel | 监控模版 | 20260720 |
 | community_name | 小区名称 | VARCHAR(200) | 否 | Excel | 监控模版 | 20260720 |
@@ -88,9 +88,11 @@
 ## 注意事项
 
 - **`data_date` 是监控快照日期**（Excel「统计日期」），与发行的 `issue_date` **完全不同**。
-- `asset_code` 为历史兼容；新逻辑优先 `custody_asset_code` / `source_asset_code`。
+- Excel「资产编号(房源)」→ `asset_code`（左 12）；`source_asset_code` 停写入。
+- 已有非空 `asset_code` 不 UPDATE；仅无主编号时回填。
 - 历史可能存在同 `(product, data_date, asset)` 多行，见 ops 清理脚本。
 - 还款披露导出的「当期逾期天数」取本表最新 `overdue_days`，**不从还款 Excel 导入**。
+- 逾期重算（`overdue.recalc_monitor`）纳入手工结算：锚点含 `settlement_date≤as_of`；有效剩余扣结算后判结清；**不改** `remaining_amount`/`repaid_amount`。
 
 ## 变更记录
 
@@ -102,3 +104,5 @@
 | — | overdue 重算列 | `db/migrations/20250501_overdue_recalc_columns.sql` |
 | 2026-07-20 | 监控模版扩展列 | `db/migrations/20260720_monitor_repayment_template_columns.sql` |
 | 2026-07-20 | owner_code 扩至 VARCHAR(200) | `db/migrations/20260720_monitor_owner_code_widen.sql` |
+| 2026-07-21 | DROP `asset_pool_code`；source 停导入 | `db/migrations/20260721_drop_asset_pool_code.sql` |
+| 2026-07-21 | 逾期重算纳入手工结算 | — |

@@ -63,7 +63,7 @@ class TestResolveMonitorAssetFields(unittest.TestCase):
         asset, custody, source = iu._resolve_monitor_asset_fields(
             row, "资产编号(房源)", "托管房源编码",
         )
-        self.assertEqual(source, "101127075900-001")
+        self.assertIsNone(source)
         self.assertEqual(custody, "101127075900")
         self.assertEqual(asset, "101127075900")
 
@@ -78,32 +78,47 @@ class TestResolveMonitorAssetFields(unittest.TestCase):
         asset, custody, source = iu._resolve_monitor_asset_fields(
             row, "资产编号(房源)", None,
         )
-        self.assertEqual(source, "101127075900-001")
+        self.assertIsNone(source)
         self.assertEqual(asset, "101127075900")
         self.assertEqual(custody, "101127075900")
 
 
 class TestResolveAssetFields(unittest.TestCase):
-    def test_asset_number_is_authoritative_when_columns_differ(self):
+    """_resolve_asset_fields 与 _resolve_monitor_asset_fields 统一：asset=左12，source=None。"""
+
+    def test_asset_number_left12_custody_kept_source_none(self):
         row = pd.Series(_repayment_row("107114177883", "107114502274"))
         asset, custody, source = iu._resolve_asset_fields(
             row, "资产编号(房源)", "托管房源编码",
         )
         self.assertEqual(asset, "107114177883")
-        self.assertEqual(custody, "107114177883")
-        self.assertEqual(source, "107114177883")
+        self.assertEqual(custody, "107114502274")
+        self.assertIsNone(source)
 
-    def test_aligned_columns_use_same_value(self):
+    def test_suffixed_trust_no_uses_left12(self):
+        row = pd.Series(_repayment_row("101127075900-001", "101127075900"))
+        asset, custody, source = iu._resolve_asset_fields(
+            row, "资产编号(房源)", "托管房源编码",
+        )
+        self.assertEqual(asset, "101127075900")
+        self.assertEqual(custody, "101127075900")
+        self.assertIsNone(source)
+
+    def test_aligned_columns_source_still_none(self):
         row = pd.Series(_repayment_row("107114177883", "107114177883"))
         asset, custody, source = iu._resolve_asset_fields(
             row, "资产编号(房源)", "托管房源编码",
         )
-        self.assertEqual((asset, custody, source), ("107114177883",) * 3)
+        self.assertEqual(asset, "107114177883")
+        self.assertEqual(custody, "107114177883")
+        self.assertIsNone(source)
 
     def test_custody_only_when_asset_column_missing(self):
         row = pd.Series({"托管房源编码": "107114502274"})
         asset, custody, source = iu._resolve_asset_fields(row, None, "托管房源编码")
-        self.assertEqual((asset, custody, source), ("107114502274",) * 3)
+        self.assertEqual(asset, "107114502274")
+        self.assertEqual(custody, "107114502274")
+        self.assertIsNone(source)
 
     def test_empty_when_both_missing(self):
         row = pd.Series({})
@@ -159,28 +174,25 @@ class TestParseRepaymentRowsRegression0612(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row["source_asset_code"], "107114177883")
+        self.assertIsNone(row["source_asset_code"])
         self.assertEqual(row["custody_asset_code"], "107114502274")
         self.assertEqual(row["asset_code"], "107114177883")
 
 
 class TestUpsertTrustAssetLookupOrder(unittest.TestCase):
-    def _conn(self, *, by_source=None, by_asset=None, by_custody=None):
+    def _conn(self, *, by_asset=None, by_custody=None):
         conn = MagicMock()
         calls: list[str] = []
 
         def execute(sql, params=None):
             sql_text = str(sql)
             result = MagicMock()
-            if "source_asset_code = :source" in sql_text:
-                calls.append("source")
-                result.fetchone.return_value = by_source
+            if "custody_asset_code = :custody" in sql_text and "id !=" not in sql_text:
+                calls.append("custody")
+                result.fetchone.return_value = by_custody
             elif "asset_code = :code" in sql_text and "INSERT" not in sql_text:
                 calls.append("asset")
                 result.fetchone.return_value = by_asset
-            elif "custody_asset_code = :custody" in sql_text and "id !=" not in sql_text:
-                calls.append("custody")
-                result.fetchone.return_value = by_custody
             elif "INSERT INTO trust_assets" in sql_text:
                 calls.append("insert")
                 result.fetchone.return_value = SimpleNamespace(id=99)
@@ -193,67 +205,69 @@ class TestUpsertTrustAssetLookupOrder(unittest.TestCase):
         conn._calls = calls
         return conn
 
-    def test_lookup_source_asset_code_first(self):
+    def test_lookup_custody_first(self):
         existing = SimpleNamespace(
             id=10, asset_code="107114177883",
-            custody_asset_code="107114177883", source_asset_code="107114177883",
+            custody_asset_code="107114502274", source_asset_code=None,
         )
-        conn = self._conn(by_source=existing)
+        conn = self._conn(by_custody=existing)
         asset_id = iu._upsert_trust_asset(
-            conn, 3, "107114502274", "107114502274", 0.0, "107114177883",
+            conn, 3, "107114177883", "107114502274", 0.0, None,
         )
         self.assertEqual(asset_id, 10)
-        self.assertEqual(conn._calls[0], "source")
-        self.assertNotIn("custody", conn._calls)
+        self.assertEqual(conn._calls[0], "custody")
+        self.assertNotIn("insert", conn._calls)
 
-    def test_skips_custody_lookup_when_custody_differs_from_source(self):
-        conn = self._conn(by_source=None, by_asset=None, by_custody=SimpleNamespace(id=20, asset_code="X"))
+    def test_falls_back_to_asset_code_then_insert(self):
+        conn = self._conn(by_asset=None, by_custody=None)
         asset_id = iu._upsert_trust_asset(
-            conn, 3, "107114177883", "107114502274", 0.0, "107114177883",
+            conn, 3, "107114177883", "107114502274", 0.0, None,
         )
         self.assertEqual(asset_id, 99)
-        self.assertNotIn("custody", conn._calls)
+        self.assertEqual(conn._calls[0], "custody")
+        self.assertIn("asset", conn._calls)
+        self.assertIn("insert", conn._calls)
 
     def test_custody_lookup_first_when_distinct_custody(self):
         existing = SimpleNamespace(
             id=30, asset_code="101127075900",
-            custody_asset_code="101127075900", source_asset_code="101127075900-001",
+            custody_asset_code="101127075900", source_asset_code=None,
         )
-        conn = self._conn(by_source=None, by_asset=None, by_custody=existing)
+        conn = self._conn(by_asset=None, by_custody=existing)
         asset_id = iu._upsert_trust_asset(
             conn,
             3,
             "101127075900",
             "101127075900",
             0.0,
-            "101127075900-001",
+            None,
             distinct_custody=True,
         )
         self.assertEqual(asset_id, 30)
         self.assertEqual(conn._calls[0], "custody")
 
-    def test_distinct_custody_prefers_custody_over_conflicting_source(self):
+    def test_distinct_custody_prefers_custody_row(self):
         by_custody = SimpleNamespace(
             id=1967, asset_code="107113281945",
-            custody_asset_code="107114931134", source_asset_code="107114931134",
+            custody_asset_code="107114931134", source_asset_code=None,
         )
-        by_source = SimpleNamespace(
+        by_asset = SimpleNamespace(
             id=1874, asset_code="107113281945",
-            custody_asset_code="107113281945", source_asset_code="107113281945-002",
+            custody_asset_code="107113281945", source_asset_code=None,
         )
-        conn = self._conn(by_source=by_source, by_custody=by_custody)
+        conn = self._conn(by_asset=by_asset, by_custody=by_custody)
         asset_id = iu._upsert_trust_asset(
             conn,
             2,
             "107113281945",
             "107114931134",
             87800.0,
-            "107113281945-002",
+            None,
             distinct_custody=True,
         )
         self.assertEqual(asset_id, 1967)
         self.assertEqual(conn._calls[0], "custody")
-        self.assertNotIn("source", conn._calls)
+        self.assertNotIn("asset", conn._calls)
 
 
 class TestPrecheckRepaymentSheetMismatch(unittest.TestCase):
@@ -421,7 +435,7 @@ class TestPrecheckMonitorSheetMismatch(unittest.TestCase):
 
 
 class TestAssetCodeGlobalPolicy(unittest.TestCase):
-    """asset_code 为历史字段：新逻辑不得修改 trust_assets.asset_code。"""
+    """asset_code 为历史字段：已有非空 asset_code 不得被 UPDATE 覆盖。"""
 
     BANNED_IN_UPSERT = (
         "SET asset_code =",
@@ -434,7 +448,9 @@ class TestAssetCodeGlobalPolicy(unittest.TestCase):
         )
         with open(path, encoding="utf-8") as f:
             content = f.read()
-        update_block = content.split("def _upsert_trust_asset", 1)[1].split("def _resolve_asset_fields", 1)[0]
+        update_block = content.split("def _upsert_trust_asset", 1)[1].split(
+            "def _resolve_asset_fields", 1
+        )[0]
         for banned in self.BANNED_IN_UPSERT:
             self.assertNotIn(banned, update_block, f"_upsert_trust_asset must not {banned}")
 
@@ -445,6 +461,10 @@ class TestAssetCodeGlobalPolicy(unittest.TestCase):
         self.assertIn("可变性", text)
         self.assertIn("asset_code", text)
         self.assertIn("否", text)
+
+    def test_product3_0612_sheet_excluded_from_primary_backfill(self):
+        self.assertEqual(iu.PRODUCT3_REPAY_0612_EXCLUDE["trust_product_id"], 3)
+        self.assertEqual(iu.PRODUCT3_REPAY_0612_EXCLUDE["source_sheet_name"], "0612已还款")
 
 
 if __name__ == "__main__":

@@ -55,7 +55,9 @@
 
 逾期分桶（运行时由 `overdue_days` + 剩余本金计算，**非** DB 列）。
 
-公式：`逾期天数 = 重算日 −（最后付款日或最早发行日的下月同日）`（可为负）。
+公式：`逾期天数 = 重算日 −（锚点日的下月同日）`（可为负）。  
+锚点 = `MAX(导入还款最大还款日, 未作废且 settlement_date≤重算日 的最大结算日)`；仅有手工结算也算有还款。  
+有效剩余 = `max(0, 监控剩余 − Σ结算)`；≈0 时逾期置空（不写回金额列）。无还款/结算时锚点取最早发行日。
 
 | Value | 中文 | 含义 |
 |-------|------|------|
@@ -146,6 +148,24 @@
 | `置换` | 置换 |
 | `潜在风险` | 潜在风险 |
 
+## asset repurchase order status
+
+`asset_repurchase_orders.status`（`asset_swap_orders.status` 同枚举）。
+
+| Value | 中文 | 含义 |
+|-------|------|------|
+| `completed` | 已完成 | 确认回购后写入 |
+| `voided` | 已失效 | 可失效条件见 `docs/data_dictionary/asset_repurchase.md` |
+
+## asset repurchase unit status
+
+`asset_repurchase_units.status`。
+
+| Value | 中文 | 含义 |
+|-------|------|------|
+| `active` | 启用 | 可用于新回购单 |
+| `inactive` | 停用 | 不可选择，历史订单不受影响 |
+
 ## risk alert status
 
 `risk_alerts.status`。
@@ -165,3 +185,4 @@
 | 日期 | 变更 |
 |------|------|
 | 2026-06 | M2.5 首批枚举 |
+| 2026-07-21 | 新增资产回购枚举：`asset repurchase order status`、`asset repurchase unit status` |

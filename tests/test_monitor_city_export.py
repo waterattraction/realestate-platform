@@ -17,9 +17,10 @@ class TestMonitorCityFilter(unittest.TestCase):
         f = assetinfo_upload.build_record_filters(city="北京")
         self.assertEqual(f["city"], "北京")
 
-    def test_build_query_includes_city_in_select(self):
+    def test_build_query_city_from_monitor_not_issuance(self):
         _, _, _, _, _, select_extra = assetinfo_upload._build_monitor_record_query({})
-        self.assertIn("iss.city", select_extra)
+        self.assertNotIn("iss.city", select_extra)
+        self.assertIn("iss.asset_transfer_discount_rate", select_extra)
 
     def test_unknown_city_where(self):
         where_parts: list[str] = []
@@ -30,7 +31,20 @@ class TestMonitorCityFilter(unittest.TestCase):
             {"city": ISSUANCE_CITY_UNKNOWN},
         )
         self.assertEqual(len(where_parts), 1)
-        self.assertIn("iss.city IS NULL", where_parts[0])
+        self.assertIn("r.city", where_parts[0])
+        self.assertIn("IS NULL", where_parts[0])
+
+    def test_named_city_where_uses_monitor_city(self):
+        where_parts: list[str] = []
+        params: dict = {}
+        assetinfo_upload._append_monitor_issuance_filters(
+            where_parts,
+            params,
+            {"city": "北京"},
+        )
+        self.assertEqual(len(where_parts), 1)
+        self.assertIn("r.city", where_parts[0])
+        self.assertEqual(params["city"], "北京")
 
 
 class TestMonitorExport(unittest.TestCase):
@@ -48,7 +62,6 @@ class TestMonitorExport(unittest.TestCase):
             "trust_product_name": "美润1号",
             "asset_code": "101",
             "custody_asset_code": "101",
-            "source_asset_code": "101-001",
             "data_date": "2026-07-03",
             "overdue_days": 0,
             "initial_transfer_amount": 1000.0,

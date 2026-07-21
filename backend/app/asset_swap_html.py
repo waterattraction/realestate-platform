@@ -485,8 +485,6 @@ def render_swap_page(
         {{ key: 'snapshot_role', label: '角色' }},
         {{ key: 'asset_code', label: '资产主编号' }},
         {{ key: 'custody_asset_code', label: '托管房源编码' }},
-        {{ key: 'source_asset_code', label: '资产编号(房源)' }},
-        {{ key: 'asset_pool_code', label: '资产包编号' }},
         {{ key: 'renovation_vendor', label: '装修服务商' }},
         {{ key: 'data_date', label: '统计日期' }},
         {{ key: 'initial_transfer_amount', label: '初始受让金额', num: true }},

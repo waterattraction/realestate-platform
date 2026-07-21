@@ -330,6 +330,7 @@ def render_workbench_detail_main(
     new_followup: bool = False,
     new_followup_case: bool = False,
     followup_expanded: bool = False,
+    settlement_expanded: bool = False,
     followup_entry_id: int | None = None,
     followup_case_id: int | None = None,
 ) -> str:
@@ -359,14 +360,22 @@ def render_workbench_detail_main(
     )
 
     detail_html = _render_panels(dto, asset, workbench_qs)
+    open_followup = bool(new_followup or new_followup_case or followup_expanded)
+    # 互斥：结算与跟进不同时展开；若两者都请求，优先跟进
+    open_settlement = bool(settlement_expanded) and not open_followup
     initial_followup_pane, force_new_case, scroll_followup = _compute_followup_pane_state(
         asset,
         new_followup=new_followup,
         new_followup_case=new_followup_case,
-        followup_expanded=followup_expanded,
+        followup_expanded=open_followup,
         followup_entry_id=followup_entry_id,
         followup_case_id=followup_case_id,
     )
+    write_mode = "collapsed"
+    if open_settlement:
+        write_mode = "settlement"
+    elif open_followup:
+        write_mode = "followup"
     write_bar = ""
     if asset.get("selected_split") or asset.get("monitor", {}).get("splits"):
         write_bar = _panel_followup_write(
@@ -375,7 +384,7 @@ def render_workbench_detail_main(
             bucket_hidden,
             workbench_qs,
             dto,
-            followup_expanded=new_followup or new_followup_case or followup_expanded,
+            write_mode=write_mode,
             initial_pane=initial_followup_pane or "followup-pane-new",
             selected_case_id=followup_case_id,
             force_new_case=force_new_case,
@@ -388,9 +397,11 @@ def render_workbench_detail_main(
     )
     meta_json = escape(json.dumps(meta, ensure_ascii=False, default=str), quote=True)
     scroll_flag = "1" if scroll_followup else "0"
+    scroll_settlement = "1" if write_mode == "settlement" else "0"
     return (
         f'<main id="workbench-detail" class="detail-main"'
         f' data-scroll-followup="{scroll_flag}"'
+        f' data-scroll-settlement="{scroll_settlement}"'
         f' data-followup-pane="{escape(initial_followup_pane)}"'
         f' data-wb-meta="{meta_json}">'
         f"{detail_html}{write_bar}</main>"
@@ -403,16 +414,18 @@ def build_workbench_fragment_payload(
     new_followup: bool = False,
     new_followup_case: bool = False,
     followup_expanded: bool = False,
+    settlement_expanded: bool = False,
     followup_entry_id: int | None = None,
     followup_case_id: int | None = None,
 ) -> dict:
     """HTML fragment + meta for partial workbench refresh."""
     asset = dto.get("asset") or {}
+    open_followup = bool(new_followup or new_followup_case or followup_expanded)
     initial_followup_pane, _force, scroll_followup = _compute_followup_pane_state(
         asset,
         new_followup=new_followup,
         new_followup_case=new_followup_case,
-        followup_expanded=followup_expanded,
+        followup_expanded=open_followup,
         followup_entry_id=followup_entry_id,
         followup_case_id=followup_case_id,
     )
@@ -421,6 +434,7 @@ def build_workbench_fragment_payload(
         new_followup=new_followup,
         new_followup_case=new_followup_case,
         followup_expanded=followup_expanded,
+        settlement_expanded=settlement_expanded,
         followup_entry_id=followup_entry_id,
         followup_case_id=followup_case_id,
     )
@@ -438,6 +452,7 @@ def render_overdue_workbench_html(
     new_followup: bool = False,
     new_followup_case: bool = False,
     followup_expanded: bool = False,
+    settlement_expanded: bool = False,
     followup_entry_id: int | None = None,
     followup_case_id: int | None = None,
 ) -> str:
@@ -454,6 +469,7 @@ def render_overdue_workbench_html(
         new_followup=new_followup,
         new_followup_case=new_followup_case,
         followup_expanded=followup_expanded,
+        settlement_expanded=settlement_expanded,
         followup_entry_id=followup_entry_id,
         followup_case_id=followup_case_id,
     )
@@ -472,29 +488,35 @@ def render_overdue_workbench_html(
         dto.get("asset") or {},
         new_followup=new_followup,
         new_followup_case=new_followup_case,
-        followup_expanded=followup_expanded,
+        followup_expanded=bool(new_followup or new_followup_case or followup_expanded),
         followup_entry_id=followup_entry_id,
         followup_case_id=followup_case_id,
     )
     scroll_flag = "1" if scroll_followup else "0"
+    scroll_settlement = (
+        "1"
+        if settlement_expanded
+        and not (new_followup or new_followup_case or followup_expanded)
+        else "0"
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>资产逾期跟进工作台 · 房地产资产证券化平台</title>
+    <title>资产管理工作台 · 房地产资产证券化平台</title>
     {_WORKBENCH_CSS}
 </head>
-<body class="workbench-page" data-scroll-followup="{scroll_flag}" data-followup-pane="{escape(_pane)}">
+<body class="workbench-page" data-scroll-followup="{scroll_flag}" data-scroll-settlement="{scroll_settlement}" data-followup-pane="{escape(_pane)}">
 <div class="page-wrap">
 <div class="container">
     <div class="breadcrumb">
-        <a href="/">首页</a> / <a href="/overdue">逾期管理</a> / 资产逾期跟进工作台
+        <a href="/">首页</a> / <a href="/overdue">逾期管理</a> / 资产管理工作台
     </div>
     <header class="page-header">
         <div class="header-row">
-            <h1>资产逾期跟进工作台</h1>
+            <h1>资产管理工作台</h1>
             {header_actions}
         </div>
         <p class="header-sub muted">按资产主编号统一管理监控、还款、跟进与风险。{data_date_span}</p>
@@ -528,16 +550,16 @@ def _render_legacy_error_page(dto: dict) -> str:
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>资产逾期跟进工作台 · 无法解析</title>
+    <title>资产管理工作台 · 无法解析</title>
     {_WORKBENCH_CSS}
 </head>
 <body>
 <div class="page-wrap"><div class="container">
     <div class="breadcrumb">
-        <a href="/">首页</a> / <a href="/overdue">逾期管理</a> / 资产逾期跟进工作台
+        <a href="/">首页</a> / <a href="/overdue">逾期管理</a> / 资产管理工作台
     </div>
     <header class="page-header">
-        <h1>资产逾期跟进工作台</h1>
+        <h1>资产管理工作台</h1>
         <p class="header-sub muted">按资产主编号统一管理监控、还款、跟进与风险。</p>
     </header>
     <div class="panel" style="padding:1.25rem">
@@ -1528,7 +1550,6 @@ def _render_split_list(queue: list, selected_id: int | None, workbench_qs) -> st
     for item in queue:
         active = "active" if item["trust_asset_id"] == selected_id else ""
         recon_flag = "" if item["checks"]["cross_sheet_repayment"]["passed"] else " ⚠"
-        source = escape(_fmt_source_asset_code(item.get("source_asset_code")))
         custody = escape(str(item.get("custody_asset_code") or "—"))
         od_label = (
             f"提前结清 {item.get('last_payment_date') or '—'}"
@@ -1546,12 +1567,11 @@ def _render_split_list(queue: list, selected_id: int | None, workbench_qs) -> st
         <a class="queue-item compact split-item {active}"
            href="/overdue/workbench{workbench_qs(item['trust_asset_id'])}">
             <div class="queue-line1">
-                <span class="queue-code" title="{SOURCE_ASSET_CODE_LABEL}">{source}{recon_flag}</span>
+                <span class="queue-code" title="{CUSTODY_ASSET_CODE_LABEL}">{custody}{recon_flag}</span>
                 {badge}
             </div>
             <div class="queue-line2">
                 <span>{od_label}</span>
-                <span class="muted tiny">{CUSTODY_ASSET_CODE_LABEL} {custody}</span>
                 <span>评分 {score}</span>
                 <span>{follow_label}</span>
             </div>
@@ -1684,15 +1704,14 @@ def _panel_issuance(records: list) -> str:
 
 
 def _repayment_table_row(it: dict) -> str:
-    asset_code = (
-        it.get("asset_code")
-        or it.get("source_asset_code")
-        or "—"
+    repay_date = _fmt_date_only(it.get("repayment_date"))
+    source_label = (
+        "手工结算" if it.get("source") == "manual_settlement" else "导入还款"
     )
     return f"""<tr>
-        <td class="cell-text">{escape(str(asset_code))}</td>
         <td class="cell-text">{escape(str(it.get('custody_asset_code') or '—'))}</td>
-        <td class="cell-text">{escape(_fmt_date_only(it.get('repayment_date')))}</td>
+        <td class="cell-text">{escape(repay_date)}</td>
+        <td class="cell-text repay-source">{escape(source_label)}</td>
         <td class="num">{fmt_money(it.get('actual_repayment_amount'))}</td>
     </tr>"""
 
@@ -1769,15 +1788,15 @@ def _followup_panel_summary(
 def _panel_repayment(rep: dict) -> str:
     items = rep.get("items") or []
     colgroup = """<colgroup>
-        <col class="col-repay-asset">
         <col class="col-repay-custody">
         <col class="col-repay-date">
+        <col class="col-repay-source">
         <col class="col-repay-amt">
     </colgroup>"""
     thead = f"""<thead><tr>
-        <th class="cell-text">{ASSET_CODE_LABEL}</th>
         <th class="cell-text">{CUSTODY_ASSET_CODE_LABEL}</th>
         <th class="cell-text">还款日</th>
+        <th class="cell-text">来源</th>
         <th class="num">还款金额</th>
     </tr></thead>"""
     table_html = _build_panel_preview_table(
@@ -1790,12 +1809,12 @@ def _panel_repayment(rep: dict) -> str:
         empty_message="缺少还款明细，逾期天数可能无法重算",
     )
     recent = _fmt_date_only(rep.get("recent_repayment_date"))
+    period_n = int(rep.get("period_count") or 0)
     return f"""<div class="info-card panel-dual">
         <h3 class="info-card-title">还款情况</h3>
         <div class="info-card-body">
-            <p class="panel-summary-line">累计实还 <strong>{fmt_money(rep.get('total_repaid'))}</strong>
-            · 最近还款日 {escape(recent)}
-            · 期次 {rep.get('period_count', 0)}</p>
+            <p class="panel-summary-line">已还 {period_n}次，共<strong>{fmt_money(rep.get('total_repaid'))}</strong>
+            · 最近还款日 {escape(recent)}</p>
             {table_html}
         </div>
     </div>"""
@@ -2568,6 +2587,305 @@ def _render_followup_case_create_panel(
     </div>"""
 
 
+def _render_settlement_attachment_link(att: dict) -> str:
+    aid = att.get("id")
+    if not aid:
+        return ""
+    fname_raw = str(att.get("file_name") or "")
+    fname_full = escape(fname_raw)
+    kind = _attachment_open_kind(att)
+    href = f"/overdue/workbench/manual-settlements/attachments/{int(aid)}"
+    if kind == "image":
+        return (
+            f'<a class="attachment-open-link attachment-thumb-link" data-kind="image"'
+            f' href="{href}" title="{fname_full} · 点击预览">'
+            f'<img class="attachment-thumb attachment-thumb--saved" src="{href}" '
+            f'alt="{escape(_format_attachment_short_name(fname_raw))}" loading="lazy"></a>'
+        )
+    title = {"pdf": "在新标签页打开"}.get(kind, "打开或下载")
+    short = escape(_format_attachment_short_name(fname_raw))
+    return (
+        f'<a class="attachment-open-link" data-kind="{kind}"'
+        f' href="{href}" title="{fname_full} · {title}">{short}</a>'
+    )
+
+
+def _render_settlement_saved_attachment_chip(att: dict) -> str:
+    aid = att.get("id")
+    if not aid:
+        return ""
+    fname_raw = str(att.get("file_name") or "")
+    fname_full = escape(fname_raw)
+    kind = _attachment_open_kind(att)
+    href = f"/overdue/workbench/manual-settlements/attachments/{int(aid)}"
+    if kind == "image":
+        meta = (
+            f'<a class="attachment-open-link attachment-thumb-link" data-kind="image"'
+            f' href="{href}" title="{fname_full} · 点击预览">'
+            f'<img class="attachment-thumb attachment-thumb--saved" src="{href}" '
+            f'alt="{escape(_format_attachment_short_name(fname_raw))}" loading="lazy"></a>'
+        )
+    else:
+        title = {"pdf": "在新标签页打开"}.get(kind, "打开或下载")
+        short = escape(_format_attachment_short_name(fname_raw))
+        meta = (
+            f'<a class="attachment-open-link attachment-chip-meta-link" data-kind="{kind}"'
+            f' href="{href}" title="{fname_full} · {title}">{short}</a>'
+        )
+    return (
+        f'<span class="attachment-chip attachment-chip-saved" data-attachment-id="{int(aid)}">'
+        f"{meta}"
+        f'<button type="button" class="attachment-chip-remove attachment-saved-remove"'
+        f' aria-label="删除附件">×</button>'
+        f"</span>"
+    )
+
+
+def _render_settlement_attachment_zone(settlement: dict) -> str:
+    attachments = settlement.get("attachments") or []
+    existing_count = len(attachments)
+    if attachments:
+        chips = "".join(
+            c for c in (_render_settlement_saved_attachment_chip(a) for a in attachments) if c
+        )
+        atts_html = f'<div class="followup-saved-attachments">{chips}</div>'
+    else:
+        atts_html = '<div class="followup-saved-attachments"><span class="muted">暂无附件</span></div>'
+    uploader = _render_attachment_uploader(
+        existing_count=existing_count,
+        label=f"追加附件（{existing_count}/10）",
+        collapsible=True,
+    )
+    return f"""<div class="followup-attachment-zone span-full">
+        <div class="followup-attachment-row">
+            <div class="followup-field">
+                <span class="followup-field-label">附件</span>
+                <div class="field-display field-display--attachment">{atts_html}</div>
+            </div>
+        </div>
+        <div class="followup-attachment-upload-slot">{uploader}</div>
+    </div>"""
+
+
+def _render_settlement_repayer_select(selected: str | None = None) -> str:
+    from app.manual_settlement import DEFAULT_REPAYER, REPAYER_OPTIONS
+
+    current = (selected or "").strip() or DEFAULT_REPAYER
+    opts = []
+    for name in REPAYER_OPTIONS:
+        sel = " selected" if name == current else ""
+        opts.append(f'<option value="{escape(name)}"{sel}>{escape(name)}</option>')
+    return (
+        f'<select name="repayer" required class="settlement-repayer-select">'
+        f"{''.join(opts)}</select>"
+    )
+
+
+def _render_settlement_create_fields(today: str) -> str:
+    uploader = _render_attachment_uploader(
+        existing_count=0,
+        label="添加附件（0/10）",
+        collapsible=True,
+    )
+    return f"""<div class="followup-shell-layout">
+        <div class="settlement-fields-row">
+            <div class="followup-field">
+                <span class="followup-field-label">结算日期</span>
+                <input type="date" name="settlement_date" required value="{escape(today)}">
+            </div>
+            <div class="followup-field">
+                <span class="followup-field-label">结算人</span>
+                <input name="settled_by" required placeholder="结算人" autocomplete="name">
+            </div>
+            <div class="followup-field">
+                <span class="followup-field-label">结算主体</span>
+                <input name="payer" required placeholder="结算主体">
+            </div>
+            <div class="followup-field">
+                <span class="followup-field-label">还款方</span>
+                {_render_settlement_repayer_select()}
+            </div>
+            <div class="followup-field">
+                <span class="followup-field-label">结算金额</span>
+                <input name="amount" required inputmode="decimal" placeholder="0.00">
+            </div>
+        </div>
+        <div class="followup-body-grid">
+            <div class="followup-field followup-scroll-cell span-full">
+                <span class="followup-field-label">结算说明</span>
+                <textarea name="description" rows="2" class="followup-textarea-scroll"
+                          placeholder="可选"></textarea>
+            </div>
+        </div>
+        <div class="followup-attachment-zone span-full">
+            <div class="followup-attachment-upload-slot">{uploader}</div>
+        </div>
+    </div>"""
+
+
+def _render_settlement_entry_shell(
+    settlement: dict,
+    product_hidden: str,
+    asset_hidden: str,
+    bucket_hidden: str,
+    workbench_qs,
+) -> str:
+    sid = int(settlement["id"])
+    sd_input = escape(str(settlement.get("settlement_date") or "")[:10])
+    settled_by = escape(str(settlement.get("settled_by") or ""))
+    payer = escape(str(settlement.get("payer") or ""))
+    amount_raw = settlement.get("amount")
+    amount_val = f"{float(amount_raw):.2f}" if amount_raw is not None else ""
+    desc = escape(str(settlement.get("description") or ""))
+    repayer_select = _render_settlement_repayer_select(settlement.get("repayer"))
+
+    shell_layout = f"""<div class="followup-shell-layout">
+        <div class="settlement-fields-row">
+            <div class="followup-field">
+                <span class="followup-field-label">结算日期</span>
+                <input type="date" name="settlement_date" required value="{sd_input}">
+            </div>
+            <div class="followup-field">
+                <span class="followup-field-label">结算人</span>
+                <input name="settled_by" required value="{settled_by}">
+            </div>
+            <div class="followup-field">
+                <span class="followup-field-label">结算主体</span>
+                <input name="payer" required value="{payer}">
+            </div>
+            <div class="followup-field">
+                <span class="followup-field-label">还款方</span>
+                {repayer_select}
+            </div>
+            <div class="followup-field">
+                <span class="followup-field-label">结算金额</span>
+                <input name="amount" required inputmode="decimal" value="{escape(amount_val)}">
+            </div>
+        </div>
+        <div class="followup-body-grid">
+            <div class="followup-field followup-scroll-cell span-full">
+                <span class="followup-field-label">结算说明</span>
+                <textarea name="description" rows="2" class="followup-textarea-scroll">{desc}</textarea>
+            </div>
+        </div>
+        {_render_settlement_attachment_zone(settlement)}
+    </div>"""
+
+    delete_form = f"""
+        <form class="entry-delete-form" method="post" enctype="multipart/form-data"
+              action="/overdue/workbench/manual-settlements/{sid}/delete{workbench_qs()}">
+            <input type="hidden" name="redirect_to_workbench" value="1">
+            {product_hidden}
+            {asset_hidden}
+            {bucket_hidden}
+        </form>"""
+
+    return f"""<div class="followup-entry-shell settlement-shell" data-settlement-id="{sid}" data-editing="1">
+        <form class="followup-form followup-entry-form settlement-form" method="post" enctype="multipart/form-data"
+              action="/overdue/workbench/manual-settlements/{sid}{workbench_qs()}">
+            <input type="hidden" name="redirect_to_workbench" value="1">
+            {product_hidden}
+            {asset_hidden}
+            {bucket_hidden}
+            {shell_layout}
+            <div class="followup-actions-bar">
+                <div class="followup-entry-edit-actions settlement-actions">
+                    <button type="submit" class="btn primary btn-compact">保存修改</button>
+                    <button type="button" class="btn btn-compact entry-delete-btn">删除</button>
+                    <button type="button" class="btn btn-compact settlement-cancel-btn">取消</button>
+                </div>
+            </div>
+        </form>
+        {delete_form}
+    </div>"""
+
+
+def _render_manual_settlement_section(
+    product_hidden: str,
+    asset_hidden: str,
+    bucket_hidden: str,
+    workbench_qs,
+    dto: dict,
+) -> str:
+    from app.timeutil import now_beijing
+
+    asset = dto.get("asset") or {}
+    settlements = list(asset.get("manual_settlements") or [])
+    today = now_beijing().date().isoformat()
+
+    list_rows = ""
+    detail_panels = ""
+    for s in settlements[:50]:
+        sid = int(s["id"])
+        att_n = len(s.get("attachments") or [])
+        att_label = f"{att_n}" if att_n else "—"
+        desc = escape(_truncate_summary(str(s.get("description") or ""), 28))
+        list_rows += f"""<tr class="settlement-list-row" data-settlement-id="{sid}" tabindex="0" role="button">
+            <td class="cell-text">{escape(_fmt_date_only(s.get("settlement_date")))}</td>
+            <td class="cell-text">{escape(str(s.get("settled_by") or "—"))}</td>
+            <td class="cell-text">{escape(str(s.get("payer") or "—"))}</td>
+            <td class="cell-text">{escape(str(s.get("repayer") or "—"))}</td>
+            <td class="num">{fmt_money(s.get("amount"))}</td>
+            <td class="cell-text">{desc or "—"}</td>
+            <td class="cell-text">{att_label}</td>
+        </tr>"""
+        detail_panels += (
+            f'<div class="settlement-detail-panel" data-settlement-panel="{sid}" hidden>'
+            f"{_render_settlement_entry_shell(s, product_hidden, asset_hidden, bucket_hidden, workbench_qs)}"
+            f"</div>"
+        )
+
+    if not list_rows:
+        list_body = (
+            '<tr><td colspan="7" class="empty muted">暂无手工结算，点击下方「＋ 结算」新建</td></tr>'
+        )
+    else:
+        list_body = list_rows
+
+    create_panel = f"""
+        <div class="settlement-detail-panel" data-settlement-panel="new" hidden>
+            <form class="followup-form settlement-form settlement-create-form" method="post"
+                  enctype="multipart/form-data"
+                  action="/overdue/workbench/manual-settlements{workbench_qs()}">
+                <input type="hidden" name="redirect_to_workbench" value="1">
+                {product_hidden}
+                {asset_hidden}
+                {bucket_hidden}
+                {_render_settlement_create_fields(today)}
+                <div class="followup-actions-bar">
+                    <div class="followup-create-actions settlement-actions">
+                        <button type="submit" class="btn primary">保存手工结算</button>
+                        <button type="button" class="btn settlement-cancel-btn">取消</button>
+                    </div>
+                </div>
+            </form>
+        </div>"""
+
+    return f"""
+    <section class="followup-case-section settlement-section" aria-label="手工结算录入"
+             data-settlement-active="">
+        <div class="followup-section-title">手工结算列表</div>
+        <p class="muted tiny">写入独立结算账本，不改动还款明细与监控事实表；点选一行可修改或删除。</p>
+        <div class="table-wrap settlement-list-wrap">
+            <table class="settlement-list-table">
+                <thead><tr>
+                    <th>结算日</th><th>结算人</th><th>结算主体</th><th>还款方</th>
+                    <th class="num">金额</th><th>说明</th><th>附件</th>
+                </tr></thead>
+                <tbody>{list_body}</tbody>
+            </table>
+        </div>
+        <div class="settlement-new-strip">
+            <button type="button" class="settlement-new-chip" id="settlement-new-btn">＋ 结算</button>
+        </div>
+        <div class="settlement-detail" id="settlement-detail">
+            {create_panel}
+            {detail_panels}
+        </div>
+    </section>
+    """
+
+
 def _panel_followup_write(
     product_hidden,
     asset_hidden,
@@ -2575,7 +2893,7 @@ def _panel_followup_write(
     workbench_qs,
     dto,
     *,
-    followup_expanded: bool = False,
+    write_mode: str = "collapsed",
     initial_pane: str = "followup-pane-new",
     selected_case_id: int | None = None,
     force_new_case: bool = False,
@@ -2583,7 +2901,19 @@ def _panel_followup_write(
     data_date = escape(str(dto.get("data_date") or ""))
     asset = dto.get("asset") or {}
     asset_code = escape(str(dto.get("asset_code") or asset.get("asset_code") or ""))
-    expanded = "1" if followup_expanded else "0"
+    mode = write_mode if write_mode in ("followup", "settlement") else "collapsed"
+    if mode == "followup":
+        title_prefix = "跟进事项"
+        icon = "▼"
+        aria_exp = "true"
+    elif mode == "settlement":
+        title_prefix = "手工结算"
+        icon = "▼"
+        aria_exp = "true"
+    else:
+        title_prefix = "资产管理"
+        icon = "▶"
+        aria_exp = "false"
     cases = list(asset.get("followup_cases") or [])
     followup_entries = asset.get("followup_entries") or []
     cases_by_id = {int(c["id"]): c for c in cases if c.get("id") is not None}
@@ -2722,21 +3052,31 @@ def _panel_followup_write(
             "</div>"
         )
 
+    settlement_section = _render_manual_settlement_section(
+        product_hidden, asset_hidden, bucket_hidden, workbench_qs, dto
+    )
+
     return f"""
-    <div class="sticky-write-bar" id="followup-entry-form" data-expanded="{expanded}"
+    <div class="sticky-write-bar" id="followup-entry-form" data-mode="{mode}"
          data-active-case="{"new" if show_new_case else (resolved_case_id or "")}">
         <div class="sticky-write-collapsed">
-            <button type="button" class="write-toggle" id="followup-expand" aria-expanded="{"true" if followup_expanded else "false"}">
-                <span class="write-toggle-icon" aria-hidden="true">▶</span>
-                <span class="sticky-write-title">跟进事项 · {ASSET_CODE_LABEL} {asset_code}</span>
+            <button type="button" class="write-toggle" id="write-mode-toggle" aria-expanded="{aria_exp}">
+                <span class="write-toggle-icon" aria-hidden="true">{icon}</span>
+                <span class="sticky-write-title" data-asset-code="{asset_code}">
+                    <span class="sticky-write-mode-label">{title_prefix}</span>
+                    · {ASSET_CODE_LABEL} {asset_code}
+                </span>
             </button>
             <span class="sticky-write-actions">
-                <button type="button" class="btn primary btn-compact" id="followup-expand-btn">展开录入</button>
-                <button type="button" class="btn btn-compact write-collapse-btn" id="followup-collapse">收起</button>
+                <button type="button" class="btn primary btn-compact write-mode-btn" id="write-open-followup"
+                        data-mode="followup">跟进事项</button>
+                <button type="button" class="btn primary btn-compact write-mode-btn" id="write-open-settlement"
+                        data-mode="settlement">手工结算</button>
+                <button type="button" class="btn btn-compact write-collapse-btn" id="write-collapse">收起</button>
             </span>
         </div>
         <div class="sticky-write-panel" id="followup-write-panel">
-            <div class="sticky-write-inner">
+            <div class="sticky-write-inner write-panel-followup" id="write-panel-followup">
                 <section class="followup-case-section" aria-label="跟进事项">
                     <div class="followup-section-title">跟进事项</div>
                     <div class="followup-case-strip" role="tablist">{case_chips}</div>
@@ -2747,6 +3087,9 @@ def _panel_followup_write(
                     {entries_blocks}
                     {empty_entries_hint}
                 </section>
+            </div>
+            <div class="sticky-write-inner write-panel-settlement" id="write-panel-settlement">
+                {settlement_section}
             </div>
         </div>
     </div>
@@ -3138,7 +3481,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function detailHasUnsavedEdit(root) {
         if (!root) return false;
-        var shell = root.querySelector('.followup-entry-shell:not(.followup-entry-shell--create)[data-editing="1"]');
+        var shell = root.querySelector(
+            '.followup-entry-shell:not(.followup-entry-shell--create):not(.settlement-shell)[data-editing="1"]'
+        );
         return !!shell;
     }
 
@@ -3239,38 +3584,93 @@ document.addEventListener('DOMContentLoaded', function() {
         var opts = { signal: signal };
 
         var writeBar = root.querySelector('#followup-entry-form') || document.getElementById('followup-entry-form');
-        var expandBtn = root.querySelector('#followup-expand-btn');
-        var expandToggle = root.querySelector('#followup-expand');
-        var collapseBtn = root.querySelector('#followup-collapse');
+        var openFollowupBtn = root.querySelector('#write-open-followup');
+        var openSettlementBtn = root.querySelector('#write-open-settlement');
+        var modeToggle = root.querySelector('#write-mode-toggle');
+        var collapseBtn = root.querySelector('#write-collapse');
 
-        function setWriteExpanded(expanded) {
+        function modeLabel(mode) {
+            if (mode === 'followup') return '跟进事项';
+            if (mode === 'settlement') return '手工结算';
+            return '资产管理';
+        }
+
+        function setWriteMode(mode) {
             if (!writeBar) return;
-            writeBar.dataset.expanded = expanded ? '1' : '0';
-            [expandToggle, expandBtn, collapseBtn].forEach(function(el) {
+            var next = (mode === 'followup' || mode === 'settlement') ? mode : 'collapsed';
+            writeBar.dataset.mode = next;
+            var expanded = next !== 'collapsed';
+            [modeToggle, openFollowupBtn, openSettlementBtn, collapseBtn].forEach(function(el) {
                 if (el) el.setAttribute('aria-expanded', expanded ? 'true' : 'false');
             });
             var icon = writeBar.querySelector('.write-toggle-icon');
             if (icon) icon.textContent = expanded ? '▼' : '▶';
+            var label = writeBar.querySelector('.sticky-write-mode-label');
+            if (label) label.textContent = modeLabel(next);
         }
 
-        function expandWriteBar() {
-            setWriteExpanded(true);
+        function expandWriteMode(mode) {
+            setWriteMode(mode);
             if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
 
-        if (expandBtn) expandBtn.addEventListener('click', expandWriteBar, opts);
-        if (expandToggle) {
-            expandToggle.addEventListener('click', function() {
-                if (writeBar && writeBar.dataset.expanded === '1') setWriteExpanded(false);
-                else expandWriteBar();
+        if (openFollowupBtn) {
+            openFollowupBtn.addEventListener('click', function() { expandWriteMode('followup'); }, opts);
+        }
+        if (openSettlementBtn) {
+            openSettlementBtn.addEventListener('click', function() { expandWriteMode('settlement'); }, opts);
+        }
+        if (modeToggle) {
+            modeToggle.addEventListener('click', function() {
+                if (!writeBar) return;
+                if (writeBar.dataset.mode && writeBar.dataset.mode !== 'collapsed') {
+                    setWriteMode('collapsed');
+                }
             }, opts);
         }
         if (collapseBtn) {
-            collapseBtn.addEventListener('click', function() { setWriteExpanded(false); }, opts);
+            collapseBtn.addEventListener('click', function() { setWriteMode('collapsed'); }, opts);
         }
 
-        var scrollFlag = root.getAttribute('data-scroll-followup') || document.body.dataset.scrollFollowup || '0';
-        if (scrollFlag === '1') expandWriteBar();
+        var scrollFollowup = root.getAttribute('data-scroll-followup') || document.body.dataset.scrollFollowup || '0';
+        var scrollSettlement = root.getAttribute('data-scroll-settlement') || document.body.dataset.scrollSettlement || '0';
+        if (scrollFollowup === '1') expandWriteMode('followup');
+        else if (scrollSettlement === '1') expandWriteMode('settlement');
+
+        function setSettlementActive(id) {
+            var section = root.querySelector('.settlement-section');
+            if (!section) return;
+            var next = (id === 'new' || (id != null && String(id) !== '')) ? String(id) : '';
+            section.dataset.settlementActive = next;
+            section.querySelectorAll('.settlement-list-row').forEach(function(row) {
+                row.classList.toggle('active', next !== '' && next !== 'new' && String(row.dataset.settlementId) === next);
+            });
+            section.querySelectorAll('.settlement-detail-panel').forEach(function(panel) {
+                var match = next !== '' && String(panel.dataset.settlementPanel) === next;
+                panel.hidden = !match;
+                if (match) {
+                    var shell = panel.querySelector('.settlement-shell, .settlement-create-form');
+                    if (shell) {
+                        initSavedAttachmentRemovers(shell.closest('.settlement-shell') || panel);
+                        refreshAttachmentUploadLabel(panel);
+                        panel.querySelectorAll('.attachment-uploader').forEach(initAttachmentUploader);
+                    }
+                }
+            });
+            var newBtn = section.querySelector('#settlement-new-btn');
+            if (newBtn) newBtn.classList.toggle('active', next === 'new');
+        }
+
+        var settlementNewBtn = root.querySelector('#settlement-new-btn');
+        if (settlementNewBtn) {
+            settlementNewBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                setSettlementActive('new');
+                var panel = root.querySelector('.settlement-detail-panel[data-settlement-panel="new"]');
+                if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }, opts);
+        }
 
         function refreshAttachmentUploadLabel(shell) {
             if (!shell) return;
@@ -3407,6 +3807,7 @@ document.addEventListener('DOMContentLoaded', function() {
         function reloadWorkbenchAfterFollowup(data) {
             var url = new URL(window.location.href);
             url.searchParams.set('followup_expanded', '1');
+            url.searchParams.delete('settlement_expanded');
             url.searchParams.delete('new_followup');
             url.searchParams.delete('new_followup_case');
             var caseId = data && data.case_id != null ? data.case_id : null;
@@ -3419,9 +3820,22 @@ document.addEventListener('DOMContentLoaded', function() {
             loadWorkbenchDetail(url.toString(), { history: 'replace', skipUnsavedCheck: true });
         }
 
+        function reloadWorkbenchAfterSettlement() {
+            var url = new URL(window.location.href);
+            url.searchParams.set('settlement_expanded', '1');
+            url.searchParams.delete('followup_expanded');
+            url.searchParams.delete('new_followup');
+            url.searchParams.delete('new_followup_case');
+            url.searchParams.delete('followup_case_id');
+            url.searchParams.delete('followup_entry_id');
+            loadWorkbenchDetail(url.toString(), { history: 'replace', skipUnsavedCheck: true });
+        }
+
         function submitFollowupForm(form, extraDisableEls) {
             if (!form || form.dataset.submitting === '1') return;
             form.dataset.submitting = '1';
+            var isSettlement = form.classList.contains('settlement-form')
+                || String(form.getAttribute('action') || form.action || '').indexOf('manual-settlements') >= 0;
             var fd = new FormData(form);
             fd.delete('redirect_to_workbench');
             var btns = Array.prototype.slice.call(form.querySelectorAll('button[type="submit"]'));
@@ -3444,7 +3858,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         catch (e) { data = { detail: text }; }
                     }
                     if (!res.ok) throw new Error(followupApiError(data));
-                    reloadWorkbenchAfterFollowup(data || {});
+                    if (isSettlement) reloadWorkbenchAfterSettlement();
+                    else reloadWorkbenchAfterFollowup(data || {});
                 });
             }).catch(function(err) {
                 form.dataset.submitting = '0';
@@ -3464,6 +3879,28 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         root.addEventListener('click', function(e) {
+            var settlementNew = e.target.closest('#settlement-new-btn, .settlement-new-chip');
+            if (settlementNew && root.contains(settlementNew)) {
+                e.preventDefault();
+                setSettlementActive('new');
+                var newPanel = root.querySelector('.settlement-detail-panel[data-settlement-panel="new"]');
+                if (newPanel) newPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                return;
+            }
+            var settlementRow = e.target.closest('.settlement-list-row');
+            if (settlementRow && root.contains(settlementRow)) {
+                setSettlementActive(settlementRow.dataset.settlementId);
+                var panel = root.querySelector(
+                    '.settlement-detail-panel[data-settlement-panel="' + settlementRow.dataset.settlementId + '"]'
+                );
+                if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                return;
+            }
+            var settlementCancel = e.target.closest('.settlement-cancel-btn');
+            if (settlementCancel && root.contains(settlementCancel)) {
+                setSettlementActive('');
+                return;
+            }
             var chip = e.target.closest('.case-chip');
             if (chip && root.contains(chip)) {
                 switchFollowupCase(chip.dataset.caseId);
@@ -3471,7 +3908,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     var newPane = document.getElementById('followup-pane-new-' + chip.dataset.caseId);
                     if (newPane) switchFollowupPane(newPane.id);
                 }
-                expandWriteBar();
+                expandWriteMode('followup');
                 return;
             }
             var tab = e.target.closest('.entry-tab');
@@ -3493,8 +3930,12 @@ document.addEventListener('DOMContentLoaded', function() {
             var delBtn = e.target.closest('.entry-delete-btn');
             if (delBtn && root.contains(delBtn)) {
                 if (delBtn.disabled) return;
-                if (!confirm('确定删除该条跟进记录？此操作不可恢复。')) return;
                 var shell = delBtn.closest('.followup-entry-shell');
+                var isSettlement = !!(shell && shell.classList.contains('settlement-shell'));
+                var msg = isSettlement
+                    ? '确定删除该条手工结算？删除后不再叠加到已还/剩余与核对。'
+                    : '确定删除该条跟进记录？此操作不可恢复。';
+                if (!confirm(msg)) return;
                 var form = shell && shell.querySelector('.entry-delete-form');
                 if (form) submitFollowupForm(form, [delBtn]);
                 return;
@@ -3542,13 +3983,13 @@ document.addEventListener('DOMContentLoaded', function() {
             if (gotoEntry && root.contains(gotoEntry)) {
                 if (gotoEntry.dataset.caseId) switchFollowupCase(gotoEntry.dataset.caseId);
                 if (gotoEntry.dataset.entryPane) switchFollowupPane(gotoEntry.dataset.entryPane);
-                expandWriteBar();
+                expandWriteMode('followup');
                 if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                 return;
             }
             var statusOpen = e.target.closest('.summary-status-open');
             if (statusOpen && root.contains(statusOpen)) {
-                expandWriteBar();
+                expandWriteMode('followup');
                 if (writeBar && writeBar.dataset.activeCase && writeBar.dataset.activeCase !== 'new') {
                     switchFollowupCase(writeBar.dataset.activeCase);
                 }
@@ -3558,7 +3999,7 @@ document.addEventListener('DOMContentLoaded', function() {
             var newCaseBtn = e.target.closest('.summary-new-case-btn');
             if (newCaseBtn && root.contains(newCaseBtn)) {
                 switchFollowupCase('new');
-                expandWriteBar();
+                expandWriteMode('followup');
                 if (writeBar) writeBar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                 return;
             }
@@ -3740,7 +4181,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // expose for leave-check from navigation
         root._wbConfirmLeave = function() { return confirmLeaveUnsaved(root); };
-        root._wbExpandWriteBar = expandWriteBar;
+        root._wbExpandWriteBar = function() { expandWriteMode('followup'); };
+        root._wbExpandSettlement = function() { expandWriteMode('settlement'); };
     }
 
     function replaceDetailMain(html, meta) {
@@ -3755,6 +4197,7 @@ document.addEventListener('DOMContentLoaded', function() {
         current.replaceWith(next);
         var resolvedMeta = meta || parseDetailMeta(next);
         document.body.dataset.scrollFollowup = next.getAttribute('data-scroll-followup') || '0';
+        document.body.dataset.scrollSettlement = next.getAttribute('data-scroll-settlement') || '0';
         document.body.dataset.followupPane = next.getAttribute('data-followup-pane') || '';
         applyHeaderMeta(resolvedMeta);
         syncHiddenFilters(resolvedMeta);
@@ -4112,10 +4555,19 @@ _WORKBENCH_SPECIFIC_CSS = """
     .panel-fixed-rows td.cell-text { text-align: left; }
     .panel-fixed-rows th.num,
     .panel-fixed-rows td.num { text-align: right; }
-    .col-repay-asset { width: 26%; }
-    .col-repay-custody { width: 26%; }
+    .col-repay-custody { width: 34%; }
     .col-repay-date { width: 22%; }
+    .col-repay-source { width: 18%; }
     .col-repay-amt { width: 26%; }
+    .grid-repay .table-wrap { overflow-x: hidden; }
+    .grid-repay .panel-fixed-rows {
+        table-layout: fixed; width: 100%;
+    }
+    .grid-repay .panel-fixed-rows th,
+    .grid-repay .panel-fixed-rows td {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .grid-repay td.repay-source { color: #94a3b8; font-size: 0.78rem; }
     .col-tl-time { width: 24%; }
     .col-tl-cat { width: 18%; }
     .col-tl-status { width: 16%; }
@@ -4447,15 +4899,62 @@ _WORKBENCH_SPECIFIC_CSS = """
         min-width: 0; flex: 1 1 auto;
     }
     .write-toggle-icon { font-size: 0.65rem; color: #94a3b8; }
-    .sticky-write-bar[data-expanded="0"] .sticky-write-panel { display: none; }
-    .sticky-write-bar[data-expanded="0"] .write-collapse-btn { display: none; }
-    .sticky-write-bar[data-expanded="1"] #followup-expand-btn { display: none; }
+    .sticky-write-bar[data-mode="collapsed"] .sticky-write-panel { display: none; }
+    .sticky-write-bar[data-mode="collapsed"] .write-collapse-btn { display: none; }
+    .sticky-write-bar[data-mode="followup"] .write-mode-btn,
+    .sticky-write-bar[data-mode="settlement"] .write-mode-btn { display: none; }
+    .sticky-write-bar[data-mode="followup"] #write-panel-settlement { display: none; }
+    .sticky-write-bar[data-mode="settlement"] #write-panel-followup { display: none; }
     .sticky-write-panel { border-top: 1px solid rgba(255,255,255,0.06); }
     .sticky-write-inner {
         padding: 0.65rem 0.85rem 0.75rem;
         overflow: visible;
     }
     .sticky-write-title { font-size: 0.95rem; color: #f8fafc; }
+    .settlement-section { margin-top: 0; padding-top: 0; border-top: none; }
+    .settlement-new-strip {
+        display: flex; flex-wrap: wrap; gap: 0.3rem;
+        margin: 0.35rem 0 0.45rem;
+    }
+    .settlement-list-wrap { margin: 0.35rem 0 0.15rem; max-height: 11rem; overflow: auto; }
+    .settlement-list-table { width: 100%; }
+    .settlement-list-row { cursor: pointer; }
+    .settlement-list-row:hover td { background: rgba(56,189,248,0.08); }
+    .settlement-list-row.active td { background: rgba(56,189,248,0.16); }
+    .settlement-detail { margin-top: 0.35rem; }
+    .settlement-detail-panel {
+        border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+        padding: 0.45rem 0.55rem 0.25rem;
+        background: rgba(15,23,42,0.35);
+    }
+    .settlement-shell { border: none; padding: 0; }
+    /* 与「＋ 事项」同款虚线透明，但不用 case-chip，避免误开跟进界面 */
+    .settlement-new-chip {
+        flex-shrink: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.35rem;
+        padding: 0.22rem 0.55rem;
+        border-radius: 6px;
+        border: 1px dashed rgba(148, 163, 184, 0.55);
+        background: transparent;
+        color: #94a3b8;
+        font-size: 0.78rem;
+        font-weight: 600;
+        cursor: pointer;
+        max-width: none;
+    }
+    .settlement-new-chip:hover {
+        border-color: rgba(56, 189, 248, 0.65);
+        color: #e0f2fe;
+        background: rgba(56, 189, 248, 0.08);
+    }
+    .settlement-new-chip.active {
+        border-color: rgba(56, 189, 248, 0.75);
+        color: #e0f2fe;
+        background: rgba(56, 189, 248, 0.12);
+    }
     .followup-section-title {
         font-size: 0.72rem; font-weight: 600; letter-spacing: 0.02em;
         color: #94a3b8; margin: 0 0 0.25rem;
@@ -4574,6 +5073,10 @@ _WORKBENCH_SPECIFIC_CSS = """
     .followup-entry-shell:not(.followup-entry-shell--create) .followup-create-actions {
         display: none !important;
     }
+    .followup-entry-shell.settlement-shell .settlement-actions,
+    .followup-entry-shell.settlement-shell .followup-entry-edit-actions {
+        display: flex !important; gap: 0.45rem; align-items: center;
+    }
     .followup-entry-shell:not(.followup-entry-shell--create)[data-editing="0"] .followup-entry-edit-actions {
         display: none !important;
     }
@@ -4588,6 +5091,26 @@ _WORKBENCH_SPECIFIC_CSS = """
     }
     .followup-create-actions {
         display: flex; gap: 0.45rem; align-items: center;
+    }
+    .settlement-fields-row {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 0.45rem 0.5rem;
+        align-items: start;
+    }
+    .settlement-fields-row select,
+    .settlement-fields-row input {
+        width: 100%; box-sizing: border-box;
+        padding: 0.32rem 0.45rem; border-radius: 6px;
+        border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.2);
+        color: #e2e8f0; font-size: 0.82rem;
+    }
+    .settlement-repayer-select {
+        max-width: 100%;
+        text-overflow: ellipsis;
+    }
+    @media (max-width: 1100px) {
+        .settlement-fields-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
     .followup-meta-row {
         display: grid;

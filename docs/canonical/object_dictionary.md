@@ -18,6 +18,12 @@
 | `ImportRun` | 导入批次 | `assetinfo_pipeline_runs` / `issuance_import_runs` | `id` | 按模块 | 导入 | 物理表（多表） |
 | `ImportSheetRun` | Sheet 导入记录 | `issuance_import_sheet_runs` 等 | `id` | scope | 导入 | 物理表 |
 | `User` | 用户 | `users` | `id` | `username` | 认证/审计 | 物理表 |
+| `AssetRepurchaseUnit` | 回购单位 | `asset_repurchase_units` | `id` | `company_name` | 资产回购 | 物理表 |
+| `AssetRepurchaseOrder` | 资产回购单 | `asset_repurchase_orders` | `id` | — | 资产回购 | 物理表；含单位快照 |
+| `AssetRepurchaseAsset` | 回购资产（含冻结监控快照） | `asset_repurchase_assets` | `(repurchase_order_id, asset_code)` | 资产主编号 | 资产回购 | 物理表；`historical_property_codes` 留档全部 custody/source 编号 |
+| `ManualSettlement` | 手工结算 | `trust_asset_manual_settlements` | `id` | `(product, asset_code, settlement_date, id)` | 资产管理工作台 / 披露读路径 | 物理表；独立账本，不写还款/监控事实 |
+| `ManualSettlementAttachment` | 手工结算附件 | `trust_asset_manual_settlement_attachments` | `id` | — | 资产管理工作台 | 物理表 |
+| `DisclosureSnapshot` | 数据披露快照 | `disclosure_snapshots` | `id` | `(snapshot_type, as_of_date, frozen_at)` | 还款/监控披露 | 物理表；还款可含 `as_of_start_date` |
 
 ## 对象详情
 
@@ -117,3 +123,6 @@
 | 日期 | 变更 |
 |------|------|
 | 2026-06 | M2.5 首批 12 对象 |
+| 2026-07-21 | 新增资产回购域 3 对象（`AssetRepurchaseUnit` / `AssetRepurchaseOrder` / `AssetRepurchaseAsset`）；回购域以资产主编号为业务标识（identifiers 例外见 `docs/data_dictionary/asset_repurchase.md`） |
+| 2026-07-21 | 新增手工结算域 2 对象（`ManualSettlement` / `ManualSettlementAttachment`）；读路径 overlay，不写还款/监控事实表 |
+| 2026-07-21 | 补充 `DisclosureSnapshot`（还款披露日期范围 `as_of_start_date`） |

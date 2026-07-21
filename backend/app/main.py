@@ -2,7 +2,7 @@ import os
 import re
 import uuid
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from html import escape
 from typing import Annotated
@@ -18,10 +18,13 @@ from app.api import asset_workbench
 from app.api import overdue_ops
 from app.api import overdue_workbench
 from app.api import followups
+from app.api import manual_settlements
 from app.api.spatial import build_spatial_router
 from app import assetinfo_html
 from app import assetinfo_pipeline
 from app import assetinfo_upload
+from app import asset_repurchase
+from app import asset_repurchase_html
 from app import asset_swap
 from app import asset_swap_html
 from app import disclosure
@@ -65,6 +68,7 @@ app.include_router(asset_workbench.router)
 app.include_router(overdue_ops.router)
 app.include_router(overdue_workbench.router)
 app.include_router(followups.router)
+app.include_router(manual_settlements.router)
 
 get_current_user = auth.make_current_user_dependency(engine)
 get_page_user = auth.make_page_user_dependency(engine)
@@ -350,7 +354,7 @@ def _render_overdue_header_meta(overview: dict) -> str:
             <br><span class="meta-hint">监控快照日期为资产表数据截止日；逾期天数 = 重算日 −（最后付款日或最早发行日的下月同日）。</span>
             {stale_note}
             {multi_product_note}
-            · <a href="/overdue/workbench">逾期工作台 →</a>
+            · <a href="/overdue/workbench">资产管理工作台 →</a>
         </p>
     """
 
@@ -580,6 +584,27 @@ def _bucket_amount_totals(items: list) -> dict:
 def _portfolio_city_fields(row) -> dict:
     display, filter_key = _normalize_portfolio_city(getattr(row, "issuance_city", None))
     return {"city": display, "city_filter": filter_key}
+
+
+def _apply_manual_settlement_overlay_to_item(
+    item: dict, settlement_sum: float
+) -> dict:
+    """组合/清单行：叠加手工结算金额；剩余≈0 时标为 ES。"""
+    total = float(settlement_sum or 0)
+    if total == 0:
+        return item
+    from app.manual_settlement import apply_amount_overlay
+
+    repaid, remaining = apply_amount_overlay(
+        item.get("repaid_amount"), item.get("remaining_amount"), total
+    )
+    out = {**item, "repaid_amount": repaid, "remaining_amount": remaining}
+    if is_es_closed(remaining):
+        out["delinquency_bucket"] = "ES"
+        out["risk_level"] = "ES"
+        out["overdue_days"] = None
+        out["status"] = "closed"
+    return out
 
 
 def is_es_closed(remaining_amount: float, *, tolerance: float = RECONCILIATION_TOLERANCE) -> bool:
@@ -1173,8 +1198,23 @@ def fetch_overdue_overview(
     )
 
     top_overdue_by_bucket: dict[str, list] = {k: [] for k in empty_buckets}
+    settlement_sums = {}
+    try:
+        from app import manual_settlement as _ms
+
+        settlement_sums = _ms.settlement_sums_by_asset_code(
+            conn, product_ids=trust_product_ids
+        )
+    except Exception:
+        settlement_sums = {}
     for r in overdue_rows:
         item = _custody_item_from_row(r)
+        ac = str(item.get("asset_code") or "").strip()
+        pid = item.get("trust_product_id")
+        if pid is not None and ac:
+            item = _apply_manual_settlement_overlay_to_item(
+                item, settlement_sums.get((int(pid), ac), 0)
+            )
         if not _apply_custody_list_filters(item, list_filters):
             continue
         bucket = item["delinquency_bucket"]
@@ -1394,10 +1434,26 @@ def fetch_overdue_checks(conn, trust_product_ids: list[int] | None = None, data_
 
     items = []
     resolved_date = data_date
+    settlement_sums = {}
+    try:
+        from app import manual_settlement as _ms
+
+        settlement_sums = _ms.settlement_sums_by_asset_code(
+            conn, product_ids=trust_product_ids
+        )
+    except Exception:
+        settlement_sums = {}
     for row in rows:
         if resolved_date is None:
             resolved_date = str(row.data_date)
-        items.append(_custody_item_from_row(row))
+        item = _custody_item_from_row(row)
+        ac = str(item.get("asset_code") or "").strip()
+        pid = item.get("trust_product_id")
+        if pid is not None and ac:
+            item = _apply_manual_settlement_overlay_to_item(
+                item, settlement_sums.get((int(pid), ac), 0)
+            )
+        items.append(item)
 
     return {"data_date": resolved_date, "items": items}
 
@@ -1522,8 +1578,13 @@ def recalculate_overdue_days(
 
     - as_of 默认当天，全产品统一
     - 多产品：每个产品取各自 MAX(data_date) 再 UPDATE
-    - 公式：as_of − (锚点日 + 1 calendar month)；锚点=最后付款日或最早发行日
+    - 公式：as_of − (锚点日 + 1 calendar month)
+    - 锚点 = MAX(导入还款最大还款日, 未作废且 settlement_date≤as_of 的最大结算日)；
+      仅有手工结算也算「有还款」
+    - 有效剩余 = max(0, remaining − Σ结算)；≤容差则逾期置空（不写回金额列）
     """
+    from app.overdue.recalc_monitor import recompute_monitor_overdue_for_scope
+
     today = as_of or date.today()
     product_ids: list[int] | None
     if trust_product_ids is not None:
@@ -1567,151 +1628,32 @@ def recalculate_overdue_days(
     warnings: list[str] = []
 
     for pid, resolved_dd in scopes:
-        scope_parts = [
-            "m.trust_product_id = :trust_product_id",
-            "m.data_date = :data_date",
-        ]
-        params = {
+        counts = recompute_monitor_overdue_for_scope(
+            conn,
+            trust_product_id=pid,
+            data_date=resolved_dd,
+            as_of=today,
+            tolerance=RECONCILIATION_TOLERANCE,
+        )
+        scope_params = {
             "trust_product_id": pid,
             "data_date": resolved_dd,
-            "as_of": today,
-            "tolerance": RECONCILIATION_TOLERANCE,
         }
-        scope_sql = " AND ".join(scope_parts)
-
-        with_repayment = conn.execute(
-            text(f"""
-                UPDATE trust_asset_monitor_records m
-                SET
-                    last_payment_date = rp.max_rd,
-                    max_payment_date = rp.max_rd,
-                    overdue_days = CASE
-                        WHEN m.remaining_amount <= :tolerance THEN NULL
-                        ELSE (CAST(:as_of AS date) - (rp.max_rd + INTERVAL '1 month')::date)
-                    END,
-                    overdue_days_as_of = :as_of,
-                    updated_at = NOW()
-                FROM (
-                    SELECT r.trust_product_id, ta.asset_code, MAX(r.repayment_date) AS max_rd
-                    FROM trust_repayment_detail_records r
-                    INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
-                    WHERE r.trust_product_id = :trust_product_id
-                    GROUP BY r.trust_product_id, ta.asset_code
-                ) rp
-                WHERE m.trust_product_id = rp.trust_product_id
-                  AND m.asset_code = rp.asset_code
-                  AND {scope_sql}
-            """),
-            params,
-        )
-
-        without_repayment_from_issue = conn.execute(
-            text(f"""
-                UPDATE trust_asset_monitor_records m
-                SET
-                    last_payment_date = NULL,
-                    max_payment_date = NULL,
-                    overdue_days = CASE
-                        WHEN m.remaining_amount <= :tolerance THEN NULL
-                        ELSE (CAST(:as_of AS date) - (iss.min_issue_date + INTERVAL '1 month')::date)
-                    END,
-                    overdue_days_as_of = :as_of,
-                    updated_at = NOW()
-                FROM (
-                    SELECT
-                        m2.id AS monitor_id,
-                        COALESCE(ip.min_issue_date, ia.min_issue_date) AS min_issue_date
-                    FROM trust_asset_monitor_records m2
-                    LEFT JOIN (
-                        SELECT
-                            i.trust_product_id,
-                            regexp_replace(COALESCE(i.custody_asset_code, ''), '\.0$', '') AS custody_norm,
-                            MIN(i.issue_date) AS min_issue_date
-                        FROM trust_product_issuance_asset_records i
-                        WHERE i.trust_product_id = :trust_product_id
-                        GROUP BY i.trust_product_id, custody_norm
-                    ) ip
-                      ON ip.trust_product_id = m2.trust_product_id
-                     AND ip.custody_norm = regexp_replace(
-                         COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\.0$', ''
-                     )
-                    LEFT JOIN (
-                        SELECT
-                            regexp_replace(COALESCE(i.custody_asset_code, ''), '\.0$', '') AS custody_norm,
-                            MIN(i.issue_date) AS min_issue_date
-                        FROM trust_product_issuance_asset_records i
-                        GROUP BY custody_norm
-                    ) ia
-                      ON ia.custody_norm = regexp_replace(
-                          COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\.0$', ''
-                      )
-                    WHERE m2.trust_product_id = :trust_product_id
-                      AND m2.data_date = :data_date
-                      AND COALESCE(ip.min_issue_date, ia.min_issue_date) IS NOT NULL
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM trust_repayment_detail_records r
-                          INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
-                          WHERE r.trust_product_id = m2.trust_product_id
-                            AND ta.asset_code = m2.asset_code
-                      )
-                ) iss
-                WHERE m.id = iss.monitor_id
-            """),
-            params,
-        )
-
-        missing_issuance = conn.execute(
-            text(f"""
-                UPDATE trust_asset_monitor_records m
-                SET
-                    last_payment_date = NULL,
-                    max_payment_date = NULL,
-                    overdue_days = NULL,
-                    overdue_days_as_of = :as_of,
-                    updated_at = NOW()
-                WHERE {scope_sql}
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM trust_repayment_detail_records r
-                      INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
-                      WHERE r.trust_product_id = m.trust_product_id
-                        AND ta.asset_code = m.asset_code
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM trust_product_issuance_asset_records i
-                      WHERE regexp_replace(COALESCE(i.custody_asset_code, ''), '\.0$', '')
-                          = regexp_replace(
-                              COALESCE(m.custody_asset_code, m.asset_code, ''), '\.0$', ''
-                          )
-                  )
-            """),
-            params,
-        )
-
-        conn.execute(
-            text(f"""
-                UPDATE trust_asset_monitor_records m
-                SET
-                    overdue_days = NULL,
-                    overdue_days_as_of = :as_of,
-                    updated_at = NOW()
-                WHERE {scope_sql}
-                  AND m.remaining_amount <= :tolerance
-                  AND m.overdue_days IS NOT NULL
-            """),
-            params,
-        )
-
         total_row = conn.execute(
-            text(f"SELECT COUNT(*) AS cnt FROM trust_asset_monitor_records m WHERE {scope_sql}"),
-            params,
+            text(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM trust_asset_monitor_records m
+                WHERE m.trust_product_id = :trust_product_id
+                  AND m.data_date = :data_date
+                """
+            ),
+            scope_params,
         ).fetchone()
         updated_count = int(total_row.cnt) if total_row else 0
-        from_issue = int(without_repayment_from_issue.rowcount or 0)
-        missing = int(missing_issuance.rowcount or 0)
-        with_repay = int(with_repayment.rowcount or 0)
+        with_repay = int(counts["with_repayment_updated"])
+        from_issue = int(counts["no_repayment_from_issue_count"])
+        missing = int(counts["missing_issuance_count"])
 
         total_updated += updated_count
         total_with_repay += with_repay
@@ -1728,7 +1670,7 @@ def recalculate_overdue_days(
 
     if total_missing > 0:
         warnings.append(
-            f"部分资产无还款明细且无发行日，逾期天数置空（{total_missing} 条）"
+            f"部分资产无还款/手工结算且无发行日，逾期天数置空（{total_missing} 条）"
         )
 
     product_count = len(scopes)
@@ -4503,6 +4445,10 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                     <svg viewBox="0 0 24 24"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
                     资产置换
                 </a>
+                <a href="/asset-repurchase" class="op-chip op-blue">
+                    <svg viewBox="0 0 24 24"><path d="M12 6V3L8 7l4 4V8c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 17.03 20 15.57 20 14c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 9.74C4.46 10.97 4 12.43 4 14c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
+                    资产回购
+                </a>
             </div>
         </section>
 
@@ -4995,6 +4941,7 @@ def overdue_workbench_fragment(
     new_followup: str | None = None,
     new_followup_case: str | None = None,
     followup_expanded: str | None = None,
+    settlement_expanded: str | None = None,
     followup_entry_id: str | None = None,
     followup_case_id: str | None = None,
     trust_marker: str | None = None,
@@ -5052,6 +4999,7 @@ def overdue_workbench_fragment(
             query_utils.parse_optional_int(followup_expanded)
             or query_utils.parse_optional_int(new_followup_case)
         ),
+        settlement_expanded=bool(query_utils.parse_optional_int(settlement_expanded)),
         followup_entry_id=query_utils.parse_optional_int(followup_entry_id),
         followup_case_id=query_utils.parse_optional_int(followup_case_id),
     )
@@ -5072,6 +5020,7 @@ def overdue_workbench_page(
     new_followup: str | None = None,
     new_followup_case: str | None = None,
     followup_expanded: str | None = None,
+    settlement_expanded: str | None = None,
     followup_entry_id: str | None = None,
     followup_case_id: str | None = None,
     trust_marker: str | None = None,
@@ -5137,6 +5086,8 @@ def overdue_workbench_page(
                 redirect_pairs.append(("new_followup_case", "1"))
             if query_utils.parse_optional_int(followup_expanded):
                 redirect_pairs.append(("followup_expanded", "1"))
+            if query_utils.parse_optional_int(settlement_expanded):
+                redirect_pairs.append(("settlement_expanded", "1"))
             parsed_entry_id = query_utils.parse_optional_int(followup_entry_id)
             if parsed_entry_id:
                 redirect_pairs.append(("followup_entry_id", str(parsed_entry_id)))
@@ -5178,6 +5129,7 @@ def overdue_workbench_page(
             query_utils.parse_optional_int(followup_expanded)
             or query_utils.parse_optional_int(new_followup_case)
         ),
+        settlement_expanded=bool(query_utils.parse_optional_int(settlement_expanded)),
         followup_entry_id=query_utils.parse_optional_int(followup_entry_id),
         followup_case_id=query_utils.parse_optional_int(followup_case_id),
     )
@@ -5699,6 +5651,7 @@ def disclosure_repayment_page(
     trust_product_id: str | None = None,
     trust_product_ids: list[str] | None = Query(default=None),
     as_of: str | None = None,
+    as_of_start: str | None = None,
 ):
     pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
     with engine.connect() as conn:
@@ -5707,11 +5660,15 @@ def disclosure_repayment_page(
     if not pids:
         pids = [int(p["id"]) for p in products]
     as_of_val = query_utils.parse_optional_date(as_of) or date.today().isoformat()
+    as_of_start_val = query_utils.parse_optional_date(as_of_start)
+    if not as_of_start_val:
+        as_of_start_val = (date.fromisoformat(as_of_val) - timedelta(days=6)).isoformat()
     html = disclosure_html.render_repayment_disclosure_page(
         products,
         snapshots,
         selected_ids=pids,
         as_of=as_of_val,
+        as_of_start=as_of_start_val,
         username=page_user["username"],
     )
     return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
@@ -5763,14 +5720,23 @@ def disclosure_repayment_preview(
     trust_product_id: str | None = None,
     trust_product_ids: list[str] | None = Query(default=None),
     as_of: str | None = None,
+    as_of_start: str | None = None,
     snapshot_id: int | None = None,
 ):
     with engine.connect() as conn:
         if snapshot_id is not None:
             return disclosure.preview_repayment_snapshot(conn, int(snapshot_id))
         pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
+        start = (
+            disclosure.parse_as_of_date(as_of_start)
+            if as_of_start
+            else None
+        )
         return disclosure.preview_repayment_live(
-            conn, pids or [], disclosure.parse_as_of_date(as_of),
+            conn,
+            pids or [],
+            disclosure.parse_as_of_date(as_of),
+            as_of_start=start,
         )
 
 
@@ -5797,14 +5763,21 @@ def disclosure_repayment_freeze(
     trust_product_id: str | None = None,
     trust_product_ids: list[str] | None = Query(default=None),
     as_of: str | None = None,
+    as_of_start: str | None = None,
     note: str | None = None,
 ):
     pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
+    start = (
+        disclosure.parse_as_of_date(as_of_start)
+        if as_of_start
+        else None
+    )
     with engine.begin() as conn:
         return disclosure.freeze_repayment(
             conn,
             pids or [],
             disclosure.parse_as_of_date(as_of),
+            as_of_start=start,
             note=note,
             created_by=current_user.get("username"),
         )
@@ -5844,15 +5817,33 @@ def disclosure_repayment_export(
     trust_product_id: str | None = None,
     trust_product_ids: list[str] | None = Query(default=None),
     as_of: str | None = None,
+    as_of_start: str | None = None,
     snapshot_id: int | None = None,
 ):
     pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
     with engine.connect() as conn:
+        if snapshot_id is not None:
+            zip_bytes, filename = disclosure.export_repayment_snapshot_zip(
+                conn, int(snapshot_id)
+            )
+            return Response(
+                content=zip_bytes,
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+                },
+            )
+        start = (
+            disclosure.parse_as_of_date(as_of_start)
+            if as_of_start
+            else None
+        )
         xlsx_bytes = disclosure.export_repayment_xlsx(
             conn,
             product_ids=pids,
             as_of=disclosure.parse_as_of_date(as_of) if as_of else None,
-            snapshot_id=int(snapshot_id) if snapshot_id is not None else None,
+            as_of_start=start,
+            snapshot_id=None,
         )
     ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
     filename = f"还款明细披露信息_{ts}.xlsx"
@@ -5875,17 +5866,15 @@ def disclosure_monitor_export(
 ):
     pids = _disclosure_product_ids(trust_product_id, trust_product_ids)
     with engine.connect() as conn:
-        xlsx_bytes = disclosure.export_monitor_xlsx(
+        zip_bytes, filename = disclosure.export_monitor_zip(
             conn,
             product_ids=pids,
             as_of=disclosure.parse_as_of_date(as_of) if as_of else None,
             snapshot_id=int(snapshot_id) if snapshot_id is not None else None,
         )
-    ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
-    filename = f"资产监控表_{ts}.xlsx"
     return Response(
-        content=xlsx_bytes,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        content=zip_bytes,
+        media_type="application/zip",
         headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
         },
@@ -6106,6 +6095,169 @@ def asset_swap_order_void(
 ):
     with engine.begin() as conn:
         return asset_swap.void_swap_order(
+            conn,
+            order_id,
+            voided_by=current_user.get("username"),
+        )
+
+
+# ── 资产回购（仅写 asset_repurchase_* 新表，不改事实表）─────────
+
+
+@app.get("/asset-repurchase", response_class=HTMLResponse)
+def asset_repurchase_page(
+    page_user: Annotated[dict, Depends(get_page_user)],
+):
+    with engine.connect() as conn:
+        products = fetch_trust_products(conn)
+    html = asset_repurchase_html.render_repurchase_page(
+        products,
+        username=page_user["username"],
+    )
+    return HTMLResponse(content=auth_html.inject_user_bar(html, page_user["username"]))
+
+
+@app.get("/asset-repurchase/assets")
+def asset_repurchase_assets(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    trust_product_id: str = Query(...),
+):
+    pid = query_utils.parse_optional_int(trust_product_id)
+    if pid is None:
+        raise HTTPException(status_code=400, detail="请选择信托产品")
+    with engine.connect() as conn:
+        return asset_repurchase.fetch_repurchasable_assets(conn, pid)
+
+
+@app.get("/asset-repurchase/units")
+def asset_repurchase_units_list(
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.connect() as conn:
+        return {"items": asset_repurchase.list_units(conn)}
+
+
+@app.post("/asset-repurchase/units")
+def asset_repurchase_unit_create(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    with engine.begin() as conn:
+        return asset_repurchase.create_unit(
+            conn,
+            company_name=str(body.get("company_name") or ""),
+            contact_name=str(body.get("contact_name") or ""),
+            contact_email=str(body.get("contact_email") or ""),
+        )
+
+
+@app.put("/asset-repurchase/units/{unit_id}")
+def asset_repurchase_unit_update(
+    unit_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    with engine.begin() as conn:
+        return asset_repurchase.update_unit(
+            conn,
+            unit_id,
+            company_name=body.get("company_name"),
+            contact_name=body.get("contact_name"),
+            contact_email=body.get("contact_email"),
+            status=body.get("status"),
+        )
+
+
+def _parse_repurchase_payload(body: dict) -> dict:
+    pid = query_utils.parse_optional_int(body.get("trust_product_id"))
+    if pid is None:
+        raise HTTPException(status_code=400, detail="请选择信托产品")
+    unit_id = query_utils.parse_optional_int(body.get("repurchase_unit_id"))
+    if unit_id is None:
+        raise HTTPException(status_code=400, detail="请选择回购单位")
+    raw_date = query_utils.clean_optional_str(body.get("repurchase_business_date"))
+    if not raw_date:
+        raise HTTPException(status_code=400, detail="请选择回购业务日")
+    try:
+        biz_date = date.fromisoformat(raw_date[:10])
+    except ValueError:
+        raise HTTPException(status_code=400, detail="回购业务日格式不正确")
+    codes = body.get("asset_codes")
+    if not isinstance(codes, list):
+        raise HTTPException(status_code=400, detail="asset_codes 必须为数组")
+    amounts = body.get("amounts")
+    if amounts is not None and not isinstance(amounts, dict):
+        raise HTTPException(status_code=400, detail="amounts 必须为对象")
+    return {
+        "trust_product_id": pid,
+        "asset_codes": [str(c) for c in codes],
+        "repurchase_unit_id": unit_id,
+        "repurchase_business_date": biz_date,
+        "amounts": amounts,
+        "note": query_utils.clean_optional_str(body.get("note")),
+    }
+
+
+@app.post("/asset-repurchase/preview")
+def asset_repurchase_preview(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    payload = _parse_repurchase_payload(body)
+    with engine.connect() as conn:
+        return asset_repurchase.build_repurchase_preview(
+            conn,
+            trust_product_id=payload["trust_product_id"],
+            asset_codes=payload["asset_codes"],
+            repurchase_unit_id=payload["repurchase_unit_id"],
+            repurchase_business_date=payload["repurchase_business_date"],
+            amounts=payload["amounts"],
+        )
+
+
+@app.post("/asset-repurchase/execute")
+def asset_repurchase_execute(
+    current_user: Annotated[dict, Depends(get_current_user)],
+    body: dict = Body(...),
+):
+    payload = _parse_repurchase_payload(body)
+    with engine.begin() as conn:
+        return asset_repurchase.execute_repurchase(
+            conn,
+            trust_product_id=payload["trust_product_id"],
+            asset_codes=payload["asset_codes"],
+            repurchase_unit_id=payload["repurchase_unit_id"],
+            repurchase_business_date=payload["repurchase_business_date"],
+            amounts=payload["amounts"],
+            note=payload["note"],
+            executed_by=current_user.get("username"),
+        )
+
+
+@app.get("/asset-repurchase/orders")
+def asset_repurchase_orders_list(
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.connect() as conn:
+        return {"items": asset_repurchase.list_orders(conn)}
+
+
+@app.get("/asset-repurchase/orders/{order_id}")
+def asset_repurchase_order_detail(
+    order_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.connect() as conn:
+        return asset_repurchase.get_order(conn, order_id)
+
+
+@app.post("/asset-repurchase/orders/{order_id}/void")
+def asset_repurchase_order_void(
+    order_id: int,
+    current_user: Annotated[dict, Depends(get_current_user)],
+):
+    with engine.begin() as conn:
+        return asset_repurchase.void_order(
             conn,
             order_id,
             voided_by=current_user.get("username"),

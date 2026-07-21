@@ -56,7 +56,6 @@ MONITOR_EXPORT_COLUMNS: tuple[str, ...] = (
     "trust_product_name",
     "asset_code",
     "custody_asset_code",
-    "source_asset_code",
     "data_date",
     "overdue_days",
     "initial_transfer_amount",
@@ -82,7 +81,6 @@ MONITOR_EXPORT_LABELS: dict[str, str] = {
     "trust_product_name": "信托产品",
     "asset_code": "资产主编号",
     "custody_asset_code": "托管房源号",
-    "source_asset_code": "资产信托号",
     "data_date": "数据日期",
     "overdue_days": "逾期天数",
     "initial_transfer_amount": "初始受让金额",
@@ -108,7 +106,6 @@ MONITOR_SORT_COLUMNS: dict[str, str] = {
     "trust_product_name": "tp.name",
     "asset_code": "r.asset_code",
     "custody_asset_code": "r.custody_asset_code",
-    "source_asset_code": "r.source_asset_code",
     "data_date": "r.data_date",
     "overdue_days": "r.overdue_days",
     "initial_transfer_amount": "r.initial_transfer_amount",
@@ -121,7 +118,6 @@ MONITOR_SORT_COLUMNS: dict[str, str] = {
 MONITOR_DEFAULT_ORDER_BY = """
     r.data_date DESC,
     r.custody_asset_code ASC NULLS LAST,
-    r.source_asset_code ASC NULLS LAST,
     r.asset_code ASC,
     r.id ASC
 """
@@ -226,7 +222,6 @@ COL_REMAINING = cleanse.COL_ALIASES["remaining_amount"]
 COL_LAST_RENOVATION_PAYMENT = cleanse.COL_ALIASES["last_renovation_payment_date"]
 
 REPAYMENT_OPTIONAL_FIELDS = (
-    "asset_pool_code",
     "current_payer",
     "planned_repayment_amount",
     "initial_renovation_amount",
@@ -235,7 +230,6 @@ REPAYMENT_OPTIONAL_FIELDS = (
 )
 
 MONITOR_OPTIONAL_FIELDS = (
-    "asset_pool_code",
     "renovation_vendor",
     "asset_status",
     "community_name",
@@ -247,6 +241,13 @@ MONITOR_OPTIONAL_FIELDS = (
     "withholding_ratio",
     "actual_monthly_rent",
 )
+
+# 美好生活3号 · Sheet「0612已还款」：托管编码历史上有误（见 product3_repay_0612_custody）。
+# 本次不改写已有 asset_code；该 sheet 不参与任何主编号推导/回填。
+PRODUCT3_REPAY_0612_EXCLUDE = {
+    "trust_product_id": 3,
+    "source_sheet_name": "0612已还款",
+}
 
 MONITOR_OPTIONAL_DATE_FIELDS = frozenset({
     "custody_agreement_sign_date",
@@ -550,7 +551,7 @@ def _normalize_excel_asset_code(value) -> str | None:
 
 
 def _primary_asset_code_from_trust_no(trust_no: str | None) -> str | None:
-    """资产主编号：资产信托号左 12 位；不足 12 位则用整值。"""
+    """资产主编号：Excel 资产编号(房源)/托管号左 12 位；不足 12 位则用整值。"""
     if not trust_no:
         return None
     return trust_no[:12] if len(trust_no) >= 12 else trust_no
@@ -559,7 +560,12 @@ def _primary_asset_code_from_trust_no(trust_no: str | None) -> str | None:
 def _resolve_monitor_asset_fields(
     row: pd.Series, col_asset: str | None, col_custody: str | None
 ) -> tuple[str | None, str | None, str | None]:
-    """监控导入：资产编号(房源)整列→source；托管列→custody；信托号左12→asset_code。"""
+    """监控/还款/回款计划统一解析。
+
+    - Excel「资产编号(房源)」→ asset_code（仅左 12）
+    - 「托管房源编码」→ custody_asset_code；缺省时 custody = 左 12（与主编号相同）
+    - source_asset_code 停用：第三返回值恒为 None（不再导入）
+    """
     trust_no = _normalize_excel_asset_code(row[col_asset]) if col_asset else None
     custody = _normalize_excel_asset_code(row[col_custody]) if col_custody else None
 
@@ -567,11 +573,11 @@ def _resolve_monitor_asset_fields(
         asset_code = _primary_asset_code_from_trust_no(trust_no)
         if custody is None:
             custody = asset_code
-        return asset_code, custody, trust_no
+        return asset_code, custody, None
 
     if custody:
         primary = _primary_asset_code_from_trust_no(custody)
-        return primary, custody, custody
+        return primary, custody, None
 
     return None, None, None
 
@@ -610,7 +616,8 @@ def _apply_asset_code_mismatch_precheck(result: dict[str, Any], mismatches: list
     result["warnings"].insert(
         0,
         f"[ERROR] 资产编号(房源)与托管房源编码不一致 {count} 行；"
-        f"导入时以托管编号定位底层资产，分笔号写入 source_asset_code。样例: {sample_txt}",
+        f"导入时以托管编号定位底层资产；资产编号(房源)仅用于推导主编号（左12），"
+        f"不再写入 source_asset_code。样例: {sample_txt}",
     )
     if result.get("action") in ("failed", "reject"):
         return
@@ -691,7 +698,13 @@ def _upsert_trust_asset(
     *,
     distinct_custody: bool = False,
 ) -> int:
-    source = source_asset_code or asset_code
+    """Upsert trust_assets.
+
+    - 已有非空 asset_code **永不覆盖**
+    - source_asset_code 停写入：UPDATE 不改历史；INSERT 写 NULL
+    - 定位优先 custody，其次历史 source（仅查找）
+    """
+    _ = source_asset_code  # 兼容旧调用方；新导入不再传入有效 source
     existing = None
 
     if distinct_custody:
@@ -699,22 +712,27 @@ def _upsert_trust_asset(
             existing = _fetch_trust_asset_row(
                 conn, trust_product_id, custody_asset_code=custody_asset_code,
             )
-        if existing is None and source:
-            by_source = _fetch_trust_asset_row(
-                conn, trust_product_id, source_asset_code=source,
-            )
-            if by_source:
-                ex_custody = by_source.custody_asset_code
-                if (
-                    not custody_asset_code
-                    or ex_custody is None
-                    or ex_custody == custody_asset_code
-                ):
-                    existing = by_source
+        if existing is None and asset_code:
+            # 无托管或托管未命中时，不靠 source 写库；仅在同主编号+空托管时兜底查找
+            existing = conn.execute(
+                text("""
+                    SELECT id, asset_code, custody_asset_code, source_asset_code
+                    FROM trust_assets
+                    WHERE trust_product_id = :pid AND asset_code = :code
+                      AND (custody_asset_code IS NULL OR custody_asset_code = :custody)
+                    ORDER BY id
+                    LIMIT 1
+                """),
+                {
+                    "pid": trust_product_id,
+                    "code": asset_code,
+                    "custody": custody_asset_code or asset_code,
+                },
+            ).fetchone()
     else:
-        if source:
+        if custody_asset_code:
             existing = _fetch_trust_asset_row(
-                conn, trust_product_id, source_asset_code=source,
+                conn, trust_product_id, custody_asset_code=custody_asset_code,
             )
         if existing is None and asset_code:
             existing = conn.execute(
@@ -726,19 +744,6 @@ def _upsert_trust_asset(
                 """),
                 {"pid": trust_product_id, "code": asset_code},
             ).fetchone()
-        if existing is None and custody_asset_code and (
-            source and custody_asset_code == source
-        ):
-            existing = _fetch_trust_asset_row(
-                conn, trust_product_id, custody_asset_code=custody_asset_code,
-            )
-
-    if distinct_custody:
-        safe_custody = custody_asset_code
-    else:
-        safe_custody = (
-            custody_asset_code if custody_asset_code and custody_asset_code == source else None
-        )
 
     if existing:
         update_custody: str | None = None
@@ -748,14 +753,16 @@ def _upsert_trust_asset(
                     conn, trust_product_id, custody_asset_code, int(existing.id),
                 ):
                     update_custody = custody_asset_code
-        else:
-            update_custody = safe_custody
+        elif custody_asset_code and not existing.custody_asset_code:
+            if not _custody_taken_by_other(
+                conn, trust_product_id, custody_asset_code, int(existing.id),
+            ):
+                update_custody = custody_asset_code
 
         conn.execute(
             text("""
                 UPDATE trust_assets SET
                     custody_asset_code = COALESCE(:custody, custody_asset_code),
-                    source_asset_code = COALESCE(source_asset_code, :source),
                     initial_transfer_amount = CASE
                         WHEN :initial > 0 THEN :initial ELSE initial_transfer_amount END,
                     updated_at = NOW()
@@ -764,7 +771,6 @@ def _upsert_trust_asset(
             {
                 "id": existing.id,
                 "custody": update_custody,
-                "source": source,
                 "initial": initial_transfer_amount,
             },
         )
@@ -775,14 +781,13 @@ def _upsert_trust_asset(
             INSERT INTO trust_assets (
                 trust_product_id, asset_code, custody_asset_code,
                 source_asset_code, initial_transfer_amount
-            ) VALUES (:pid, :code, :custody, :source, :initial)
+            ) VALUES (:pid, :code, :custody, NULL, :initial)
             RETURNING id
         """),
         {
             "pid": trust_product_id,
             "code": asset_code,
-            "custody": (custody_asset_code or asset_code) if distinct_custody else (safe_custody or source),
-            "source": source,
+            "custody": custody_asset_code or asset_code,
             "initial": initial_transfer_amount,
         },
     ).fetchone()
@@ -880,17 +885,8 @@ def _apply_monitor_confirm_precheck(result: dict[str, Any], reasons: list[str]) 
 def _resolve_asset_fields(
     row: pd.Series, col_asset: str | None, col_custody: str | None
 ) -> tuple[str | None, str | None, str | None]:
-    """资产编号(房源) 为唯一权威；托管列不一致时忽略，由预检 ERROR 提示用户确认。"""
-    source = _normalize_excel_asset_code(row[col_asset]) if col_asset else None
-    custody_from_excel = _normalize_excel_asset_code(row[col_custody]) if col_custody else None
-
-    if source:
-        return source, source, source
-
-    if custody_from_excel:
-        return custody_from_excel, custody_from_excel, custody_from_excel
-
-    return None, None, None
+    """兼容旧名：与监控/还款统一为 _resolve_monitor_asset_fields。"""
+    return _resolve_monitor_asset_fields(row, col_asset, col_custody)
 
 
 def _repayment_date_for_row(
@@ -1647,97 +1643,38 @@ def recompute_monitor_payment_fields(
     trust_product_id: int,
     data_date: date,
 ) -> list[str]:
-    """重算 last_payment_date / overdue_days；返回数据质量警告."""
+    """重算 last_payment_date / overdue_days；返回数据质量警告.
+
+    与首页「重新计算逾期天数」同口径（含手工结算；as_of = 本批 data_date）。
+    """
+    from app.overdue.recalc_monitor import recompute_monitor_overdue_for_scope
+
     warnings: list[str] = []
-    params = {
-        "pid": trust_product_id,
-        "dd": data_date,
-        "tolerance": RECONCILIATION_TOLERANCE,
-    }
-
-    conn.execute(
-        text("""
-            UPDATE trust_asset_monitor_records m
-            SET
-                last_payment_date = sub.max_rd,
-                max_payment_date = sub.max_rd,
-                overdue_days = CASE
-                    WHEN m.remaining_amount <= :tolerance THEN NULL
-                    ELSE (CAST(:dd AS date) - (sub.max_rd + INTERVAL '1 month')::date)
-                END
-            FROM (
-                SELECT r.trust_product_id, ta.asset_code, MAX(r.repayment_date) AS max_rd
-                FROM trust_repayment_detail_records r
-                INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
-                WHERE r.trust_product_id = :pid
-                GROUP BY r.trust_product_id, ta.asset_code
-            ) sub
-            WHERE m.trust_product_id = :pid
-              AND m.data_date = :dd
-              AND m.asset_code = sub.asset_code
-        """),
-        params,
+    recompute_monitor_overdue_for_scope(
+        conn,
+        trust_product_id=trust_product_id,
+        data_date=data_date,
+        as_of=data_date,
+        tolerance=RECONCILIATION_TOLERANCE,
     )
-
-    conn.execute(
-        text("""
-            UPDATE trust_asset_monitor_records m
-            SET
-                last_payment_date = NULL,
-                max_payment_date = NULL,
-                overdue_days = CASE
-                    WHEN m.remaining_amount <= :tolerance THEN NULL
-                    ELSE (CAST(:dd AS date) - (iss.min_issue_date + INTERVAL '1 month')::date)
-                END
-            FROM (
-                SELECT
-                    m2.id AS monitor_id,
-                    COALESCE(ip.min_issue_date, ia.min_issue_date) AS min_issue_date
-                FROM trust_asset_monitor_records m2
-                LEFT JOIN (
-                    SELECT
-                        i.trust_product_id,
-                        regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '') AS custody_norm,
-                        MIN(i.issue_date) AS min_issue_date
-                    FROM trust_product_issuance_asset_records i
-                    WHERE i.trust_product_id = :pid
-                    GROUP BY i.trust_product_id, custody_norm
-                ) ip
-                  ON ip.trust_product_id = m2.trust_product_id
-                 AND ip.custody_norm = regexp_replace(
-                     COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\\.0$', ''
-                 )
-                LEFT JOIN (
-                    SELECT
-                        regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '') AS custody_norm,
-                        MIN(i.issue_date) AS min_issue_date
-                    FROM trust_product_issuance_asset_records i
-                    GROUP BY custody_norm
-                ) ia
-                  ON ia.custody_norm = regexp_replace(
-                      COALESCE(m2.custody_asset_code, m2.asset_code, ''), '\\.0$', ''
-                  )
-                WHERE m2.trust_product_id = :pid
-                  AND m2.data_date = :dd
-                  AND COALESCE(ip.min_issue_date, ia.min_issue_date) IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM trust_repayment_detail_records r
-                      INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
-                      WHERE r.trust_product_id = :pid
-                        AND ta.asset_code = m2.asset_code
-                  )
-            ) iss
-            WHERE m.id = iss.monitor_id
-        """),
-        params,
-    )
-
     missing_rows = conn.execute(
-        text("""
-            SELECT m.asset_code FROM trust_asset_monitor_records m
+        text(
+            """
+            SELECT m.asset_code
+            FROM trust_asset_monitor_records m
             WHERE m.trust_product_id = :pid AND m.data_date = :dd
-              AND m.remaining_amount > :tolerance
+              AND GREATEST(
+                  0::numeric,
+                  COALESCE(m.remaining_amount, 0) - COALESCE((
+                      SELECT SUM(s.amount)
+                      FROM trust_asset_manual_settlements s
+                      WHERE s.trust_product_id = m.trust_product_id
+                        AND s.asset_code = m.asset_code
+                        AND s.voided_at IS NULL
+                        AND s.settlement_date <= CAST(:dd AS date)
+                  ), 0)
+              ) > :tolerance
+              AND m.overdue_days IS NULL
               AND NOT EXISTS (
                   SELECT 1
                   FROM trust_repayment_detail_records r
@@ -1747,41 +1684,30 @@ def recompute_monitor_payment_fields(
               )
               AND NOT EXISTS (
                   SELECT 1
+                  FROM trust_asset_manual_settlements s
+                  WHERE s.trust_product_id = :pid
+                    AND s.asset_code = m.asset_code
+                    AND s.voided_at IS NULL
+                    AND s.settlement_date <= CAST(:dd AS date)
+              )
+              AND NOT EXISTS (
+                  SELECT 1
                   FROM trust_product_issuance_asset_records i
                   WHERE regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '')
                       = regexp_replace(
                           COALESCE(m.custody_asset_code, m.asset_code, ''), '\\.0$', ''
                       )
               )
-        """),
-        params,
+            """
+        ),
+        {
+            "pid": trust_product_id,
+            "dd": data_date,
+            "tolerance": RECONCILIATION_TOLERANCE,
+        },
     )
     for r in missing_rows:
-        warnings.append(f"{r.asset_code}: 无还款明细且无发行日，无法计算逾期天数")
-
-    conn.execute(
-        text("""
-            UPDATE trust_asset_monitor_records m
-            SET last_payment_date = NULL, max_payment_date = NULL, overdue_days = NULL
-            WHERE m.trust_product_id = :pid AND m.data_date = :dd
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM trust_repayment_detail_records r
-                  INNER JOIN trust_assets ta ON ta.id = r.trust_asset_id
-                  WHERE r.trust_product_id = :pid
-                    AND ta.asset_code = m.asset_code
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM trust_product_issuance_asset_records i
-                  WHERE regexp_replace(COALESCE(i.custody_asset_code, ''), '\\.0$', '')
-                      = regexp_replace(
-                          COALESCE(m.custody_asset_code, m.asset_code, ''), '\\.0$', ''
-                      )
-              )
-        """),
-        params,
-    )
+        warnings.append(f"{r.asset_code}: 无还款/手工结算且无发行日，无法计算逾期天数")
     return warnings
 
 
@@ -1824,7 +1750,7 @@ def _import_repayment_sheet(
             r["asset_code"],
             r.get("custody_asset_code"),
             0.0,
-            r.get("source_asset_code"),
+            None,
             distinct_custody=True,
         )
         upsert_count += 1
@@ -1834,13 +1760,13 @@ def _import_repayment_sheet(
                     trust_product_id, trust_asset_id, asset_code,
                     custody_asset_code, source_asset_code,
                     data_date, period_no, actual_repayment_amount, repayment_date,
-                    asset_pool_code, current_payer, planned_repayment_amount,
+                    current_payer, planned_repayment_amount,
                     initial_renovation_amount, cumulative_repaid_amount, remaining_balance,
                     source_file_name, source_sheet_name, synced_at
                 ) VALUES (
-                    :pid, :aid, :ac, :custody, :source,
+                    :pid, :aid, :ac, :custody, NULL,
                     :dd, :pn, :amt, :rd,
-                    :asset_pool_code, :current_payer, :planned_repayment_amount,
+                    :current_payer, :planned_repayment_amount,
                     :initial_renovation_amount, :cumulative_repaid_amount, :remaining_balance,
                     :file, :sheet, :synced
                 )
@@ -1850,12 +1776,10 @@ def _import_repayment_sheet(
                 "aid": asset_id,
                 "ac": r["asset_code"],
                 "custody": r.get("custody_asset_code"),
-                "source": r.get("source_asset_code"),
                 "dd": r["data_date"],
                 "pn": r.get("period_no"),
                 "amt": r["actual_repayment_amount"],
                 "rd": r["repayment_date"],
-                "asset_pool_code": r.get("asset_pool_code"),
                 "current_payer": r.get("current_payer"),
                 "planned_repayment_amount": r.get("planned_repayment_amount"),
                 "initial_renovation_amount": r.get("initial_renovation_amount"),
@@ -1923,7 +1847,7 @@ def _import_monitor_sheet(
             r["asset_code"],
             r.get("custody_asset_code"),
             float(r["initial_transfer_amount"]),
-            r.get("source_asset_code"),
+            None,
             distinct_custody=True,
         )
         upsert_count += 1
@@ -1934,16 +1858,16 @@ def _import_monitor_sheet(
                     custody_asset_code, source_asset_code,
                     data_date, initial_transfer_amount, repaid_amount, remaining_amount,
                     last_renovation_payment_date,
-                    asset_pool_code, renovation_vendor, asset_status, community_name, city,
+                    renovation_vendor, asset_status, community_name, city,
                     collection_contract_code, custody_agreement_sign_date,
                     collection_contract_years, owner_code, withholding_ratio, actual_monthly_rent,
                     overdue_days, last_payment_date, max_payment_date,
                     source_file_name, source_sheet_name, synced_at
                 ) VALUES (
-                    :pid, :aid, :ac, :custody, :source,
+                    :pid, :aid, :ac, :custody, NULL,
                     :dd, :initial, :repaid, :remaining,
                     :last_renovation,
-                    :asset_pool_code, :renovation_vendor, :asset_status, :community_name, :city,
+                    :renovation_vendor, :asset_status, :community_name, :city,
                     :collection_contract_code, :custody_agreement_sign_date,
                     :collection_contract_years, :owner_code, :withholding_ratio, :actual_monthly_rent,
                     NULL, NULL, NULL,
@@ -1955,13 +1879,11 @@ def _import_monitor_sheet(
                 "aid": asset_id,
                 "ac": r["asset_code"],
                 "custody": r.get("custody_asset_code"),
-                "source": r.get("source_asset_code"),
                 "dd": batch_date,
                 "initial": r["initial_transfer_amount"],
                 "repaid": r["repaid_amount"],
                 "remaining": r["remaining_amount"],
                 "last_renovation": r.get("last_renovation_payment_date"),
-                "asset_pool_code": r.get("asset_pool_code"),
                 "renovation_vendor": r.get("renovation_vendor"),
                 "asset_status": r.get("asset_status"),
                 "community_name": r.get("community_name"),
@@ -1999,7 +1921,7 @@ def _parse_repayment_plan_rows(df: pd.DataFrame) -> tuple[list[dict], list[str]]
         return [], ["缺少资产编号(房源)或托管房源编码列"]
 
     field_keys = (
-        "asset_pool_code", "renovation_vendor", "data_date",
+        "renovation_vendor", "data_date",
         "initial_transfer_amount", "repaid_amount", "remaining_amount",
         "community_name", "city", "current_bill_date", "repayment_amount_detail",
         "planned_monthly_repayment_amount", "final_planned_repayment_amount",
@@ -2134,7 +2056,7 @@ def _import_repayment_plan_sheet(
             r["asset_code"],
             r.get("custody_asset_code"),
             float(r["initial_transfer_amount"] or 0),
-            r.get("source_asset_code"),
+            None,
             distinct_custody=True,
         )
         upsert_count += 1
@@ -2143,14 +2065,14 @@ def _import_repayment_plan_sheet(
                 INSERT INTO trust_repayment_plan_records (
                     trust_product_id, trust_asset_id, asset_code,
                     custody_asset_code, source_asset_code,
-                    asset_pool_code, renovation_vendor, data_date,
+                    renovation_vendor, data_date,
                     initial_transfer_amount, repaid_amount, remaining_amount,
                     community_name, city, current_bill_date, repayment_amount_detail,
                     planned_monthly_repayment_amount, final_planned_repayment_amount,
                     source_file_name, source_sheet_name, source_row_number, synced_at
                 ) VALUES (
-                    :pid, :aid, :ac, :custody, :source,
-                    :asset_pool_code, :renovation_vendor, :data_date,
+                    :pid, :aid, :ac, :custody, NULL,
+                    :renovation_vendor, :data_date,
                     :initial_transfer_amount, :repaid_amount, :remaining_amount,
                     :community_name, :city, :current_bill_date, :repayment_amount_detail,
                     :planned_monthly_repayment_amount, :final_planned_repayment_amount,
@@ -2162,8 +2084,6 @@ def _import_repayment_plan_sheet(
                 "aid": asset_id,
                 "ac": r["asset_code"],
                 "custody": r.get("custody_asset_code"),
-                "source": r.get("source_asset_code"),
-                "asset_pool_code": r.get("asset_pool_code"),
                 "renovation_vendor": r.get("renovation_vendor"),
                 "data_date": r.get("data_date"),
                 "initial_transfer_amount": r.get("initial_transfer_amount"),
@@ -2731,19 +2651,26 @@ def fetch_monitor_records_for_export(
     return [_normalize_monitor_row(row) for row in rows], total
 
 
-def build_monitor_export_xlsx(items: list[dict[str, Any]]) -> bytes:
-    """按资产监控表模版列序导出."""
-    headers = templates.template_headers(templates.MONITOR_TEMPLATE_COLUMNS)
+def build_monitor_export_xlsx(
+    items: list[dict[str, Any]],
+    *,
+    columns: tuple[tuple[str, str], ...] | None = None,
+    sheet_name: str = "资产监控表",
+) -> bytes:
+    """按资产监控表模版列序导出；披露可传 DISCLOSURE_MONITOR_TEMPLATE_COLUMNS。"""
+    cols = columns or templates.MONITOR_TEMPLATE_COLUMNS
+    headers = templates.template_headers(cols)
     data_rows = [
         templates.row_values_for_template(
-            item, templates.MONITOR_TEMPLATE_COLUMNS, format_cell=_format_monitor_export_cell,
+            item, cols, format_cell=_format_monitor_export_cell,
         )
         for item in items
     ]
     df = pd.DataFrame(data_rows, columns=headers)
     buffer = BytesIO()
+    safe_sheet = (sheet_name or "资产监控表")[:31] or "资产监控表"
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="资产监控表")
+        df.to_excel(writer, index=False, sheet_name=safe_sheet)
     return buffer.getvalue()
 
 
@@ -2862,6 +2789,9 @@ def fetch_repayment_plan_records_for_export(
 def build_repayment_disclosure_export_xlsx(
     repayment_items: list[dict[str, Any]],
     plan_items: list[dict[str, Any]],
+    *,
+    detail_sheet_name: str = "还款明细",
+    plan_sheet_name: str = "回款计划",
 ) -> bytes:
     """按还款明细披露信息模版导出双 Sheet."""
     detail_headers = templates.template_headers(templates.REPAYMENT_DETAIL_TEMPLATE_COLUMNS)
@@ -2883,10 +2813,10 @@ def build_repayment_disclosure_export_xlsx(
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         pd.DataFrame(detail_rows, columns=detail_headers).to_excel(
-            writer, index=False, sheet_name="还款明细",
+            writer, index=False, sheet_name=detail_sheet_name[:31],
         )
         pd.DataFrame(plan_rows, columns=plan_headers).to_excel(
-            writer, index=False, sheet_name="回款计划",
+            writer, index=False, sheet_name=plan_sheet_name[:31],
         )
     return buffer.getvalue()
 

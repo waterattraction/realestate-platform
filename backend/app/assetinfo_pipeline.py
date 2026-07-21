@@ -194,15 +194,18 @@ def _resolve_batch_data_date(dates: pd.Series) -> tuple[date, int]:
 def load_f1_asset_lookup(path: Path | None) -> dict[str, str]:
     if path is None or not path.exists():
         return {}
+    from app.assetinfo_upload import _primary_asset_code_from_trust_no, _normalize_excel_asset_code
+
     df = _load_excel_sheet(path, df_sheet_name(path))
     lookup: dict[str, str] = {}
     if "托管房源编码" not in df.columns or "资产编号(房源)" not in df.columns:
         return lookup
     for _, row in df.iterrows():
         custody = to_custody_code(row["托管房源编码"])
-        asset_code = row.get("资产编号(房源)")
-        if custody and asset_code is not None and not pd.isna(asset_code):
-            lookup[custody] = str(asset_code).strip()
+        raw = _normalize_excel_asset_code(row.get("资产编号(房源)"))
+        asset_code = _primary_asset_code_from_trust_no(raw)
+        if custody and asset_code:
+            lookup[custody] = asset_code
     return lookup
 
 
@@ -214,15 +217,14 @@ def df_sheet_name(path: Path) -> str:
 def load_db_asset_lookup(conn: Connection, trust_product_id: int) -> dict[str, str]:
     rows = conn.execute(
         text("""
-            SELECT custody_asset_code,
-                   COALESCE(source_asset_code, asset_code) AS source_asset_code
+            SELECT custody_asset_code, asset_code
             FROM trust_assets
             WHERE trust_product_id = :trust_product_id
               AND custody_asset_code IS NOT NULL
         """),
         {"trust_product_id": trust_product_id},
     )
-    return {r.custody_asset_code: r.source_asset_code for r in rows}
+    return {r.custody_asset_code: r.asset_code for r in rows}
 
 
 def load_min_issue_dates(conn: Connection, trust_product_id: int) -> dict[str, date]:
@@ -256,11 +258,13 @@ def resolve_asset_code(
     f1_lookup: dict[str, str],
     db_lookup: dict[str, str],
 ) -> str:
+    from app.assetinfo_upload import _primary_asset_code_from_trust_no
+
     if custody in f1_lookup:
         return f1_lookup[custody]
     if custody in db_lookup:
         return db_lookup[custody]
-    return custody
+    return _primary_asset_code_from_trust_no(custody) or custody
 
 
 def _compute_payment_dates(repayment_df: pd.DataFrame) -> dict[str, date]:
@@ -336,33 +340,18 @@ def _upsert_trust_asset(
     custody_asset_code: str,
     initial_transfer_amount: float,
 ) -> int:
-    row = conn.execute(
-        text("""
-            INSERT INTO trust_assets (
-                trust_product_id, asset_code, custody_asset_code,
-                source_asset_code, initial_transfer_amount
-            ) VALUES (
-                :trust_product_id, :asset_code, :custody_asset_code,
-                :source_asset_code, :initial_transfer_amount
-            )
-            ON CONFLICT (trust_product_id, asset_code) DO UPDATE SET
-                custody_asset_code = EXCLUDED.custody_asset_code,
-                source_asset_code = COALESCE(
-                    trust_assets.source_asset_code, EXCLUDED.source_asset_code
-                ),
-                initial_transfer_amount = EXCLUDED.initial_transfer_amount,
-                updated_at = NOW()
-            RETURNING id
-        """),
-        {
-            "trust_product_id": trust_product_id,
-            "asset_code": asset_code,
-            "custody_asset_code": custody_asset_code,
-            "source_asset_code": asset_code,
-            "initial_transfer_amount": initial_transfer_amount,
-        },
-    ).fetchone()
-    return int(row.id)
+    """与 upload_v2 同口径：不覆盖已有 asset_code；不写 source_asset_code。"""
+    from app.assetinfo_upload import _upsert_trust_asset as upsert_v2
+
+    return upsert_v2(
+        conn,
+        trust_product_id,
+        asset_code,
+        custody_asset_code,
+        initial_transfer_amount,
+        None,
+        distinct_custody=True,
+    )
 
 
 def run_consistency_checks(
@@ -525,7 +514,7 @@ def run_assetinfo_pipeline(
                     source_file_name, source_sheet_name, synced_at
                 ) VALUES (
                     :trust_product_id, :trust_asset_id, :asset_code,
-                    :custody_asset_code, :source_asset_code, :data_date,
+                    :custody_asset_code, NULL, :data_date,
                     :initial_transfer_amount, :repaid_amount, :remaining_amount,
                     :overdue_days, :last_payment_date, :max_payment_date,
                     :source_file_name, :source_sheet_name, :synced_at
@@ -536,7 +525,6 @@ def run_assetinfo_pipeline(
                 "trust_asset_id": trust_asset_id,
                 "asset_code": asset_code,
                 "custody_asset_code": custody,
-                "source_asset_code": asset_code,
                 "data_date": data_date,
                 "initial_transfer_amount": float(row["initial_transfer_amount"]),
                 "repaid_amount": float(row["repaid_amount"]),
@@ -566,7 +554,7 @@ def run_assetinfo_pipeline(
                     source_file_name, source_sheet_name, synced_at
                 ) VALUES (
                     :trust_product_id, :trust_asset_id, :asset_code,
-                    :custody_asset_code, :source_asset_code,
+                    :custody_asset_code, NULL,
                     :data_date, NULL, :actual_repayment_amount, :repayment_date,
                     :source_file_name, :source_sheet_name, :synced_at
                 )
@@ -576,7 +564,6 @@ def run_assetinfo_pipeline(
                 "trust_asset_id": asset_id_by_custody[custody],
                 "asset_code": asset_code,
                 "custody_asset_code": custody,
-                "source_asset_code": asset_code,
                 "data_date": data_date,
                 "actual_repayment_amount": float(row["actual_repayment_amount"]),
                 "repayment_date": row["repayment_date"],
