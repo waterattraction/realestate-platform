@@ -407,7 +407,7 @@ class OverdueWorkbenchService:
     def _fetch_city_by_asset(
         self, pairs: list[tuple[int, str]]
     ) -> dict[tuple[int, str], str]:
-        """批量取资产主编号对应发行城市；无命中记为未知。"""
+        """批量取城市：发行优先，空则监控；皆无则「未知」。"""
         if not pairs:
             return {}
         from sqlalchemy import text
@@ -419,15 +419,31 @@ class OverdueWorkbenchService:
                 row = conn.execute(
                     text(
                         """
-                        SELECT COALESCE(NULLIF(TRIM(i.city), ''), :unknown) AS city
-                        FROM trust_product_issuance_asset_records i
-                        WHERE i.trust_product_id = :pid
-                          AND (
-                              split_part(i.custody_asset_code, '-', 1) = :asset_code
-                              OR i.custody_asset_code = :asset_code
-                          )
-                        ORDER BY i.issue_date DESC NULLS LAST, i.id DESC
-                        LIMIT 1
+                        SELECT COALESCE(
+                            NULLIF(TRIM(iss.city), ''),
+                            NULLIF(TRIM(mon.city), ''),
+                            :unknown
+                        ) AS city
+                        FROM (SELECT 1) AS _
+                        LEFT JOIN LATERAL (
+                            SELECT i.city
+                            FROM trust_product_issuance_asset_records i
+                            WHERE i.trust_product_id = :pid
+                              AND (
+                                  split_part(i.custody_asset_code, '-', 1) = :asset_code
+                                  OR i.custody_asset_code = :asset_code
+                              )
+                            ORDER BY i.issue_date DESC NULLS LAST, i.id DESC
+                            LIMIT 1
+                        ) iss ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT m.city
+                            FROM trust_asset_monitor_records m
+                            WHERE m.trust_product_id = :pid
+                              AND m.asset_code = :asset_code
+                            ORDER BY m.data_date DESC NULLS LAST, m.id DESC
+                            LIMIT 1
+                        ) mon ON TRUE
                         """
                     ),
                     {

@@ -376,6 +376,7 @@ def _monitor_custody_ctes(monitor_filter: str) -> str:
                 m.last_payment_date,
                 m.max_payment_date,
                 m.asset_code,
+                NULLIF(TRIM(m.city), '') AS city,
                 COALESCE(m.custody_asset_code, ta.custody_asset_code, m.asset_code) AS custody_asset_code,
                 COALESCE(m.source_asset_code, ta.source_asset_code, m.asset_code) AS source_asset_code
             FROM trust_asset_monitor_records m
@@ -400,6 +401,7 @@ def _monitor_custody_ctes(monitor_filter: str) -> str:
                 END AS overdue_days,
                 MAX(d.last_payment_date) AS last_payment_date,
                 MAX(d.max_payment_date) AS max_payment_date,
+                MAX(d.city) AS city,
                 array_agg(DISTINCT d.source_asset_code ORDER BY d.source_asset_code) AS source_asset_codes
             FROM monitor_enriched d
             GROUP BY d.trust_product_id, d.data_date, d.custody_asset_code
@@ -556,19 +558,35 @@ def _normalize_portfolio_city(raw) -> tuple[str, str]:
 
 
 def fetch_overdue_issuance_cities(conn, trust_product_ids: list[int] | None = None) -> list[str]:
-    sql = """
-        SELECT DISTINCT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
-        FROM trust_product_issuance_asset_records
-        WHERE 1 = 1
-    """
+    """城市筛选项：发行 city ∪ 监控 city；空值归「未知」。"""
     params: dict = {"unknown": ISSUANCE_CITY_UNKNOWN}
-    product_sql, product_params = query_utils.sql_in_int_column(
+    iss_sql, iss_params = query_utils.sql_in_int_column(
         "trust_product_id", trust_product_ids, param_prefix="icity"
     )
-    sql += product_sql
-    params.update(product_params)
-    sql += " ORDER BY city"
-    rows = conn.execute(text(sql), params)
+    mon_sql, mon_params = query_utils.sql_in_int_column(
+        "trust_product_id", trust_product_ids, param_prefix="mcity"
+    )
+    params.update(iss_params)
+    params.update(mon_params)
+    rows = conn.execute(
+        text(
+            f"""
+            SELECT city FROM (
+                SELECT DISTINCT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
+                FROM trust_product_issuance_asset_records
+                WHERE 1 = 1
+                  {iss_sql}
+                UNION
+                SELECT DISTINCT COALESCE(NULLIF(TRIM(city), ''), :unknown) AS city
+                FROM trust_asset_monitor_records
+                WHERE 1 = 1
+                  {mon_sql}
+            ) cities
+            ORDER BY city
+            """
+        ),
+        params,
+    )
     return [str(row.city) for row in rows]
 
 
@@ -581,8 +599,23 @@ def _bucket_amount_totals(items: list) -> dict:
     }
 
 
+def _first_nonempty_city(*values) -> str | None:
+    for raw in values:
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            return text
+    return None
+
+
 def _portfolio_city_fields(row) -> dict:
-    display, filter_key = _normalize_portfolio_city(getattr(row, "issuance_city", None))
+    """发行优先，空则监控；双边皆空 →「—」/「未知」。"""
+    raw = _first_nonempty_city(
+        getattr(row, "issuance_city", None),
+        getattr(row, "monitor_city", None),
+    )
+    display, filter_key = _normalize_portfolio_city(raw)
     return {"city": display, "city_filter": filter_key}
 
 
@@ -1176,6 +1209,7 @@ def fetch_overdue_overview(
                 mc.overdue_days,
                 mc.source_asset_codes,
                 iss.city AS issuance_city,
+                mc.city AS monitor_city,
                 COALESCE(tm.trust_marker, :default_trust_marker) AS trust_marker,
                 COALESCE(tm.internal_status, :default_internal_status) AS internal_status,
                 {_custody_followup_count_sql()} AS followup_count,

@@ -28,15 +28,8 @@ sudo cp "${REPO}/deploy/nginx/realestate-jiakubo.conf" /etc/nginx/sites-availabl
 sudo nginx -t
 sudo systemctl reload nginx
 
-echo "==> 配置资产数据导入接口基础认证（如尚未配置）..."
-if [ ! -f /etc/nginx/.htpasswd-assetinfo ]; then
-  PASS=$(openssl rand -base64 12)
-  echo "assetinfo:${PASS}" | sudo tee /root/.assetinfo-htpasswd-credentials >/dev/null
-  sudo apt-get install -y apache2-utils >/dev/null 2>&1 || true
-  echo "assetinfo:$(openssl passwd -apr1 "${PASS}")" | sudo tee /etc/nginx/.htpasswd-assetinfo >/dev/null
-  sudo chmod 640 /etc/nginx/.htpasswd-assetinfo
-  echo "导入接口凭据已写入 /root/.assetinfo-htpasswd-credentials"
-fi
+# /assetinfo/ 鉴权走应用层 Cookie；不再启用 Nginx Basic Auth。
+# 若已存在 /etc/nginx/.htpasswd-assetinfo，保留不删，便于将来个别管理接口复用。
 
 echo "==> 启用 UFW 防火墙..."
 sudo ufw --force reset >/dev/null 2>&1 || true
@@ -49,4 +42,4 @@ sudo ufw --force enable
 
 echo ""
 echo "完成！请访问: https://${DOMAIN}/"
-echo "导入接口: https://${DOMAIN}/assetinfo/pipeline （需 Basic Auth）"
+echo "导入接口: https://${DOMAIN}/assetinfo/pipeline （需平台登录 Cookie；写接口有 limit_req）"

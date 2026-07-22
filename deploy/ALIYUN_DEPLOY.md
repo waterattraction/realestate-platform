@@ -73,8 +73,10 @@ sudo /opt/realestate-platform/deploy/scripts/enable-https-jiakubo.sh
 1. 检测外网 80 是否可达  
 2. 申请 Let's Encrypt 证书  
 3. 部署 HTTPS Nginx  
-4. 为 `/assetinfo/` 配置 Basic Auth  
-5. 启用 UFW（仅放行 22/80/443）
+4. 启用 UFW（仅放行 22/80/443）
+
+> **说明（2026-07-22）：** `/assetinfo/` **不再**使用 Nginx HTTP Basic Auth。鉴权统一为应用层 Cookie 登录（页面 `get_page_user`，API `get_current_user`）。写接口仍保留 Nginx `limit_req` 限流。  
+> 服务器上若仍存在 `/etc/nginx/.htpasswd-assetinfo`，**不删除比较稳妥**——方便将来确实需要额外保护某个管理接口时复用，但它不会再影响当前站点（配置中已取消引用）。
 
 ---
 
@@ -85,19 +87,14 @@ sudo /opt/realestate-platform/deploy/scripts/enable-https-jiakubo.sh
 | 平台首页 | https://jiakubo.com/ |
 | 逾期工作台 | https://jiakubo.com/overdue/workbench |
 | 风控中台 | https://jiakubo.com/risk/workbench |
-| 资产数据导入 API | https://jiakubo.com/assetinfo/pipeline（需 Basic Auth） |
+| 资产数据导入 API | https://jiakubo.com/assetinfo/pipeline（需平台登录 Cookie） |
 
-导入接口凭据（脚本运行后）：
-
-```bash
-sudo cat /root/.assetinfo-htpasswd-credentials
-```
-
-调用示例：
+调用示例（先登录拿到 Cookie，或使用已登录浏览器会话）：
 
 ```bash
-curl -u assetinfo:你的密码 -X POST https://jiakubo.com/assetinfo/pipeline \
+curl -X POST https://jiakubo.com/assetinfo/pipeline \
   -H "Content-Type: application/json" \
+  -H "Cookie: session=..." \
   -d '{"trust_product_id":1,"trust_plan_alias":"信托1号"}'
 ```
 
@@ -156,4 +153,4 @@ sudo certbot renew --dry-run
 2. **定期备份**：`docker exec realestate-postgres pg_dump -U admin realestate > backup.sql`  
 3. **新环境初始化**：参见项目根目录 `db/README.md`，执行 `./db/apply.sh baseline`  
 4. **监控 443**：阿里云云监控可配置端口探测告警（与本机 `nginx-watchdog` 互补）  
-5. **后续可加**：FastAPI 登录鉴权、WAF（阿里云 Web 应用防火墙）
+5. **后续可加**：WAF（阿里云 Web 应用防火墙）；个别管理接口如需额外 Nginx Basic Auth，可复用已有 `/etc/nginx/.htpasswd-assetinfo`（当前未引用）
