@@ -1,0 +1,10 @@
+[Unit]
+Description=Nginx / HTTPS watchdog for jiakubo.com
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/realestate-platform/deploy/scripts/nginx-watchdog.sh
+# oneshot + timer: non-zero exit is OK (means alert fired)
+SuccessExitStatus=0 1

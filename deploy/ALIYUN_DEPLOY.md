@@ -103,7 +103,44 @@ curl -u assetinfo:你的密码 -X POST https://jiakubo.com/assetinfo/pipeline \
 
 ---
 
-## 六、证书续期
+## 六、Nginx 静默升级防护（必做）
+
+2026-07-22：`unattended-upgrade` 自动升级 Nginx 失败后服务未恢复，导致外网 `ERR_CONNECTION_REFUSED`。
+
+一键安装（hold 包 + 黑名单 + 5 分钟健康检查）：
+
+```bash
+sudo /opt/realestate-platform/deploy/scripts/install-nginx-guard.sh
+```
+
+| 机制 | 说明 |
+|------|------|
+| `apt-mark hold` | `nginx` / `nginx-core` / `nginx-common` / 相关 mod |
+| `/etc/apt/apt.conf.d/51realestate-nginx-hold` | unattended-upgrades 黑名单 |
+| `nginx-watchdog.timer` | 每 5 分钟检查 `:80`/`:443`、`nginx -t`、本地 HTTPS |
+| `/var/log/nginx-watchdog.log` | 告警日志；异常时写 `/var/lib/nginx-watchdog/ALERT` |
+| `99realestate-nginx-watchdog` | apt 结束后再跑一次检查 |
+
+手动升级 Nginx 时：
+
+```bash
+sudo /opt/realestate-platform/deploy/scripts/hold-nginx-packages.sh unhold
+sudo apt upgrade nginx nginx-core nginx-common
+sudo nginx -t && sudo systemctl reload nginx
+sudo /opt/realestate-platform/deploy/scripts/hold-nginx-packages.sh
+```
+
+查看告警：
+
+```bash
+systemctl status nginx-watchdog.timer
+tail -50 /var/log/nginx-watchdog.log
+cat /var/lib/nginx-watchdog/ALERT   # 有文件即表示最近检查失败
+```
+
+---
+
+## 七、证书续期
 
 Certbot 已配置 systemd timer，证书到期前自动续期。可手动测试：
 
@@ -113,10 +150,10 @@ sudo certbot renew --dry-run
 
 ---
 
-## 七、生产环境建议
+## 八、生产环境建议
 
 1. **修改数据库密码**：编辑 `docker-compose.yml` 中 `POSTGRES_PASSWORD` 与 `DATABASE_URL`，然后 `docker compose up -d`  
 2. **定期备份**：`docker exec realestate-postgres pg_dump -U admin realestate > backup.sql`  
 3. **新环境初始化**：参见项目根目录 `db/README.md`，执行 `./db/apply.sh baseline`  
-4. **监控 443**：阿里云云监控可配置端口探测告警  
+4. **监控 443**：阿里云云监控可配置端口探测告警（与本机 `nginx-watchdog` 互补）  
 5. **后续可加**：FastAPI 登录鉴权、WAF（阿里云 Web 应用防火墙）
