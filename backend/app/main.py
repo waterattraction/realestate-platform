@@ -4052,15 +4052,93 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             monitor_asset_count = 0
             snapshot_date = None
 
+        stats_paid_off_count = 0
+        stats_unpaid_count = 0
+        stats_remaining_total = 0.0
+        stats_repaid_total = 0.0
+        try:
+            stats_row = conn.execute(
+                text(
+                    """
+                    WITH latest AS (
+                        SELECT MAX(data_date) AS d FROM trust_asset_monitor_records
+                    ),
+                    by_asset AS (
+                        SELECT
+                            m.trust_product_id,
+                            m.asset_code,
+                            SUM(m.remaining_amount) AS remaining,
+                            SUM(m.repaid_amount) AS repaid
+                        FROM trust_asset_monitor_records m
+                        CROSS JOIN latest
+                        WHERE m.data_date = latest.d
+                        GROUP BY m.trust_product_id, m.asset_code
+                    )
+                    SELECT
+                        COUNT(*) FILTER (WHERE remaining <= :tol) AS paid_off,
+                        COUNT(*) FILTER (WHERE remaining > :tol) AS unpaid,
+                        COALESCE(SUM(remaining), 0) AS remaining_total,
+                        COALESCE(SUM(repaid), 0) AS repaid_total
+                    FROM by_asset
+                    """
+                ),
+                {"tol": RECONCILIATION_TOLERANCE},
+            ).fetchone()
+            if stats_row:
+                stats_paid_off_count = int(stats_row.paid_off or 0)
+                stats_unpaid_count = int(stats_row.unpaid or 0)
+                stats_remaining_total = float(stats_row.remaining_total or 0)
+                stats_repaid_total = float(stats_row.repaid_total or 0)
+        except Exception:
+            stats_paid_off_count = 0
+            stats_unpaid_count = 0
+            stats_remaining_total = 0.0
+            stats_repaid_total = 0.0
+
+        swap_asset_count = 0
+        repurchase_asset_count = 0
+        try:
+            swap_row = conn.execute(text("""
+                SELECT COUNT(DISTINCT a.asset_code) AS cnt
+                FROM asset_swap_assets a
+                JOIN asset_swap_orders o ON o.id = a.swap_order_id
+                WHERE o.status = 'completed'
+            """)).fetchone()
+            if swap_row:
+                swap_asset_count = int(swap_row.cnt)
+        except Exception:
+            swap_asset_count = 0
+        try:
+            rp_row = conn.execute(text("""
+                SELECT COUNT(DISTINCT a.asset_code) AS cnt
+                FROM asset_repurchase_assets a
+                JOIN asset_repurchase_orders o ON o.id = a.repurchase_order_id
+                WHERE o.status = 'completed'
+            """)).fetchone()
+            if rp_row:
+                repurchase_asset_count = int(rp_row.cnt)
+        except Exception:
+            repurchase_asset_count = 0
+
     def dash_count(value: int) -> str:
         return str(value)
 
     def dash_date(value: str | None) -> str:
         return value if value else "—"
 
+    def dash_money_short(value: float) -> str:
+        v = float(value or 0)
+        if abs(v) >= 100_000_000:
+            return f"{v / 100_000_000:.2f}亿"
+        if abs(v) >= 10_000:
+            return f"{v / 10_000:.1f}万"
+        return f"{v:,.0f}"
+
     data_updated_at = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
     issuance_count_display = dash_count(issuance_row_count) if issuance_row_count else "—"
     monitor_count_display = dash_count(monitor_asset_count) if monitor_asset_count else "—"
+    stats_remaining_display = dash_money_short(stats_remaining_total)
+    stats_repaid_display = dash_money_short(stats_repaid_total)
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -4274,13 +4352,13 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
         }}
         .risk-grid {{
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 0.55rem;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.45rem;
         }}
         a.risk-card {{
             display: block;
-            padding: 0.65rem 0.75rem;
-            border-radius: 10px;
+            padding: 0.5rem 0.6rem;
+            border-radius: 8px;
             border: 1px solid rgba(255, 255, 255, 0.1);
             background: rgba(15, 23, 42, 0.55);
             color: inherit;
@@ -4296,42 +4374,45 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             display: flex;
             align-items: flex-start;
             justify-content: space-between;
-            gap: 0.35rem;
-            margin-bottom: 0.35rem;
+            gap: 0.3rem;
+            margin-bottom: 0.25rem;
         }}
         .risk-card-label {{
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             color: #94a3b8;
         }}
         .risk-card-icon {{
-            width: 26px;
-            height: 26px;
-            border-radius: 6px;
+            width: 22px;
+            height: 22px;
+            border-radius: 5px;
             display: flex;
             align-items: center;
             justify-content: center;
             flex-shrink: 0;
         }}
         .risk-card-icon svg {{
-            width: 14px;
-            height: 14px;
+            width: 12px;
+            height: 12px;
             fill: currentColor;
         }}
         .risk-icon-warn {{ background: rgba(251, 146, 60, 0.15); color: #fb923c; }}
         .risk-icon-overdue {{ background: rgba(248, 113, 113, 0.15); color: #f87171; }}
         .risk-icon-monitor {{ background: rgba(56, 189, 248, 0.15); color: #38bdf8; }}
+        .risk-icon-stats {{ background: rgba(45, 212, 191, 0.15); color: #2dd4bf; }}
+        .risk-icon-swap {{ background: rgba(45, 212, 191, 0.15); color: #2dd4bf; }}
+        .risk-icon-repurchase {{ background: rgba(96, 165, 250, 0.15); color: #60a5fa; }}
         .risk-card-value {{
-            font-size: 1.35rem;
+            font-size: 1.15rem;
             font-weight: 700;
             line-height: 1.1;
             color: #f8fafc;
         }}
         .risk-card-value.warn {{ color: #fb923c; }}
         .risk-card-value.overdue {{ color: #f87171; }}
-        .risk-card-value.muted {{ color: #94a3b8; font-size: 1.2rem; }}
+        .risk-card-value.muted {{ color: #94a3b8; font-size: 1rem; }}
         .risk-card-foot {{
-            margin-top: 0.3rem;
-            font-size: 0.72rem;
+            margin-top: 0.22rem;
+            font-size: 0.68rem;
             color: #64748b;
         }}
         .page-footer {{
@@ -4469,35 +4550,22 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
             </div>
         </section>
 
-        <section class="dash-section" aria-labelledby="sec-swap">
-            <div class="section-title">
-                <span class="section-num">3</span>
-                <h2 id="sec-swap">资产置换和回购</h2>
-            </div>
-            <div class="op-row">
-                <a href="/asset-swap" class="op-chip op-teal">
-                    <svg viewBox="0 0 24 24"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
-                    资产置换
-                </a>
-                <a href="/asset-repurchase" class="op-chip op-blue">
-                    <svg viewBox="0 0 24 24"><path d="M12 6V3L8 7l4 4V8c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 17.03 20 15.57 20 14c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 9.74C4.46 10.97 4 12.43 4 14c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
-                    资产回购
-                </a>
-            </div>
-        </section>
-
         <section class="dash-section" aria-labelledby="sec-portfolio">
             <div class="section-title">
-                <span class="section-num">4</span>
+                <span class="section-num">3</span>
                 <h2 id="sec-portfolio">资产组合管理</h2>
             </div>
-            <div class="op-row">
-                <a href="/assetinfo/asset-stats" class="op-chip op-teal">
-                    <svg viewBox="0 0 24 24"><path d="M5 9.2h3V19H5V9.2zM10.6 5h2.8v14h-2.8V5zm5.6 8H19v6h-2.8v-6z"/></svg>
-                    资产情况统计
-                </a>
-            </div>
             <div class="risk-grid">
+                <a href="/assetinfo/asset-stats" class="risk-card">
+                    <div class="risk-card-head">
+                        <span class="risk-card-label">资产情况统计</span>
+                        <span class="risk-card-icon risk-icon-stats" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M5 9.2h3V19H5V9.2zM10.6 5h2.8v14h-2.8V5zm5.6 8H19v6h-2.8v-6z"/></svg>
+                        </span>
+                    </div>
+                    <div class="risk-card-value">{dash_count(stats_unpaid_count)}</div>
+                    <div class="risk-card-foot">未还清 · 已还清 {dash_count(stats_paid_off_count)} · 已还 ¥{stats_repaid_display} →</div>
+                </a>
                 <a href="/risk/workbench" class="risk-card">
                     <div class="risk-card-head">
                         <span class="risk-card-label">风险预警</span>
@@ -4535,15 +4603,35 @@ def dashboard(page_user: Annotated[dict, Depends(get_page_user)]):
                             <svg viewBox="0 0 24 24"><path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
                         </span>
                     </div>
-                    <div class="risk-card-value">按城市</div>
+                    <div class="risk-card-value muted">按城市</div>
                     <div class="risk-card-foot">监控快照 · M 级着色 →</div>
+                </a>
+                <a href="/asset-swap" class="risk-card">
+                    <div class="risk-card-head">
+                        <span class="risk-card-label">资产置换</span>
+                        <span class="risk-card-icon risk-icon-swap" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3zM21 9l-3.99-4v3H10v2h7.01v3L21 9z"/></svg>
+                        </span>
+                    </div>
+                    <div class="risk-card-value">{dash_count(swap_asset_count)}</div>
+                    <div class="risk-card-foot">已置换资产 →</div>
+                </a>
+                <a href="/asset-repurchase" class="risk-card">
+                    <div class="risk-card-head">
+                        <span class="risk-card-label">资产回购</span>
+                        <span class="risk-card-icon risk-icon-repurchase" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M12 6V3L8 7l4 4V8c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 17.03 20 15.57 20 14c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 9.74C4.46 10.97 4 12.43 4 14c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
+                        </span>
+                    </div>
+                    <div class="risk-card-value">{dash_count(repurchase_asset_count)}</div>
+                    <div class="risk-card-foot">已回购资产 →</div>
                 </a>
             </div>
         </section>
 
         <section class="dash-section" aria-labelledby="sec-disclosure">
             <div class="section-title">
-                <span class="section-num">5</span>
+                <span class="section-num">4</span>
                 <h2 id="sec-disclosure">数据披露</h2>
             </div>
             <div class="op-row">
